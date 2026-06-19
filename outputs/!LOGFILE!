@@ -1,0 +1,23 @@
+ 
+============================================================ 
+ Start: 2026-05-28 16:31:16.22 
+============================================================ 
+[ERROR] neither py nor python found on PATH 
+============================================================ 
+ Recheck start: 2026-06-11 19:30:36.72 
+============================================================ 
+'!PYEXE!' is not recognized as an internal or external command,
+operable program or batch file.
+ Exit code: !EXITCODE! (time: 19:30:36.73) 
+============================================================ 
+ Recheck start: 2026-06-11 19:31:46.86 
+============================================================ 
+'!PYEXE!' is not recognized as an internal or external command,
+operable program or batch file.
+ Exit code: !EXITCODE! (time: 19:31:46.88) 
+============================================================ 
+ Recheck start: 2026-06-11 19:32:34.25 
+============================================================ 
+'!PYEXE!' is not recognized as an internal or external command,
+operable program or batch file.
+ Exit code: !EXITCODE! (time: 19:32:34.25) 

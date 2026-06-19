@@ -1,0 +1,37 @@
+# 환경 / 비밀
+.env
+.kis_token.json
+venv/
+
+# Python 아티팩트
+__pycache__/
+*.pyc
+*.pyo
+
+# 데이터 / DB / 캐시
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 모델 / 결과물
+src/models/saved/
+backtest/charts/
+
+# 로그
+logs/
+*.log
+
+# 백업 / 임시 파일
+*.bak
+*.tmp
+
+# OS 특정
+Thumbs.db
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp

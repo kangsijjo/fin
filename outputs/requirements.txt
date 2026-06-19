@@ -1,0 +1,21 @@
+# 핵심 데이터 처리
+pandas>=2.2.0
+numpy>=2.0
+requests>=2.32.0
+python-dateutil>=2.8
+
+# 환경변수 (.env 로드)
+python-dotenv>=1.0
+
+# pykrx — KRX 정보데이터시스템 (신용/공매도, 3년치 일봉)
+pykrx>=1.2.8
+
+# 엑셀 (월말 xlsx 합본)
+openpyxl>=3.1.0
+
+# 실시간 틱 (선택, kis_websocket / tick_collector 사용 시)
+websockets>=12.0
+
+# 수정주가 데이터 (선택, fdr_probe 시험용)
+finance-datareader>=0.9.0
+kiwoom-rest-api

@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PT Exit Strategy Dashboard</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: #f4f4f2;
+  color: #1a1a1a;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.container { max-width: 1280px; margin: 0 auto; padding: 28px 20px; }
+h1 { font-size: 20px; font-weight: 500; margin-bottom: 4px; }
+.subtitle { color: #666; font-size: 13px; margin-bottom: 24px; }
+
+.drop-zone {
+  border: 2px dashed #ccc;
+  border-radius: 12px;
+  padding: 36px 20px;
+  text-align: center;
+  cursor: pointer;
+  background: #fff;
+  margin-bottom: 16px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.drop-zone.drag-over { border-color: #3a6ee8; background: #f0f4ff; }
+.drop-zone input { display: none; }
+.drop-zone .dz-icon { font-size: 28px; margin-bottom: 8px; opacity: 0.5; }
+.drop-zone p { color: #666; font-size: 13px; margin-top: 4px; }
+.drop-zone strong { font-weight: 500; color: #333; }
+
+.file-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 20px; min-height: 0; }
+.file-tag {
+  font-size: 12px; background: #e8e8e6; border-radius: 6px;
+  padding: 4px 10px; color: #444;
+  display: flex; align-items: center; gap: 6px;
+}
+.file-tag .rm { cursor: pointer; color: #999; font-weight: bold; line-height: 1; }
+.file-tag .rm:hover { color: #c00; }
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+  margin-bottom: 20px;
+}
+.card { background: #fff; border: 0.5px solid rgba(0,0,0,0.1); border-radius: 10px; padding: 14px 16px; }
+.card-label { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px; }
+.card-value { font-size: 24px; font-weight: 500; }
+.card-value.pos { color: #1a7a4a; }
+.card-value.neg { color: #c03020; }
+.card-value.neu { color: #555; }
+
+.controls {
+  display: flex; align-items: center; gap: 16px;
+  margin-bottom: 14px; flex-wrap: wrap;
+}
+.controls label { font-size: 13px; color: #555; display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.controls select { font-size: 13px; padding: 4px 8px; border: 0.5px solid #ccc; border-radius: 6px; background: #fff; }
+
+.section { background: #fff; border: 0.5px solid rgba(0,0,0,0.1); border-radius: 12px; margin-bottom: 20px; overflow: hidden; }
+.section-head { padding: 16px 20px 0; }
+.section-title { font-size: 15px; font-weight: 500; margin-bottom: 2px; }
+.section-sub { font-size: 12px; color: #888; margin-bottom: 14px; }
+
+.table-wrap { overflow-x: auto; }
+table.heatmap { border-collapse: collapse; width: 100%; min-width: 500px; }
+table.heatmap th {
+  padding: 9px 12px;
+  font-size: 11px; font-weight: 500; color: #666;
+  text-align: right; background: #f8f8f6;
+  border-bottom: 1px solid rgba(0,0,0,0.08);
+  white-space: nowrap;
+}
+table.heatmap th.col-strat { text-align: left; }
+table.heatmap td {
+  padding: 7px 12px;
+  font-size: 13px;
+  border-bottom: 0.5px solid rgba(0,0,0,0.05);
+}
+table.heatmap td.col-strat { font-weight: 500; white-space: nowrap; }
+table.heatmap td.col-strat.is-core { color: #1a4fc9; }
+table.heatmap td.col-num { text-align: right; }
+table.heatmap td.col-delta {
+  text-align: right; font-weight: 500;
+  cursor: pointer; min-width: 80px;
+}
+table.heatmap td.col-delta:hover { outline: 2px solid rgba(0,0,0,0.15); outline-offset: -2px; }
+table.heatmap tr:hover td { background: rgba(0,0,0,0.015); }
+
+.badge-core {
+  font-size: 10px; padding: 2px 6px;
+  background: #e8f0fd; color: #1a4fc9;
+  border-radius: 4px; font-weight: 500;
+  vertical-align: middle;
+}
+
+/* delta color scale */
+.d-vg  { background: #c1edd4; color: #0a5228; }
+.d-g   { background: #dff4ea; color: #1a6a3a; }
+.d-z   { background: #f2f2f0; color: #888; }
+.d-r   { background: #fce8e4; color: #8a2010; }
+.d-vr  { background: #f9c8be; color: #701408; }
+.d-vvr { background: #f4a090; color: #500800; }
+
+.chart-wrap { padding: 0 20px 20px; }
+.chart-inner { position: relative; }
+
+table.detail { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.detail th {
+  padding: 8px 10px; font-size: 11px; font-weight: 500; color: #666;
+  text-align: right; background: #f8f8f6;
+  border-bottom: 1px solid rgba(0,0,0,0.08);
+}
+table.detail th:first-child { text-align: left; }
+table.detail td { padding: 7px 10px; text-align: right; border-bottom: 0.5px solid rgba(0,0,0,0.05); }
+table.detail td:first-child { text-align: left; font-weight: 500; }
+table.detail tr:nth-child(even) td { background: #fafaf8; }
+table.detail tr.base-row td { background: #f0f8ff; }
+
+.status { text-align: center; padding: 40px; color: #888; font-size: 14px; }
+
+@media (prefers-color-scheme: dark) {
+  body { background: #181818; color: #e0e0de; }
+  .drop-zone { background: #222; border-color: #444; }
+  .drop-zone.drag-over { background: #1a2040; border-color: #5070c8; }
+  .drop-zone p { color: #aaa; }
+  .drop-zone strong { color: #ddd; }
+  .file-tag { background: #2a2a2a; color: #bbb; }
+  .card, .section { background: #222; border-color: rgba(255,255,255,0.08); }
+  .card-label { color: #777; }
+  .card-value.neu { color: #ccc; }
+  table.heatmap th, table.detail th { background: #2a2a2a; color: #999; border-bottom-color: rgba(255,255,255,0.06); }
+  table.heatmap td { border-bottom-color: rgba(255,255,255,0.04); }
+  table.heatmap tr:hover td { background: rgba(255,255,255,0.03); }
+  table.detail tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+  table.detail tr.base-row td { background: rgba(60,100,160,0.2); }
+  .badge-core { background: #1a2d5c; color: #6090e8; }
+  .controls label { color: #aaa; }
+  .controls select { background: #2a2a2a; border-color: #444; color: #ddd; }
+  .d-z { background: #2a2a2a; color: #777; }
+  .d-g   { background: #1a3d28; color: #5dcf8a; }
+  .d-vg  { background: #0f2c1c; color: #5dcf8a; }
+  .d-r   { background: #3a1810; color: #f08878; }
+  .d-vr  { background: #2c1008; color: #f08878; }
+  .d-vvr { background: #200800; color: #f08878; }
+  .subtitle { color: #888; }
+}
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>Exit Strategy Test Dashboard</h1>
+<p class="subtitle">profit_target_test.py 결과 CSV → 전략 × 설정 delta_avg 히트맵</p>
+
+<div class="drop-zone" id="dropZone">
+  <input type="file" id="fileInput" accept=".csv" multiple>
+  <div class="dz-icon">📂</div>
+  <p><strong>CSV 파일을 드래그하거나 클릭해서 선택</strong></p>
+  <p>results/ 폴더의 exit_compare_*.csv 파일 여러 개를 한 번에 불러올 수 있습니다</p>
+</div>
+
+<div class="file-tags" id="fileTags"></div>
+
+<div id="status" class="status">CSV 파일을 불러오면 분석이 시작됩니다</div>
+
+<div id="main" style="display:none">
+  <div class="cards" id="summaryCards"></div>
+
+  <div class="controls">
+    <label>
+      <input type="checkbox" id="coreOnly">
+      핵심 3전략만 보기
+    </label>
+    <label>정렬:
+      <select id="sortBy">
+        <option value="name">전략명</option>
+        <option value="baseline">기존 avg_net</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <div class="section-title">전략 × 설정 delta_avg 히트맵</div>
+      <div class="section-sub">행 클릭 → 해당 전략 상세 차트. 양수(녹) = baseline 대비 개선. 음수(적) = baseline 대비 악화.</div>
+    </div>
+    <div class="table-wrap">
+      <table class="heatmap" id="heatmap"></table>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <div class="section-title" id="stratChartTitle">전략 상세 — 행을 클릭하세요</div>
+      <div class="section-sub" id="stratChartSub">각 설정에서의 delta_avg (%p)</div>
+    </div>
+    <div class="chart-wrap">
+      <div class="chart-inner" style="height: 260px">
+        <canvas id="stratChart" role="img" aria-label="Strategy delta comparison">Strategy delta chart</canvas>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <div class="section-title">설정별 평균 delta_avg</div>
+      <div class="section-sub">전체(또는 필터된) 전략의 delta_avg 평균 — 어떤 설정이 가장 덜 나쁜지</div>
+    </div>
+    <div class="chart-wrap">
+      <div class="chart-inner" style="height: 200px">
+        <canvas id="summaryChart" role="img" aria-label="Average delta by config">Average delta chart</canvas>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" id="detailSection" style="display:none">
+    <div class="section-head">
+      <div class="section-title" id="detailTitle">상세 지표</div>
+      <div class="section-sub">기존(baseline) 대비 각 설정의 전체 지표 비교</div>
+    </div>
+    <div class="table-wrap" style="padding: 0 0 20px;">
+      <table class="detail" id="detailTable"></table>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const CORE = ['high_52w_filt', 'for_high20_mkt', 'rsi_reversal'];
+const isCore = s => CORE.some(c => s.toLowerCase().includes(c.toLowerCase()));
+
+let allData = {};       // configName → [{strategy, mode, ...metrics}]
+let baseline = {};      // strategy → row
+let stratChart = null, summaryChart = null;
+let fileMap = {};       // filename → configName (for removal)
+
+// ── File handling ────────────────────────────────────────────────
+const dz = document.getElementById('dropZone');
+const fi = document.getElementById('fileInput');
+dz.addEventListener('click', () => fi.click());
+dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag-over'); });
+dz.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
+dz.addEventListener('drop', e => { e.preventDefault(); dz.classList.remove('drag-over'); loadFiles(e.dataTransfer.files); });
+fi.addEventListener('change', e => { loadFiles(e.target.files); fi.value = ''; });
+document.getElementById('coreOnly').addEventListener('change', renderAll);
+document.getElementById('sortBy').addEventListener('change', renderAll);
+
+function loadFiles(files) {
+  [...files].forEach(file => {
+    Papa.parse(file, {
+      header: true, skipEmptyLines: true,
+      complete: result => {
+        const rows = result.data.map(r => ({
+          strategy:      (r.strategy || '').trim(),
+          mode:          (r.mode || '').trim(),
+          n:             +r.n || 0,
+          win_pct:       pf(r.win_pct),
+          avg_net:       pf(r.avg_net),
+          median:        pf(r.median),
+          std:           pf(r.std),
+          profit_factor: pf(r.profit_factor),
+          sharpe:        pf(r.sharpe),
+          avg_hold:      pf(r.avg_hold),
+          hit_tgt:       (r.hit_target_pct === '-' || !r.hit_target_pct) ? null : pf(r.hit_target_pct),
+          delta_avg:     (r.delta_avg === '' || r.delta_avg === undefined) ? null : pf(r.delta_avg),
+        })).filter(r => r.strategy);
+
+        rows.filter(r => r.mode === '기존').forEach(r => {
+          if (!baseline[r.strategy]) baseline[r.strategy] = r;
+        });
+
+        const overlays = rows.filter(r => r.mode !== '기존');
+        if (overlays.length) {
+          const cfg = overlays[0].mode;
+          allData[cfg] = overlays;
+          fileMap[file.name] = cfg;
+          addFileTag(file.name, cfg);
+        }
+        renderAll();
+      }
+    });
+  });
+}
+
+function pf(v) {
+  if (v === undefined || v === null || v === '' || v === '-') return 0;
+  return parseFloat(String(v).replace(',','')) || 0;
+}
+
+function addFileTag(fname, cfg) {
+  const tags = document.getElementById('fileTags');
+  if (document.querySelector(`.file-tag[data-fname="${CSS.escape(fname)}"]`)) return;
+  const d = document.createElement('div');
+  d.className = 'file-tag';
+  d.dataset.fname = fname;
+  d.innerHTML = `📄 ${fname.replace('.csv','')} <span class="rm" title="제거">×</span>`;
+  d.querySelector('.rm').addEventListener('click', () => {
+    delete allData[cfg];
+    d.remove();
+    renderAll();
+  });
+  tags.appendChild(d);
+}
+
+// ── Render pipeline ──────────────────────────────────────────────
+function renderAll() {
+  const configs = Object.keys(allData).sort();
+  const coreOnly = document.getElementById('coreOnly').checked;
+  const sortBy = document.getElementById('sortBy').value;
+
+  let strats = [...new Set([
+    ...Object.keys(baseline),
+    ...configs.flatMap(c => allData[c].map(r => r.strategy))
+  ])];
+  if (coreOnly) strats = strats.filter(s => isCore(s));
+  if (sortBy === 'baseline') {
+    strats.sort((a, b) => (baseline[b]?.avg_net || 0) - (baseline[a]?.avg_net || 0));
+  } else {
+    strats.sort();
+  }
+
+  const hasData = configs.length > 0 && strats.length > 0;
+  document.getElementById('main').style.display = hasData ? '' : 'none';
+  document.getElementById('status').style.display = hasData ? 'none' : '';
+
+  if (!hasData) return;
+
+  renderCards(strats, configs);
+  renderHeatmap(strats, configs);
+  renderSummaryChart(strats, configs);
+}
+
+function renderCards(strats, configs) {
+  let nPos = 0, nNeg = 0, nTotal = 0;
+  configs.forEach(c => {
+    allData[c].filter(r => strats.includes(r.strategy)).forEach(r => {
+      if (r.delta_avg !== null) {
+        nTotal++;
+        if (r.delta_avg > 0) nPos++;
+        else if (r.delta_avg < 0) nNeg++;
+      }
+    });
+  });
+
+  // Best config by avg delta
+  let bestCfg = '-', bestAvg = -Infinity;
+  configs.forEach(c => {
+    const ds = allData[c].filter(r => strats.includes(r.strategy) && r.delta_avg !== null).map(r => r.delta_avg);
+    if (ds.length) {
+      const avg = ds.reduce((a,b) => a+b, 0) / ds.length;
+      if (avg > bestAvg) { bestAvg = avg; bestCfg = c; }
+    }
+  });
+
+  document.getElementById('summaryCards').innerHTML = `
+    <div class="card"><div class="card-label">테스트 설정</div><div class="card-value neu">${configs.length}개</div></div>
+    <div class="card"><div class="card-label">전략 수</div><div class="card-value neu">${strats.length}개</div></div>
+    <div class="card"><div class="card-label">baseline 개선</div><div class="card-value pos">${nPos}건</div></div>
+    <div class="card"><div class="card-label">baseline 악화</div><div class="card-value neg">${nNeg}건</div></div>
+    <div class="card"><div class="card-label">최선 설정</div><div class="card-value neu" style="font-size:14px;padding-top:4px">${bestCfg}</div></div>
+  `;
+}
+
+function renderHeatmap(strats, configs) {
+  let html = '<thead><tr><th class="col-strat">전략</th><th class="col-num" style="min-width:90px">기존 avg_net</th>';
+  configs.forEach(c => { html += `<th class="col-delta">${c}</th>`; });
+  html += '</tr></thead><tbody>';
+
+  strats.forEach(s => {
+    const base = baseline[s];
+    const core = isCore(s);
+    html += `<tr data-strat="${s}">`;
+    html += `<td class="col-strat${core?' is-core':''}">${s}${core?` <span class="badge-core">핵심</span>`:''}</td>`;
+    html += `<td class="col-num">${base ? fmt(base.avg_net) + '%' : '-'}</td>`;
+    configs.forEach(c => {
+      const row = (allData[c]||[]).find(r => r.strategy === s);
+      const d = row?.delta_avg;
+      const cls = dClass(d);
+      const txt = d === null || d === undefined ? '-' : (d >= 0 ? '+' : '') + d.toFixed(2) + '%';
+      html += `<td class="col-delta ${cls}" data-config="${c}">${txt}</td>`;
+    });
+    html += '</tr>';
+  });
+
+  html += '</tbody>';
+  const tbl = document.getElementById('heatmap');
+  tbl.innerHTML = html;
+
+  tbl.querySelectorAll('tr[data-strat]').forEach(row => {
+    row.addEventListener('click', () => {
+      const s = row.dataset.strat;
+      tbl.querySelectorAll('tr').forEach(r => r.style.background = '');
+      row.style.background = 'rgba(60,120,220,0.06)';
+      showStratDetail(s, configs);
+    });
+  });
+}
+
+function dClass(d) {
+  if (d === null || d === undefined) return 'd-z';
+  if (d >= 1.0)  return 'd-vg';
+  if (d >= 0.05) return 'd-g';
+  if (d >= -0.05) return 'd-z';
+  if (d >= -0.5)  return 'd-r';
+  if (d >= -1.0)  return 'd-vr';
+  return 'd-vvr';
+}
+
+function renderSummaryChart(strats, configs) {
+  const avgs = configs.map(c => {
+    const ds = (allData[c]||[]).filter(r => strats.includes(r.strategy) && r.delta_avg !== null).map(r => r.delta_avg);
+    return ds.length ? +(ds.reduce((a,b)=>a+b,0)/ds.length).toFixed(3) : null;
+  });
+
+  if (summaryChart) summaryChart.destroy();
+  summaryChart = new Chart(document.getElementById('summaryChart'), {
+    type: 'bar',
+    data: {
+      labels: configs,
+      datasets: [{
+        label: '평균 delta_avg',
+        data: avgs,
+        backgroundColor: avgs.map(d => d === null ? '#ccc' : (d >= 0 ? 'rgba(42,160,100,0.55)' : 'rgba(200,60,40,0.55)')),
+        borderColor: avgs.map(d => d === null ? '#aaa' : (d >= 0 ? '#1a7a4a' : '#a02820')),
+        borderWidth: 1,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false },
+        tooltip: { callbacks: { label: ctx => ` ${ctx.parsed.y >= 0 ? '+' : ''}${ctx.parsed.y?.toFixed(3)}%p` }}
+      },
+      scales: {
+        y: { grid: { color: 'rgba(128,128,128,0.1)' }, ticks: { callback: v => (v>=0?'+':'')+v.toFixed(1)+'%' }},
+        x: { grid: { display: false }, ticks: { autoSkip: false, maxRotation: 30 } }
+      }
+    }
+  });
+}
+
+// ── Strategy detail ───────────────────────────────────────────────
+function showStratDetail(strat, configs) {
+  document.getElementById('stratChartTitle').textContent = strat + ' — delta_avg by config';
+  document.getElementById('stratChartSub').textContent = '각 설정에서 baseline 대비 avg_net 변화 (%p). 양수 = 개선.';
+
+  const deltas = configs.map(c => {
+    const row = (allData[c]||[]).find(r => r.strategy === strat);
+    return row?.delta_avg ?? null;
+  });
+
+  if (stratChart) stratChart.destroy();
+  stratChart = new Chart(document.getElementById('stratChart'), {
+    type: 'bar',
+    data: {
+      labels: configs,
+      datasets: [{
+        label: 'delta_avg (%p)',
+        data: deltas.map(d => d === null ? null : +d.toFixed(3)),
+        backgroundColor: deltas.map(d => d === null ? '#ccc' : (d >= 0 ? 'rgba(42,160,100,0.6)' : 'rgba(200,60,40,0.6)')),
+        borderColor: deltas.map(d => d === null ? '#aaa' : (d >= 0 ? '#1a7a4a' : '#a02820')),
+        borderWidth: 1,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false },
+        tooltip: { callbacks: { label: ctx => ` delta: ${ctx.parsed.y >= 0 ? '+' : ''}${ctx.parsed.y?.toFixed(3) ?? '-'}%p` }}
+      },
+      scales: {
+        y: { grid: { color: 'rgba(128,128,128,0.1)' }, ticks: { callback: v => (v>=0?'+':'')+v.toFixed(1)+'%' }},
+        x: { grid: { display: false }, ticks: { autoSkip: false, maxRotation: 30 } }
+      }
+    }
+  });
+
+  // Detail table
+  document.getElementById('detailTitle').textContent = strat + ' — 전체 지표 비교';
+  document.getElementById('detailSection').style.display = '';
+
+  const heads = ['모드', 'n', '승률', 'avg_net', 'median', 'std', 'PF', 'sharpe', '평균보유일', 'target도달%', 'delta'];
+  let html = '<thead><tr>' + heads.map(h => `<th>${h}</th>`).join('') + '</tr></thead><tbody>';
+
+  const base = baseline[strat];
+  if (base) {
+    html += `<tr class="base-row"><td>${base.mode}</td><td>${base.n.toLocaleString()}</td><td>${fmt(base.win_pct)}%</td><td>${fmt(base.avg_net)}%</td><td>${fmt(base.median)}%</td><td>${fmt(base.std)}</td><td>${fmt(base.profit_factor)}</td><td>${fmt(base.sharpe)}</td><td>${fmt(base.avg_hold)}</td><td>-</td><td>-</td></tr>`;
+  }
+
+  configs.forEach(c => {
+    const row = (allData[c]||[]).find(r => r.strategy === strat);
+    if (!row) { html += `<tr><td>${c}</td><td colspan="10" style="color:#aaa;text-align:center">데이터 없음</td></tr>`; return; }
+    const d = row.delta_avg;
+    const dStr = d === null ? '-' : (d >= 0 ? '+' : '') + d.toFixed(2) + '%';
+    const dColor = d === null ? '' : (d >= 0 ? 'color:#1a7a4a;font-weight:500' : 'color:#c03020;font-weight:500');
+    const hitStr = row.hit_tgt !== null ? fmt(row.hit_tgt) + '%' : '-';
+    html += `<tr>
+      <td>${row.mode}</td>
+      <td>${row.n.toLocaleString()}</td>
+      <td>${fmt(row.win_pct)}%</td>
+      <td>${fmt(row.avg_net)}%</td>
+      <td>${fmt(row.median)}%</td>
+      <td>${fmt(row.std)}</td>
+      <td>${fmt(row.profit_factor)}</td>
+      <td>${fmt(row.sharpe)}</td>
+      <td>${fmt(row.avg_hold)}</td>
+      <td>${hitStr}</td>
+      <td style="${dColor}">${dStr}</td>
+    </tr>`;
+  });
+
+  html += '</tbody>';
+  document.getElementById('detailTable').innerHTML = html;
+  document.getElementById('detailSection').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function fmt(v) {
+  if (v === null || v === undefined) return '-';
+  return parseFloat(v).toFixed(2);
+}
+</script>
+</body>
+</html>

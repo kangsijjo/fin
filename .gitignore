@@ -1,0 +1,81 @@
+# ============================================================
+#  C:\fin monorepo — outputs(매매) + Stock_AI_Project(데이터)
+#  재생성 가능한 데이터·대용량·시크릿은 추적하지 않는다.
+# ============================================================
+
+# ---------- 보안 (절대 커밋 금지) ----------
+.env
+.env.*
+*.token
+*.secret
+*.key
+*token*.json
+.kis_token.json
+.kis_mock_token.json
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ---------- 가상환경 ----------
+venv/
+.venv/
+env/
+
+# ---------- DB / 모델 아티팩트 (재생성 가능, 대용량) ----------
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.pkl
+src/models/saved/
+
+# ---------- 수집/생성 데이터 (재수집 가능, 대용량) ----------
+db/
+data/
+macro_data/
+results/
+ai_data/*.csv
+ai_data/*.pkl
+
+# 루트 대용량 산출물
+trades_history*.csv
+paper_signals.csv
+paper_signals.csv.bak
+paper_audit_result.csv
+paper_trades.db
+
+# ---------- 로그 ----------
+logs/
+*.log
+!LOGFILE!
+
+# ---------- 백업 / 임시 ----------
+_backups/
+*.bak
+*.csv.bak
+*.tmp
+*.swp
+
+# ---------- 빈 클론 폴더 (monorepo 셋업 후 삭제됨) ----------
+/fin/
+
+# ---------- OS / 에디터 ----------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ============================================================
+#  추적하는 것 (참고):
+#   - 모든 *.py, *.md, *.bat, *.ps1, *.html, *.txt
+#   - sector_mapping.csv, name_cache.csv (소형 설정/캐시)
+#   - requirements*.txt, config.py, config.yaml
+#   - strategies/  src/  등 코드 트리
+# ============================================================
