@@ -1,7 +1,13 @@
 # 천억이 — KOSDAQ 자동매매 시스템 사용 가이드
 
 **구성: 1부 사용법(이것만 봐도 운영 가능) → 2부 돌아가는 원리·파일 상세 → 3부 업데이트 내역.**
-최종 업데이트: 2026-06-19 (8차 — 대시보드 버그 수정 + 운영 지침 추가).
+최종 업데이트: 2026-06-19 (8차 — 대시보드 버그 수정 + 운영 지침 추가 / 9차 — 정합성 배너 추가).
+
+> ⚠️ **정정 주의 — 운영 기준 단일 출처는 `시스템_설명서.md` 다.** 이 문서의 상단(안C/안D 포트폴리오, 1.5·1.5b·1.5c)은 현행이지만, **"2부 돌아가는 원리"와 일부 명령 표는 옛 단일전략·구 스케줄러 기준이라 최신이 아니다.** 핵심 정정:
+> - **스케줄 등록**은 현행 **`register_tasks.ps1`**(평일 18:30 신호) 만 사용한다. **`install_scheduler.ps1` 는 폐기 — 절대 재실행 금지**(폐기된 15:50/16:05/20:00 등 10작업을 다시 등록해 현행과 충돌). 본문에 나오는 "`install_scheduler.ps1` 재실행/재등록" 지시는 모두 무시하고 `register_tasks.bat`(관리자) 로 재등록.
+> - **삭제된 스크립트**: `walkforward.py`, `seed_paper_signals.py`(→ `cleanup_legacy.bat` 로 제거됨). 본문의 해당 실행 명령은 동작하지 않는다. 견고성/시드는 `strategy_verify.py`·`paper_audit.py` 로 대체.
+> - **전략**: 현행은 **3전략 병렬(안C/안D)**. 본문 "메인 전략 high_500d_h40_MKT" 단일 서술은 분석 이력이다.
+> - **데이터 수집 소유자**는 Stock_AI_Project(06:30). "천억이 pykrx 16:05 수집" 서술은 폐기.
 
 **키움 모의 — 안C 포트폴리오 (10슬롯, 2026-06-17~)**: 슬롯 1~4 `high_52w_filt` (52주 신고가+게이트, 20일) / 슬롯 5~8 `rsi_reversal` (RSI<30 반전, 5일) / 슬롯 9~10 `rsi_vol` (RSI<30+거래량2배, 7일). 청산 오버레이 없음(만기 보유 최적).
 
@@ -77,7 +83,7 @@
 | 신용잔고 API 단독 검증 | `python credit_collector.py probe` |
 | CA(액면분할)필터 표본 검증 | `python adjusted_probe.py` |
 | **팩터 스코어 단독 테스트** | `python factor_scorer.py` (IC 가중치 + 현재 피처 점수 출력) |
-| 스케줄 재등록 (KIS_* 작업) | `.\install_scheduler.ps1` (자동으로 관리자 권한 요청) |
+| 스케줄 재등록 | `register_tasks.bat` 우클릭 → 관리자 실행 (구 `install_scheduler.ps1` 폐기 — 쓰지 말 것) |
 | **StockAI 작업 등록 (1회만)** | `register_tasks.bat` 우클릭 → 관리자 권한으로 실행 |
 | **대시보드 시작** | `start_dashboard.bat` 더블클릭 (venv 자동 선택) |
 | 대시보드 수동 시작 | `(.venv) > python integrated_dashboard_server.py` → 브라우저 `http://localhost:5050` |
@@ -120,7 +126,7 @@ KIWOOM_PROD_APP_SECRET=실전용_시크릿
 ```
 2. `pip install kiwoom-rest-api` (.venv 활성화 후 — PyPI 명칭 주의, "kiwoom-api" 아님)
 3. 연결 검증: `python kiwoom_trader.py status` → 예수금/잔고가 나오면 OK
-4. `.\install_scheduler.ps1` 재실행 (KIS_Kiwoom 16:05 등록)
+4. `register_tasks.bat` 우클릭 → 관리자 실행 (현행 스케줄 등록. 구 `install_scheduler.ps1` 쓰지 말 것)
 
 **수동 명령**: `python kiwoom_trader.py [status|buy|sell|daily]`
 
