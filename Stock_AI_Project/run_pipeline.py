@@ -26,7 +26,7 @@ def main():
         '--step',
         type=str,
         default='all',
-        choices=['all', 'scan', 'collect', 'indicators', 'train', 'backtest', 'trade'],
+        choices=['all', 'scan', 'collect', 'indicators', 'train', 'backtest'],
         help="실행할 단계를 선택하세요 (기본값: all)"
     )
     parser.add_argument(
@@ -46,7 +46,6 @@ def main():
     'indicators': ("src.processor.indicators all",  "2. 지표 생성 (전 섹터)"),
     'train':      ("src.models.train all",          "3. 전 섹터 모델 학습"),
     'backtest':   ("src.trader.backtest all",       "4. 백테스트 및 FinRL 데이터 생성"),
-    'trade':      ("src.trader.rule_trader",        "5. 모의투자 매매 실행"),
 }
  
     if args.step == 'all':

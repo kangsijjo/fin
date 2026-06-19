@@ -122,27 +122,6 @@ def _is_weekday():
     매매/모니터 작업은 평일에만 동작하도록 차단한다."""
     return datetime.now().weekday() < 5
 
-def korea_trade_job():
-    """매일 10:05 - 한국 모의투자 KIS API 매매 + Top-1 paper-trade 기록/청산"""
-    if not _is_weekday():
-        log("주말 - 한국 매매 스킵")
-        return
-    _run_subprocess("한국 KIS 매매",
-                    [sys.executable, "-m", "src.trader.auto_trader", "--market", "korea"])
-    _run_subprocess("한국 Top-1 paper-trade",
-                    [sys.executable, "track_top1.py", "all", "--market", "korea"])
-
-def korea_intraday_monitor_job():
-    """매일 09:00 - 한국장 장중 손절/익절 폴링 모니터 (15:30 자동 종료)
-    별도 프로세스로 띄워 매매 작업과 분리한다 (subprocess.Popen 비동기)."""
-    if not _is_weekday():
-        return
-    log("===== 한국 장중 모니터 시작 =====")
-    subprocess.Popen(
-        [sys.executable, "-m", "src.trader.intraday_monitor",
-         "--market", "korea", "--interval", "60"]
-    )
-
 def korea_market_scanner_job():
     """매일 09:00 - 거래량/등락률 상위 종목 분당 폴링 (live_movers 누적, 15:30 자동 종료).
     매수에는 미연결, 데이터 누적만."""
@@ -154,32 +133,10 @@ def korea_market_scanner_job():
          "--interval", "60", "--count", "20"]
     )
 
-def usa_intraday_monitor_job():
-    """매일 23:35 - 미국 장중 손절/익절 폴링 모니터"""
-    if not _is_weekday():
-        return
-    log("===== 미국 장중 모니터 시작 =====")
-    subprocess.Popen(
-        [sys.executable, "-m", "src.trader.intraday_monitor",
-         "--market", "usa", "--interval", "60"]
-    )
-
 def usa_scan_job():
     """매일 22:20 - 미국장 전 섹터 스캔 (USA 시장 대상)"""
     log("===== 미국장 전 섹터 스캔 =====")
     run_pipeline('scan', market='usa')
-
-def usa_trade_job():
-    """매일 22:30 - 미국 모의투자 KIS API 매매 + Top-1 paper-trade
-    주의: 기존엔 --market 없이 실행되어 auto_trader 기본값(korea)으로
-    한국 종목을 22:30 에 재매수하던 버그가 있었음."""
-    if not _is_weekday():
-        log("주말 - 미국 매매 스킵")
-        return
-    _run_subprocess("미국 KIS 매매",
-                    [sys.executable, "-m", "src.trader.auto_trader", "--market", "usa"])
-    _run_subprocess("미국 Top-1 paper-trade",
-                    [sys.executable, "track_top1.py", "all", "--market", "usa"])
 
 def dart_realtime_job():
     """30분마다 DART 공시 수집 + 감성분석.
@@ -263,12 +220,8 @@ def heartbeat_job():
 # 스케줄 등록
 schedule.every().day.at("06:30").do(daily_data_job)               # 데이터 수집
 schedule.every().day.at("06:50").do(morning_scan_job)             # 섹터 스캔
-# [2026-06-14] 역할 분리: KIS 모의투자 매매는 천억이(kiwoom_trader.py) 단독 담당.
-# Stock_AI_Project 는 데이터 수집/학습만. 아래 4줄 비활성화.
-# schedule.every().day.at("09:00").do(korea_intraday_monitor_job)   # 한국 장중 모니터 — 비활성화
-# schedule.every().day.at("10:05").do(korea_trade_job)              # 한국 KIS 매매 — 비활성화
-# schedule.every().day.at("22:30").do(usa_trade_job)                # 미국 KIS 매매 — 비활성화
-# schedule.every().day.at("23:35").do(usa_intraday_monitor_job)     # 미국 장중 모니터 — 비활성화
+# [2026-06-14] 역할 분리 / [2026-06-19] 트레이딩 모듈 제거:
+# 모든 매매·장중모니터는 천억이(outputs)가 단독 담당. Stock_AI_Project 는 데이터 수집/학습 전용.
 schedule.every().day.at("09:00").do(korea_market_scanner_job)     # 한국 시장 스캐너 (데이터 수집)
 schedule.every().day.at("22:20").do(usa_scan_job)                 # 미국 스캔 (데이터 수집)
 schedule.every(30).minutes.do(dart_realtime_job)                  # DART 30분마다
@@ -282,13 +235,6 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == 'all':
         log("전체 파이프라인 즉시 실행")
         run_pipeline('all')
-
-    elif len(sys.argv) > 1 and sys.argv[1] == 'trade':
-        log("매매만 즉시 실행")
-        subprocess.run(
-            [sys.executable, "-m", "src.trader.auto_trader"],
-            check=False
-        )
 
     elif len(sys.argv) > 1 and sys.argv[1] == 'dart':
         log("DART 공시 즉시 수집")
