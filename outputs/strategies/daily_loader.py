@@ -15,15 +15,21 @@ DATA_DIR = "./macro_data/daily"
 CACHE_PATH = f"{DATA_DIR}/_daily_cache.pkl"
 
 
+# 로더 로직 버전 — 올리면 기존 캐시(_daily_cache.pkl)가 자동 무효화돼 재생성된다.
+# v2: 중복 컬럼 coalesce 수정 (2026-06-19) — 이전 캐시는 trading_value/change_pct 가 깨져 있어 무효.
+_LOADER_VERSION = 2
+
+
 def _cache_signature(files):
-    """파일 개수 + 마지막 파일명 + 총 크기 — 추가/변경 시 캐시 무효화."""
+    """로더버전 + 파일 개수 + 마지막 파일명 + 총 크기 — 변경 시 캐시 무효화."""
     total = 0
     for f in files:
         try:
             total += os.path.getsize(f)
         except OSError:
             pass
-    return (len(files), os.path.basename(files[-1]) if files else "", total)
+    return (_LOADER_VERSION, len(files),
+            os.path.basename(files[-1]) if files else "", total)
 
 
 def load_macro_daily(start_date=None, end_date=None) -> pd.DataFrame:
@@ -75,8 +81,17 @@ def load_macro_daily(start_date=None, end_date=None) -> pd.DataFrame:
         "시가총액": "market_cap",
     }
     full = full.rename(columns=rename)
-    # 중복 컬럼 제거 — 한글+영문이 동시에 존재하는 CSV 혼재 시 발생 (첫 번째 유지)
-    full = full.loc[:, ~full.columns.duplicated()]
+    # 중복 컬럼 병합 — 옛 한글 파일(거래대금/등락률)과 최근 영문 파일(trading_value/change_pct)이
+    # 섞이면 rename 후 같은 이름 컬럼이 둘 생긴다. 단순 중복제거(첫 컬럼 유지)는 한쪽만 채워진
+    # 값을 버려 최근 trading_value/change_pct 가 NaN 이 되고 → 신호 필터(tv>=10억, 시장게이트)가
+    # 전멸해 모든 전략이 0건이 된다 (2026-06-19 발견·수정).
+    # → 같은 이름 컬럼들을 행별 coalesce(좌→우 첫 non-NaN)로 병합한다.
+    if full.columns.duplicated().any():
+        for _dup in full.columns[full.columns.duplicated()].unique():
+            _cols = full.loc[:, full.columns == _dup]
+            _merged = _cols.bfill(axis=1).iloc[:, 0]
+            full = full.loc[:, full.columns != _dup]
+            full[_dup] = _merged
     # 누락 컬럼 0 채움 (옛 데이터 호환)
     for c in ["trading_value", "change_pct", "market_cap",
               "foreign_net", "inst_net"]:
