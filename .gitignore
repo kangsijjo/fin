@@ -43,6 +43,10 @@ macro_data/
 results/
 ai_data/*.csv
 ai_data/*.pkl
+ai_data/*.json          # 학습 산출물(meta_model_v4.json 등) — ai_trainer 가 재생성
+
+# 생성되는 대시보드 HTML (dashboard_generator 산출물). 템플릿(intraday/pt)은 추적 유지.
+dashboard.html
 
 # 루트 대용량 산출물
 trades_history*.csv
