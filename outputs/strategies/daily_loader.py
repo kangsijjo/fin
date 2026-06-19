@@ -13,6 +13,7 @@ DATA_DIR = "./macro_data/daily"
 
 
 CACHE_PATH = f"{DATA_DIR}/_daily_cache.pkl"
+SIG_PATH   = f"{DATA_DIR}/_daily_cache.sig.json"   # 사이드카: 큰 피클을 읽기 전 유효성 판단용
 
 
 # 로더 로직 버전 — 올리면 기존 캐시(_daily_cache.pkl)가 자동 무효화돼 재생성된다.
@@ -32,6 +33,26 @@ def _cache_signature(files):
             os.path.basename(files[-1]) if files else "", total)
 
 
+def _read_sig():
+    """사이드카 시그니처 로드 (없거나 깨지면 None)."""
+    try:
+        import json
+        with open(SIG_PATH, "r", encoding="utf-8") as fh:
+            return tuple(json.load(fh))
+    except Exception:
+        return None
+
+
+def _write_sig(sig):
+    """사이드카 시그니처 기록 (실패 무시)."""
+    try:
+        import json
+        with open(SIG_PATH, "w", encoding="utf-8") as fh:
+            json.dump(list(sig), fh)
+    except Exception:
+        pass
+
+
 def load_macro_daily(start_date=None, end_date=None) -> pd.DataFrame:
     """
     Returns: DataFrame[code, date, open, high, low, close, volume,
@@ -48,15 +69,16 @@ def load_macro_daily(start_date=None, end_date=None) -> pd.DataFrame:
 
     use_cache = (start_date is None and end_date is None)
     if use_cache and os.path.exists(CACHE_PATH):
-        try:
-            import pickle
-            with open(CACHE_PATH, "rb") as fh:
-                cached = pickle.load(fh)
-            if cached.get("sig") == _cache_signature(files):
-                return cached["df"]
+        # 사이드카 시그니처로 먼저 판단 — 무효면 324MB 피클을 읽지 않고 바로 재생성.
+        if _read_sig() == _cache_signature(files):
+            try:
+                import pickle
+                with open(CACHE_PATH, "rb") as fh:
+                    return pickle.load(fh)["df"]
+            except Exception:
+                pass
+        else:
             print("  [loader] 캐시 무효 (데이터 변경) — 재생성")
-        except Exception:
-            pass
 
     dfs = []
     for f in files:
@@ -118,6 +140,7 @@ def load_macro_daily(start_date=None, end_date=None) -> pd.DataFrame:
                 pickle.dump({"sig": _cache_signature(files), "df": full}, fh,
                             protocol=pickle.HIGHEST_PROTOCOL)
             os.replace(tmp, CACHE_PATH)
+            _write_sig(_cache_signature(files))   # 사이드카도 함께 기록
             print(f"  [loader] 캐시 저장 ({len(full):,}행) — 다음 로드부터 수 초")
         except Exception as e:
             print(f"  [loader] 캐시 저장 실패 (무시): {e}")
