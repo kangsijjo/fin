@@ -50,6 +50,10 @@ set "EXITCODE=2"
 goto :report
 
 :runsteps
+REM [2026-06-19 가드] pykrx_collector 는 stock.db(korea_stocks, supply_demand)에 쓴다.
+REM   이 테이블의 정기 수집 소유자는 Stock_AI_Project(06:30 main_collector)다.
+REM   여기서의 호출은 수동 백필/보강용. 스키마가 Stock_AI 와 갈라지면 drift 위험 →
+REM   Stock_AI 쪽 스키마 변경 시 pykrx_collector 도 같이 맞출 것. 정기 자동수집을 천억이로 되돌리지 말 것.
 echo === pykrx_collector === >> "!LOGFILE!"
 !PYEXE! pykrx_collector.py >> "!LOGFILE!" 2>&1
 if !ERRORLEVEL! NEQ 0 set "EXITCODE=1"

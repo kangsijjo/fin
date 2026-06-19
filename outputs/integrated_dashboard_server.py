@@ -453,8 +453,8 @@ def get_kis_mock(date_from="", date_to=""):
         "slot_status": [],
         "signals_total": 0,
     }
-    # 스냅샷
-    snap_path = KIS_DIR / "kis_snapshot.json"
+    # 스냅샷 — kis_trader.py 가 db/kiwoom/kis_snapshot.json 에 기록(orders 와 같은 폴더). db/kis 아님.
+    snap_path = KIWOOM_DIR / "kis_snapshot.json"
     if snap_path.exists():
         try:
             out["snapshot"] = json.loads(snap_path.read_text(encoding="utf-8"))
