@@ -111,6 +111,20 @@ def daily_data_job():
         log("transformers 미설치 - 뉴스/공시 수집 스킵", level='WARNING')
     log("===== 일일 데이터 수집 완료 =====")
 
+def daily_macro_job():
+    """매일 06:40 - 거시지표 수집 (NASDAQ/VIX/SOX/환율).
+
+    미국장 마감(16:00 ET ≈ KST 05~06시) 데이터를 FinanceDataReader 로 받아
+    stock.db macro_indicators 에 INSERT OR REPLACE(자가치유) 저장한다.
+    main_collector(OHLCV) 가 macro 를 다루지 않아 별도 수집이 필요하다
+    (2026-06-19 추가 — 이전엔 스케줄 누락으로 macro 가 정체됐었음).
+    06:30 OHLCV 직후·06:50 스캔 직전. FinanceDataReader 는 키움/KIS 와 다른 소스라 토큰 충돌 없음.
+    macro 피처(vix/usdkrw/sox)는 live_signal(18:30)·주간학습이 사용하므로 아침에 갱신 완료해야 함."""
+    log("===== 거시지표 수집 시작 =====")
+    _run_subprocess("거시지표(NASDAQ/VIX/환율) 수집",
+                    [sys.executable, "-m", "src.collector.macro"])
+    log("===== 거시지표 수집 완료 =====")
+
 def morning_scan_job():
     """매일 06:50 - 섹터 스캔"""
     log("===== 모닝 섹터 스캔 시작 =====")
@@ -218,7 +232,8 @@ def heartbeat_job():
         log("♥ alive (no upcoming jobs)")
 
 # 스케줄 등록
-schedule.every().day.at("06:30").do(daily_data_job)               # 데이터 수집
+schedule.every().day.at("06:30").do(daily_data_job)               # 데이터 수집 (OHLCV+수급+뉴스)
+schedule.every().day.at("06:40").do(daily_macro_job)             # 거시지표 (NASDAQ/VIX/환율) — OHLCV 직후
 schedule.every().day.at("06:50").do(morning_scan_job)             # 섹터 스캔
 # [2026-06-14] 역할 분리 / [2026-06-19] 트레이딩 모듈 제거:
 # 모든 매매·장중모니터는 천억이(outputs)가 단독 담당. Stock_AI_Project 는 데이터 수집/학습 전용.
@@ -246,6 +261,7 @@ if __name__ == "__main__":
     else:
         log("스케줄러 시작 (데이터 수집 전용 모드)")
         log("06:30 daily_data_job  - OHLCV + 수급(KIS) + 뉴스")
+        log("06:40 daily_macro_job  - 거시지표 (NASDAQ/VIX/환율)")
         log("06:50 morning_scan_job - 섹터 스캔")
         log("09:00 korea_market_scanner_job - 한국 시장 스캐너 (데이터 누적)")
         log("22:20 usa_scan_job - 미국장 전 스캔")
