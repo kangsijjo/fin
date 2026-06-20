@@ -39,6 +39,7 @@ def get_all_tickers():
     except Exception:
         sector_overrides = {}
 
+    korea_ok = False
     logger.info("KOSPI 종목 리스트 가져오는 중...")
     try:
         kospi = fdr.StockListing('KOSPI')[['Code', 'Name', 'Dept']].copy()
@@ -47,9 +48,10 @@ def get_all_tickers():
             lambda r: sector_overrides.get(r['ticker'], r['sector']), axis=1)
         kospi['market'] = 'korea'
         tickers.append(kospi)
+        korea_ok = True
         logger.info(f"KOSPI {len(kospi)}개 종목 확인")
     except Exception as e:
-        logger.error(f"KOSPI 리스트 가져오기 실패: {e}", exc_info=True)
+        logger.error(f"KOSPI 리스트 가져오기 실패: {e}")
 
     logger.info("KOSDAQ 종목 리스트 가져오는 중...")
     try:
@@ -59,9 +61,31 @@ def get_all_tickers():
             lambda r: sector_overrides.get(r['ticker'], r['sector']), axis=1)
         kosdaq['market'] = 'korea'
         tickers.append(kosdaq)
+        korea_ok = True
         logger.info(f"KOSDAQ {len(kosdaq)}개 종목 확인")
     except Exception as e:
-        logger.error(f"KOSDAQ 리스트 가져오기 실패: {e}", exc_info=True)
+        logger.error(f"KOSDAQ 리스트 가져오기 실패: {e}")
+
+    # [폴백] KRX(data.krx.co.kr)가 점검/차단으로 종목 리스트를 막으면(JSON 대신 점검 HTML)
+    # KOSPI·KOSDAQ 둘 다 실패한다. 이때 기존 korea_stocks 의 종목 유니버스로 수집을 이어간다.
+    # (가격 엔드포인트는 리스트 엔드포인트와 달라 보통 살아있어 가격은 계속 받힘.)
+    if not korea_ok:
+        try:
+            _c = get_connection()
+            fb = pd.read_sql(
+                "SELECT DISTINCT ticker, name, sector FROM korea_stocks WHERE ticker IS NOT NULL", _c)
+            _c.close()
+            if len(fb):
+                fb['sector'] = fb.apply(
+                    lambda r: sector_overrides.get(r['ticker'], r['sector']), axis=1)
+                fb['market'] = 'korea'
+                tickers.append(fb)
+                logger.warning(f"[폴백] KRX 리스트 실패 → 기존 korea_stocks {len(fb):,}개 종목으로 수집 진행 "
+                               f"(KRX 점검/차단 추정. 가격은 정상 수집될 수 있음)")
+            else:
+                logger.error("[폴백] korea_stocks 가 비어 폴백 불가 — KRX 복구 후 재시도 필요")
+        except Exception as e:
+            logger.error(f"[폴백] korea_stocks 조회 실패: {e}")
 
     logger.info("S&P500 종목 리스트 가져오는 중...")
     try:
