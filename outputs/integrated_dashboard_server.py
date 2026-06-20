@@ -940,6 +940,21 @@ def get_file_meta():
 
 
 # ── 7. API routes ──────────────────────────────────────────────────────────────
+def _json_safe(obj):
+    """NaN/Inf → None 재귀 치환. 파이썬 json 은 NaN 을 'NaN' 으로 직렬화하는데
+    이는 표준 JSON 이 아니라 브라우저 JSON.parse 가 거부 → 대시보드 전체 로드 실패.
+    (PowerShell ConvertFrom-Json 은 허용해서 증상이 가려졌었음.)"""
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, float):
+        # NaN 은 자기 자신과 != , Inf 도 함께 걸러 null 로.
+        if obj != obj or obj in (float("inf"), float("-inf")):
+            return None
+    return obj
+
+
 @app.route("/api/all")
 def api_all():
     df = request.args.get("date_from", "")
@@ -970,7 +985,7 @@ def api_all():
             "logs":       {"sch":  tail_log(_latest_log("collect_*.log"), 80),
                            "live": tail_log(_latest_log("paper_*.log"), 40)},
         }
-        return jsonify(payload)
+        return jsonify(_json_safe(payload))
     except Exception as e:
         import traceback
         print(f"[Dashboard] /api/all FATAL: {e}", flush=True)
@@ -1418,13 +1433,14 @@ function fillOverview(ch, ai, cand){
   setTxt('ov-model', ai&&ai.model&&ai.model.last_trained?ai.model.last_trained.slice(0,10):'-');
   setTxt('ov-news7', ai&&ai.news?safe(ai.news.week_total,'0'):'0');
   setTxt('ov-newsig', cand?safe(cand.new_signal_count,'0'):'0');
-  // candidates table
-  const rows=(cand&&cand.signals||[]);
+  // candidates table — get_candidates 는 new_signals 를 준다(과거 signals 아님).
+  // 항목: {code,name,entry_price,target_exit,signal_date,ai_bigwin,ai_pos,ai_neg}
+  const rows=(cand&&cand.new_signals||cand&&cand.signals||[]);
   setHtml('ov-cand', rows.length?rows.map(r=>
     `<tr><td>${r.code||''}</td><td>${r.name||''}</td><td style="color:#8b949e">${r.strategy||''}</td>
      <td class="r">${String(r.signal_date||'').slice(0,8)}</td>
-     <td class="r ${clr(r.ai_score)}">${safe(r.ai_score,'-')}</td>
-     <td class="r ${clr(r.prob)}">${r.prob!=null?(Number(r.prob)*100).toFixed(1)+'%':'-'}</td></tr>`
+     <td class="r">${fmt(r.entry_price)}</td>
+     <td class="r ${clr(r.ai_bigwin)}">${r.ai_bigwin!=null?(Number(r.ai_bigwin)*100).toFixed(0)+'%':(r.prob!=null?(Number(r.prob)*100).toFixed(1)+'%':'-')}</td></tr>`
   ).join(''):'<tr><td colspan="6" style="color:#8b949e;text-align:center">&#xC624;&#xB298; &#xC2E0;&#xADDC; &#xD6C4;&#xBCF4; &#xC5C6;&#xC74C;</td></tr>');
 }
 
@@ -1674,12 +1690,14 @@ async function load(){
       fb.innerHTML='<div class="fresh-ok">✓ 데이터 신선</div>';
     }
   }
-  fillOverview(d.cheonok, d.ai, d.candidates);
-  fillCheonok(d.cheonok);
-  fillMock(d.mock, d.kis);
-  fillBacktest(d.bt, d.sc);
-  fillAI(d.ai);
-  fillLogs(d.logs, d.files);
+  // 패널별 렌더 격리 — 한 패널이 터져도 나머지는 그려진다(백엔드 _safe 와 대칭).
+  const _r=(fn,...a)=>{try{fn(...a);}catch(e){console.error('[dashboard] render 오류 ('+fn.name+'):',e);}};
+  _r(fillOverview, d.cheonok, d.ai, d.candidates);
+  _r(fillCheonok, d.cheonok);
+  _r(fillMock, d.mock, d.kis);
+  _r(fillBacktest, d.bt, d.sc);
+  _r(fillAI, d.ai);
+  _r(fillLogs, d.logs, d.files);
   // intraday — 별도 API
   fetch('/api/intraday').then(r=>r.json()).then(fillIntraday).catch(()=>{});
 }
