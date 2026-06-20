@@ -581,6 +581,39 @@ def get_paper_vs_bt():
     return out
 
 
+# ── 무거운 재계산 방지 캐시 ──────────────────────────────────────────────────────
+# 5분 자동새로고침마다 trades_history_v3.csv(6MB+)를 2회 읽고 IC 를 전부 재계산하던
+# 것을 mtime 기준 1회로 줄인다. CSV 가 바뀔 때(주간 학습/데이터셋 재생성)만 갱신.
+_TRADES_CACHE = {"mtime": None, "df": None}
+_SCORER_CACHE = {"mtime": None, "obj": None}
+
+
+def _trades_mtime():
+    try:
+        return HISTORY_CSV.stat().st_mtime
+    except Exception:
+        return None
+
+
+def _load_trades_cached():
+    mt = _trades_mtime()
+    if _TRADES_CACHE["df"] is None or _TRADES_CACHE["mtime"] != mt:
+        _TRADES_CACHE["df"] = pd.read_csv(HISTORY_CSV)
+        _TRADES_CACHE["mtime"] = mt
+    return _TRADES_CACHE["df"]
+
+
+def _get_scorer_cached():
+    mt = _trades_mtime()
+    if _SCORER_CACHE["obj"] is None or _SCORER_CACHE["mtime"] != mt:
+        if str(BASE) not in sys.path:
+            sys.path.insert(0, str(BASE))
+        from factor_scorer import FactorScorer
+        _SCORER_CACHE["obj"] = FactorScorer()
+        _SCORER_CACHE["mtime"] = mt
+    return _SCORER_CACHE["obj"]
+
+
 # ── 6. AI project status ───────────────────────────────────────────────────────
 def get_ai_status():
     out = {}
@@ -623,8 +656,8 @@ def get_ai_status():
     ic_info = {}
     try:
         if str(BASE) not in sys.path: sys.path.insert(0, str(BASE))
-        from factor_scorer import FactorScorer, FEATURE_META
-        scorer = FactorScorer()
+        from factor_scorer import FEATURE_META
+        scorer = _get_scorer_cached()
         if scorer.ic_weights:
             sorted_w = sorted(scorer.ic_weights.items(), key=lambda x: abs(x[1]), reverse=True)
             ic_info["weights"] = [{"feat": f, "label": FEATURE_META.get(f,(f,))[0], "ic": round(v,4)} for f,v in sorted_w]
@@ -654,7 +687,7 @@ def get_training_stats():
     if not HISTORY_CSV.exists():
         out["error"] = "trades_history_v3.csv not found"; return out
     try:
-        df = pd.read_csv(HISTORY_CSV)
+        df = _load_trades_cached()
         out["available"] = True
         out["total_rows"] = int(len(df))
         date_col = next((c for c in ["date","entry_date"] if c in df.columns), None)
@@ -1815,7 +1848,18 @@ async function load(){
   fetch('/api/intraday').then(r=>r.json()).then(fillIntraday).catch(()=>{});
 }
 
-window.addEventListener('load',()=>{ load(); setInterval(load, 300_000); });
+// 탭이 보일 때만 새로고침. 평소엔 부분 갱신(부드러움), 30분마다 하드 리로드로
+// 누적 메모리를 통째로 회수한다(장시간 떠 있는 SPA 가 GB 단위로 부푸는 것 방지).
+let _cyc=0;
+window.addEventListener('load',()=>{
+  load();
+  setInterval(()=>{
+    if(document.visibilityState!=='visible') return;   // 백그라운드면 건너뜀
+    _cyc++;
+    if(_cyc % 6 === 0) location.reload();               // 30분마다 메모리 회수
+    else load();                                        // 그 외 5분 부분갱신
+  }, 300_000);
+});
 </script>
 </body>
 </html>
