@@ -144,6 +144,20 @@ def load_macro_daily(start_date=None, end_date=None) -> pd.DataFrame:
             print(f"  [loader] 캐시 저장 ({len(full):,}행) — 다음 로드부터 수 초")
         except Exception as e:
             print(f"  [loader] 캐시 저장 실패 (무시): {e}")
+
+    # [무결성 경고] 최신일 핵심 컬럼이 대부분 NaN 이면 데이터 오염(한/영 컬럼 충돌 등) 의심.
+    # 2026-06 신호 2개월 전멸의 근원이 이거였음 → 조용히 넘기지 말고 크게 경고한다.
+    try:
+        _last = full["date"].max()
+        _t = full[full["date"] == _last]
+        for _col in ("trading_value", "change_pct"):
+            if _col in _t.columns and len(_t):
+                _nan = float(_t[_col].isna().mean())
+                if _nan > 0.5:
+                    print(f"  [경고] 최신일 {_last} '{_col}' NaN {100*_nan:.0f}% — "
+                          f"데이터 오염 의심(컬럼 혼재 등). 신호가 0건일 수 있음!")
+    except Exception:
+        pass
     return full
 
 

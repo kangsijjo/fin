@@ -182,6 +182,29 @@ def get_freshness():
     return issues
 
 
+def get_health():
+    """조용한 실패 종합 점검 — 상단 배너용. 테이블 정체(freshness) + 신호 정체를 한데 모은다.
+    오늘 세션에서 고친 버그들(2개월 0신호, 테이블 정체)이 전부 '에러 없이 조용히' 굴러갔기에,
+    이상 징후를 대시보드 맨 위에서 바로 보이게 한다."""
+    issues = []
+    for f in get_freshness():
+        issues.append({"sev": "warn",
+                       "msg": f"{f['table']} {f['age_days']}일 정체(최신 {f['latest']})"})
+    # 신호 정체 — paper_signals 최신 signal_date 가 오래됐으면 신호생성/데이터 이상 신호.
+    try:
+        if PAPER_CSV.exists():
+            sd = pd.read_csv(PAPER_CSV, dtype={"code": str})
+            if "signal_date" in sd.columns and len(sd):
+                last = str(sd["signal_date"].astype(str).max())[:8]
+                age = (datetime.now() - datetime.strptime(last, "%Y%m%d")).days
+                if age >= 7:
+                    issues.append({"sev": "err",
+                                   "msg": f"신호 {age}일째 없음(최신 {last}) — live_signal/로더 점검"})
+    except Exception:
+        pass
+    return issues
+
+
 # ── 슬롯 구성 (kiwoom_trader.py 와 동기화) ─────────────────────────────────────
 _STRATEGY_MAX_SLOTS = {"high_52w_filt": 4, "rsi_reversal": 4, "rsi_vol": 2}
 _STRATEGY_PRIORITY  = ["high_52w_filt", "rsi_reversal", "rsi_vol"]
@@ -367,6 +390,23 @@ def get_strategy_compare():
     latest = files[-1]
     out["source"] = latest.name
     out["updated"] = latest.name.replace("strategy_compare_", "").replace(".csv", "")
+    try:
+        df = pd.read_csv(latest)
+        df = df.where(pd.notnull(df), None)
+        out["rows"] = df.to_dict("records")
+    except Exception as e:
+        out["error"] = str(e)[:80]
+    return out
+
+
+def get_strategy_lab():
+    """전략 랩 — strategy_lab.py 가 만든 forward(OOS) 전략별 성과. results/strategy_lab_*.csv 최신본."""
+    out = {"rows": [], "updated": ""}
+    files = sorted(RESULTS_DIR.glob("strategy_lab_*.csv"))
+    if not files:
+        return out
+    latest = files[-1]
+    out["updated"] = latest.name.replace("strategy_lab_", "").replace(".csv", "")
     try:
         df = pd.read_csv(latest)
         df = df.where(pd.notnull(df), None)
@@ -976,9 +1016,11 @@ def api_all():
         payload = {
             "ts":         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "freshness":  _safe(get_freshness),
+            "health":     _safe(get_health),
             "cheonok":    _safe(get_cheonok),
             "bt":         _safe(get_backtest_trades, df, dt),
             "sc":         _safe(get_strategy_compare),
+            "lab":        _safe(get_strategy_lab),
             "mock":       _safe(get_kiwoom_mock, df, dt),
             "kis":        _safe(get_kis_mock, df, dt),
             "pvbt":       _safe(get_paper_vs_bt),
@@ -1073,7 +1115,13 @@ _RUN_TASKS = {
     "kis_signal":    [_VENV_PYTHON, str(BASE / "kis_live_signal.py")],
     "kis_daily":     [_VENV_PYTHON, str(BASE / "kis_trader.py"), "daily"],
     "kis_status":    [_VENV_PYTHON, str(BASE / "kis_trader.py"), "status"],
-    "recheck":       [_VENV_PYTHON, str(BASE / "recheck_collector.py")],
+    "recheck":       [_VENV_PYTHON, str(BASE / "recollect_guard.py")],   # 구 recheck_collector.py 이름변경 반영
+    # ── 데이터 수집 / AI 학습 / 전략 랩 (2026-06-20 추가) ──
+    "backfill":      ["powershell", "-ExecutionPolicy", "Bypass", "-File",
+                      str(BASE.parent / "Stock_AI_Project" / "run_backfill.ps1")],   # Stock_AI 수집기 일괄(자체 cwd/venv)
+    "ai_dataset":    [_VENV_PYTHON, str(BASE / "make_trades_history_v3.py")],        # AI 학습 데이터셋 생성
+    "ai_train":      [_VENV_PYTHON, str(BASE / "ai_trainer_v4.py")],                 # meta_model_v4 재학습
+    "strategy_lab":  [_VENV_PYTHON, str(BASE / "strategy_lab.py")],                  # 전략 랩 forward 집계
 }
 
 
@@ -1110,12 +1158,16 @@ def api_run(task):
         return jsonify({"ok": False, "msg": f"알 수 없는 작업: {task}"}), 400
 
     try:
+        # 출력은 로그 파일로 (PIPE 미소비 시 긴 작업이 버퍼 차서 멈추는 것 방지).
+        log_dir = BASE / "logs"
+        log_dir.mkdir(exist_ok=True)
+        logf = open(log_dir / f"run_{task}.log", "w", encoding="utf-8", errors="replace")
         proc = _sp.Popen(
             _RUN_TASKS[task], cwd=str(BASE),
-            stdout=_sp.PIPE, stderr=_sp.STDOUT,
+            stdout=logf, stderr=_sp.STDOUT,
             creationflags=_NO_WIN,
         )
-        return jsonify({"ok": True, "msg": f"시작됨 (PID {proc.pid})"})
+        return jsonify({"ok": True, "msg": f"시작됨 (PID {proc.pid}) → logs/run_{task}.log 에 기록"})
     except Exception as e:
         return jsonify({"ok": False, "msg": str(e)})
 
@@ -1132,6 +1184,12 @@ HTML = """\
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0d1117;color:#c9d1d9;font-family:'Segoe UI',system-ui,sans-serif;font-size:14px}
 a{color:#58a6ff}
+/* 제어판 버튼 */
+.runbtn{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:6px 12px;border-radius:6px;
+        cursor:pointer;font-size:13px}
+.runbtn:hover{background:#30363d;border-color:#58a6ff}
+.runbtn.danger{border-color:#6e2a2a}
+.runbtn.danger:hover{background:#3d1f1f;border-color:#f85149}
 /* header */
 header{background:#161b22;padding:8px 16px;display:flex;justify-content:space-between;align-items:center;
        border-bottom:1px solid #30363d;position:sticky;top:0;z-index:20}
@@ -1142,7 +1200,7 @@ button#btn-refresh{background:#21262d;border:1px solid #30363d;color:#c9d1d9;pad
 button#btn-refresh:hover{background:#30363d}
 /* freshness banner */
 #freshness-banner{padding:4px 16px;font-size:12px}
-.fresh-ok{color:#3fb950}.fresh-warn{color:#d29922}
+.fresh-ok{color:#3fb950}.fresh-warn{color:#d29922}.fresh-err{color:#f85149;font-weight:600}
 /* tabs */
 .tabs{display:flex;gap:0;border-bottom:1px solid #30363d;background:#161b22;padding:0 12px}
 .tab{padding:10px 16px;cursor:pointer;font-size:13px;color:#8b949e;border-bottom:2px solid transparent;
@@ -1327,6 +1385,15 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
     <tbody id="bt-rows"><tr><td colspan="6" style="color:#8b949e;text-align:center">&#xB370;&#xC774;&#xD130; &#xB85C;&#xB529;&#xC911;...</td></tr></tbody>
     </table>
   </div>
+  <div class="section">
+    <h2>&#xC804;&#xB7B5; &#xB7A9; &mdash; forward &#xC2E4;&#xCE21; (LAB_START &#xC774;&#xD6C4; &#xC9C4;&#xC785;, &#xB099;&#xAD00;&#xD3B8;&#xD5A5; 0)</h2>
+    <table><thead><tr>
+      <th>&#xC804;&#xB7B5;</th><th class="r">forward&#xC218;</th><th class="r">&#xD3C9;&#xADE0;%</th><th class="r">&#xC2B9;&#xB960;%</th>
+      <th class="r">&#xB204;&#xC801;%</th><th class="r">&#xC2AC;&#xB86F;&#xCD1D;&#xC218;&#xC775;%</th><th class="r">&#xC2AC;&#xB86F;MDD%</th><th class="r">&#xC2AC;&#xB86F;&#xC0E4;&#xD504;</th>
+    </tr></thead>
+    <tbody id="lab-rows"><tr><td colspan="8" style="color:#8b949e;text-align:center">strategy_lab.py &#xB204;&#xC801; &#xB300;&#xAE30; &mdash; &#xCD08;&#xAE30;&#xC5D4; &#xD45C;&#xBCF8; &#xC801;&#xC74C;</td></tr></tbody>
+    </table>
+  </div>
 </div>
 
 <!-- ===== AI 모델 ===== -->
@@ -1376,6 +1443,20 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
 
 <!-- ===== 데이터+로그 ===== -->
 <div id="tab-datalogs" class="tab-content">
+  <div class="section">
+    <h2>&#xC218;&#xB3D9; &#xC2E4;&#xD589; (&#xC81C;&#xC5B4;&#xD310;)</h2>
+    <div style="display:flex;flex-wrap:wrap;gap:8px">
+      <button class="runbtn" onclick="runTask('backfill','&#xB370;&#xC774;&#xD130; &#xC218;&#xC9D1;(backfill)')">&#xB370;&#xC774;&#xD130; &#xC218;&#xC9D1;</button>
+      <button class="runbtn" onclick="runTask('ai_dataset','AI &#xD559;&#xC2B5; &#xB370;&#xC774;&#xD130;&#xC14B;')">AI &#xB370;&#xC774;&#xD130;&#xC14B;</button>
+      <button class="runbtn" onclick="runTask('ai_train','AI &#xBAA8;&#xB378; &#xD559;&#xC2B5;')">AI &#xD559;&#xC2B5;</button>
+      <button class="runbtn" onclick="runTask('strategy_lab','&#xC804;&#xB7B5; &#xB7A9;')">&#xC804;&#xB7B5; &#xB7A9;</button>
+      <button class="runbtn" onclick="runTask('live_signal','&#xC2E0;&#xD638; &#xAC10;&#xC9C0;')">&#xC2E0;&#xD638; &#xAC10;&#xC9C0;</button>
+      <button class="runbtn" onclick="runTask('paper_tracker','&#xD398;&#xC774;&#xD37C; &#xCD94;&#xC801;')">&#xD398;&#xC774;&#xD37C; &#xCD94;&#xC801;</button>
+      <button class="runbtn" onclick="runTask('recheck','&#xB370;&#xC774;&#xD130; &#xC7AC;&#xAC80;&#xC99D;')">&#xC7AC;&#xAC80;&#xC99D;</button>
+      <button class="runbtn danger" onclick="runTask('scheduler_restart','&#xC2A4;&#xCF00;&#xC904;&#xB7EC; &#xC7AC;&#xC2DC;&#xC791;')">&#xC2A4;&#xCF00;&#xC904;&#xB7EC; &#xC7AC;&#xC2DC;&#xC791;</button>
+    </div>
+    <div id="run-status" style="margin-top:10px;color:#8b949e;font-size:13px">&#xBC84;&#xD2BC;&#xC744; &#xB204;&#xB974;&#xBA74; &#xD574;&#xB2F9; &#xC791;&#xC5C5;&#xC774; &#xBC31;&#xADF8;&#xB77C;&#xC6B4;&#xB4DC;&#xB85C; &#xC2E4;&#xD589;&#xB429;&#xB2C8;&#xB2E4; (&#xB85C;&#xADF8;: logs/ &#xD3F4;&#xB354;).</div>
+  </div>
   <div class="section">
     <h2>&#xC218;&#xC9D1; &#xB85C;&#xADF8; (collect_*.log)</h2>
     <pre class="logbox" id="log-sch">&#xB85C;&#xB529;&#xC911;...</pre>
@@ -1563,6 +1644,21 @@ function fillBacktest(bt, sc){
   }).join(''):'<tr><td colspan="9" style="color:#8b949e;text-align:center">strategy_engine.py 먼저 실행하세요</td></tr>');
 }
 
+function fillLab(lab){
+  const rows=(lab&&lab.rows)||[];
+  setHtml('lab-rows', rows.length?rows.map(r=>
+    `<tr>
+      <td style="font-size:12px">${r.strategy||''}</td>
+      <td class="r">${r.fwd_n||0}</td>
+      <td class="r ${clr(r.fwd_avg_net)}">${Number(r.fwd_avg_net||0).toFixed(2)}%</td>
+      <td class="r">${Number(r.fwd_win_rate||0).toFixed(1)}%</td>
+      <td class="r ${clr(r.fwd_sum_net)}">${Number(r.fwd_sum_net||0).toFixed(1)}%</td>
+      <td class="r ${clr(r.slot_total_ret)}">${Number(r.slot_total_ret||0).toFixed(1)}%</td>
+      <td class="r neg">${Number(r.slot_mdd||0).toFixed(1)}%</td>
+      <td class="r">${Number(r.slot_sharpe||0).toFixed(2)}</td></tr>`
+  ).join(''):'<tr><td colspan="8" style="color:#8b949e;text-align:center">아직 forward 표본 없음 (strategy_lab.py 누적 대기)</td></tr>');
+}
+
 function fillAI(ai){
   const errBox=document.getElementById('ai-err-box');
   if(!ai){errBox.style.display='block';errBox.textContent='AI 데이터 없음';return;}
@@ -1612,6 +1708,15 @@ function fillAI(ai){
       <td class="r" style="font-size:11px;color:#8b949e">${r.date||''}</td>
       <td style="font-size:11px;color:#8b949e">${r.source||''}</td></tr>`;
   }).join(''));
+}
+
+function runTask(task, label){
+  if(!confirm(label+' 실행할까요?')) return;
+  const el=document.getElementById('run-status');
+  if(el) el.textContent=label+' 시작 요청 중...';
+  fetch('/api/run/'+task,{method:'POST'}).then(r=>r.json()).then(d=>{
+    if(el) el.textContent='['+label+'] '+(d.msg||(d.ok?'시작됨':'실패'))+'  ('+new Date().toLocaleTimeString()+')';
+  }).catch(e=>{ if(el) el.textContent='['+label+'] 오류: '+e.message; });
 }
 
 function fillLogs(logs, files){
@@ -1687,11 +1792,13 @@ async function load(){
   // freshness banner
   const fb=document.getElementById('freshness-banner');
   if(fb){
-    if(d.freshness&&d.freshness.length){
-      fb.innerHTML='<div class="fresh-warn">⚠ 데이터 미갱신: '
-        +d.freshness.map(f=>f.table+'('+f.age_days+'일 경과)').join(' / ')+'</div>';
+    const hs=(d.health||[]);
+    if(hs.length){
+      const hasErr=hs.some(h=>h.sev==='err');
+      fb.innerHTML='<div class="'+(hasErr?'fresh-err':'fresh-warn')+'">⚠ 점검 필요: '
+        +hs.map(h=>h.msg).join(' &nbsp;|&nbsp; ')+'</div>';
     } else {
-      fb.innerHTML='<div class="fresh-ok">✓ 데이터 신선</div>';
+      fb.innerHTML='<div class="fresh-ok">✓ 시스템 정상 (테이블·신호 이상 없음)</div>';
     }
   }
   // 패널별 렌더 격리 — 한 패널이 터져도 나머지는 그려진다(백엔드 _safe 와 대칭).
@@ -1700,6 +1807,7 @@ async function load(){
   _r(fillCheonok, d.cheonok);
   _r(fillMock, d.mock, d.kis);
   _r(fillBacktest, d.bt, d.sc);
+  _r(fillLab, d.lab);
   _r(fillAI, d.ai);
   _r(fillLogs, d.logs, d.files);
   // intraday — 별도 API
