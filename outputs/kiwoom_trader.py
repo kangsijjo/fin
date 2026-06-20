@@ -456,7 +456,7 @@ def cmd_buy():
                 print(f"    [매수주문] {code} {name} {qty}주 @ {int(close):,} → {ono}")
                 try:
                     import notifier
-                    notifier.safe_send(f"🟢 [키움 매수] {name}({code}) {qty}주 @ {int(close):,}원")
+                    notifier.queue_fill("buy", name, code, qty, close)
                 except Exception:
                     pass
                 log_order({
@@ -567,7 +567,7 @@ def cmd_sell():
             print(f"  [매도주문] {code} {name} {qty}주 ref:{ref_px:,} → {ono}")
             try:
                 import notifier
-                notifier.safe_send(f"🔴 [키움 매도] {name}({code}) {qty}주 ref:{ref_px:,}원")
+                notifier.queue_fill("sell", name, code, qty, ref_px)
             except Exception:
                 pass
             log_order({"time": datetime.now().strftime("%H:%M:%S"), "side": "sell",
@@ -620,3 +620,10 @@ if __name__ == "__main__":
             print(f"[main] 알 수 없는 명령: {cmd}")
             print("사용법: python kiwoom_trader.py [status|buy|sell|daily]")
             sys.exit(1)
+
+    # 체결 묶음 알림 — 이번 실행에서 쌓인 매수/매도를 1통으로 (없으면 전송 안 함)
+    try:
+        import notifier
+        notifier.flush_fills("[키움 안C]")
+    except Exception:
+        pass

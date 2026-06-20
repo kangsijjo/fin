@@ -36,6 +36,9 @@ try:
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 except Exception:
     pass
+# 자식 프로세스(main_collector/macro/news 등 _run_subprocess)도 UTF-8 로 출력하도록 환경변수 전파.
+# → 수집기들이 scheduler.log 에 찍는 한글도 안 깨진다.
+os.environ["PYTHONIOENCODING"] = "utf-8"
 
 _FAIL_LOG = os.path.join(os.path.dirname(__file__), 'logs', 'failures.log')
 os.makedirs(os.path.dirname(_FAIL_LOG), exist_ok=True)
