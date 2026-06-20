@@ -10,8 +10,12 @@ daily_audit.py — 매일 자동화 자가점검. 2026-06-20 신설.
 """
 import os
 import re
+import sys
 import glob
+import json
 import sqlite3
+import urllib.request
+import urllib.parse
 from datetime import datetime
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -51,6 +55,36 @@ def chk(ok, label, detail=""):
     lines.append(f"  [{'OK ' if ok else '!! '}] {label}{(' — ' + detail) if detail else ''}")
 
 
+def _telegram_cfg():
+    """봇 토큰/챗ID 로드 — 환경변수 우선, 없으면 outputs/.telegram.json. 둘 다 없으면 (None,None)."""
+    tok = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    cid = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if not (tok and cid):
+        cfg = os.path.join(BASE, ".telegram.json")
+        if os.path.exists(cfg):
+            try:
+                d = json.load(open(cfg, encoding="utf-8"))
+                tok = tok or d.get("token", "")
+                cid = cid or d.get("chat_id", "")
+            except Exception:
+                pass
+    return (tok or None), (cid or None)
+
+
+def notify(text):
+    """텔레그램으로 경고 푸시 (설정 없으면 조용히 스킵). (성공여부, 메시지) 반환."""
+    tok, cid = _telegram_cfg()
+    if not tok or not cid:
+        return False, "텔레그램 미설정(.telegram.json 또는 환경변수 TELEGRAM_BOT_TOKEN/CHAT_ID)"
+    try:
+        url = f"https://api.telegram.org/bot{tok}/sendMessage"
+        data = urllib.parse.urlencode({"chat_id": cid, "text": text[:4000]}).encode()
+        urllib.request.urlopen(url, data=data, timeout=10)
+        return True, "전송됨"
+    except Exception as e:
+        return False, str(e)[:80]
+
+
 def _db_path():
     for p in _DB_CANDIDATES:
         if p and os.path.exists(p):
@@ -68,6 +102,12 @@ def _age_days(yyyymmdd_or_dash):
         return (NOW - datetime.strptime(s[:8], "%Y%m%d")).days
     except Exception:
         return 9999
+
+
+# 텔레그램 설정 테스트: python daily_audit.py --test-tg  (검사 스킵하고 테스트 메시지만 발송)
+if len(sys.argv) > 1 and sys.argv[1] in ("--test-tg", "test"):
+    print("텔레그램 전송 테스트:", notify("천억이 daily_audit — 텔레그램 연결 테스트 OK"))
+    raise SystemExit(0)
 
 
 # 1) Stock_AI 스케줄러 가동 (scheduler.log heartbeat — 5분마다 기록)
@@ -159,3 +199,9 @@ try:
 except Exception:
     pass
 print(report)
+
+# 경고가 있으면 텔레그램으로 폰에 푸시 (설정돼 있을 때만 — 없으면 조용히 스킵).
+if warn_n > 0:
+    _warns = "\n".join(l for l in lines if "[!! ]" in l)
+    _sent, _msg = notify(f"⚠ 천억이 자동화 점검 [{verdict}] ({warn_n}건 경고)\n{_warns}\n({NOW.strftime('%m-%d %H:%M')})")
+    print(f"  [텔레그램] {'전송됨' if _sent else '미전송 — ' + _msg}")

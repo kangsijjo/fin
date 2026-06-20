@@ -12,6 +12,7 @@
 *token*.json
 .kis_token.json
 .kis_mock_token.json
+.telegram.json
 
 # ---------- Python ----------
 __pycache__/
