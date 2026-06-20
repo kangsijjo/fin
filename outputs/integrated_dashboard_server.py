@@ -384,7 +384,9 @@ def get_strategy_compare():
     out = {"source": "", "rows": [], "updated": ""}
     if not RESULTS_DIR.exists():
         return out
-    files = sorted(RESULTS_DIR.glob("strategy_compare_*.csv"))
+    # strategy_lab 사례처럼 대용량 형제 파일(_trades_) 오선택을 예방.
+    files = sorted(f for f in RESULTS_DIR.glob("strategy_compare_*.csv")
+                   if "_trades_" not in f.name)
     if not files:
         return out
     latest = files[-1]
@@ -1666,8 +1668,8 @@ function fillBacktest(bt, sc){
       <td class="r ${clr(r.net_pct)}">${pct(r.net_pct)}</td>
       <td class="r ${clr(r.gross_pct)}">${pct(r.gross_pct)}</td></tr>`;
   }).join(''):'<tr><td colspan="6" style="color:#8b949e;text-align:center">거래 내역 없음</td></tr>');
-  // strategy compare
-  const scRows=(sc&&sc.rows)||[];
+  // strategy compare (방어적 상한 — 비정상적으로 많이 와도 DOM 폭발 방지)
+  const scRows=((sc&&sc.rows)||[]).slice(0,200);
   setHtml('sc-rows', scRows.length?scRows.map(r=>{
     const da=Number(r.delta_avg||0);
     return `<tr>
