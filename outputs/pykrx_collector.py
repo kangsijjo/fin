@@ -43,12 +43,21 @@ def _get_stock_db_path():
     return None
 
 
+# [2026-06-20 데이터 소유권 단일화] stock.db(korea_stocks/supply_demand)의 단독 소유자는
+# Stock_AI_Project(main_collector / supply_demand)다. pykrx_collector 는 macro_data/daily(로더용)
+# 만 담당하고 stock.db 에는 쓰지 않는다 — 이중쓰기로 인한 drift 제거. 되돌리려면 True 로.
+_SYNC_STOCK_DB = False
+
+
 def _upsert_to_stock_db(df_merged, date_str):
     """
     수집 확정 데이터를 stock.db 에 반영.
       - korea_stocks : OHLCV UPSERT (name/sector 는 기존 값 보존)
       - supply_demand : 외국인/기관 순매수 INSERT OR REPLACE
+    [2026-06-20] 기본 비활성(_SYNC_STOCK_DB=False) — 소유권을 Stock_AI 로 단일화.
     """
+    if not _SYNC_STOCK_DB:
+        return
     db_path = _get_stock_db_path()
     if db_path is None:
         return

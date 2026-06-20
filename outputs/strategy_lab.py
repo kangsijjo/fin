@@ -72,22 +72,28 @@ def main():
             rows.append({"strategy": strat.name, "fwd_n": 0, "error": str(e)[:60]})
             continue
 
+        # 전체 역사 백테스트(낙관편향 포함) — 같은 trades 에서 바로 계산
+        bt = _unlimited_stats(trades)
         # forward 만: 진입일이 lab_start 이상 (YYYYMMDD 문자열 비교 = 시간순)
         fwd = [t for t in trades if str(t.entry_date) >= lab_start]
         u = _unlimited_stats(fwd)
         sim = simulate_capital(fwd, max_concurrent=SLOT_N) if fwd else None
+        # 갭 = forward 평균 − 백테스트 평균 (음수면 백테스트가 과대평가). forward 표본 있을 때만.
+        gap = round(u["avg_net"] - bt["avg_net"], 3) if u["n"] else None
 
         rows.append({
             "strategy":       strat.name,
-            "fwd_n":          u["n"],            # forward 완료 트레이드 수
-            "fwd_avg_net":    u["avg_net"],      # 무제한 평균 순수익률(%)
-            "fwd_win_rate":   u["win_rate"],     # 무제한 승률(%)
-            "fwd_sum_net":    u["sum_net"],      # 무제한 누적 순수익(%) 합
+            "bt_n":           bt["n"],           # 전체 역사 트레이드 수(백테스트)
+            "bt_avg_net":     bt["avg_net"],     # 백테스트 평균 순수익률(%) — 낙관편향 포함
+            "bt_win_rate":    bt["win_rate"],
+            "fwd_n":          u["n"],            # forward 완료 트레이드 수(실측)
+            "fwd_avg_net":    u["avg_net"],      # forward 무제한 평균 순수익률(%) — 실측
+            "fwd_win_rate":   u["win_rate"],
+            "fwd_sum_net":    u["sum_net"],
+            "gap_avg_net":    gap,               # forward − backtest (낙관편향 크기)
             "slot_total_ret": (sim or {}).get("total_ret_pct", 0.0),  # 슬롯제한 총수익(%)
-            "slot_cagr":      (sim or {}).get("cagr_pct", 0.0),
             "slot_mdd":       (sim or {}).get("real_mdd_pct", 0.0),
             "slot_sharpe":    (sim or {}).get("real_sharpe", 0.0),
-            "slot_executed":  (sim or {}).get("n_trades", 0),         # 슬롯에 실제 체결된 수
         })
         for t in fwd:
             trade_log.append({

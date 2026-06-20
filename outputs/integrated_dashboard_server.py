@@ -1386,10 +1386,11 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
     </table>
   </div>
   <div class="section">
-    <h2>&#xC804;&#xB7B5; &#xB7A9; &mdash; forward &#xC2E4;&#xCE21; (LAB_START &#xC774;&#xD6C4; &#xC9C4;&#xC785;, &#xB099;&#xAD00;&#xD3B8;&#xD5A5; 0)</h2>
+    <h2>전략 랩 — 백테스트 vs forward 실측 (갭 = forward − 백테스트 = 낙관편향 크기)</h2>
     <table><thead><tr>
-      <th>&#xC804;&#xB7B5;</th><th class="r">forward&#xC218;</th><th class="r">&#xD3C9;&#xADE0;%</th><th class="r">&#xC2B9;&#xB960;%</th>
-      <th class="r">&#xB204;&#xC801;%</th><th class="r">&#xC2AC;&#xB86F;&#xCD1D;&#xC218;&#xC775;%</th><th class="r">&#xC2AC;&#xB86F;MDD%</th><th class="r">&#xC2AC;&#xB86F;&#xC0E4;&#xD504;</th>
+      <th>전략</th><th class="r">BT수</th><th class="r">BT평균%</th>
+      <th class="r">FWD수</th><th class="r">FWD평균%</th>
+      <th class="r">갭%p</th><th class="r">슬롯수익%</th><th class="r">슬롯MDD%</th>
     </tr></thead>
     <tbody id="lab-rows"><tr><td colspan="8" style="color:#8b949e;text-align:center">strategy_lab.py &#xB204;&#xC801; &#xB300;&#xAE30; &mdash; &#xCD08;&#xAE30;&#xC5D4; &#xD45C;&#xBCF8; &#xC801;&#xC74C;</td></tr></tbody>
     </table>
@@ -1649,14 +1650,14 @@ function fillLab(lab){
   setHtml('lab-rows', rows.length?rows.map(r=>
     `<tr>
       <td style="font-size:12px">${r.strategy||''}</td>
+      <td class="r" style="color:#8b949e">${r.bt_n||0}</td>
+      <td class="r ${clr(r.bt_avg_net)}">${Number(r.bt_avg_net||0).toFixed(2)}%</td>
       <td class="r">${r.fwd_n||0}</td>
-      <td class="r ${clr(r.fwd_avg_net)}">${Number(r.fwd_avg_net||0).toFixed(2)}%</td>
-      <td class="r">${Number(r.fwd_win_rate||0).toFixed(1)}%</td>
-      <td class="r ${clr(r.fwd_sum_net)}">${Number(r.fwd_sum_net||0).toFixed(1)}%</td>
+      <td class="r ${clr(r.fwd_avg_net)}">${r.fwd_n?Number(r.fwd_avg_net||0).toFixed(2)+'%':'-'}</td>
+      <td class="r ${clr(r.gap_avg_net)}" style="font-weight:bold">${r.gap_avg_net!=null?((r.gap_avg_net>=0?'+':'')+Number(r.gap_avg_net).toFixed(2)+'%p'):'-'}</td>
       <td class="r ${clr(r.slot_total_ret)}">${Number(r.slot_total_ret||0).toFixed(1)}%</td>
-      <td class="r neg">${Number(r.slot_mdd||0).toFixed(1)}%</td>
-      <td class="r">${Number(r.slot_sharpe||0).toFixed(2)}</td></tr>`
-  ).join(''):'<tr><td colspan="8" style="color:#8b949e;text-align:center">아직 forward 표본 없음 (strategy_lab.py 누적 대기)</td></tr>');
+      <td class="r neg">${Number(r.slot_mdd||0).toFixed(1)}%</td></tr>`
+  ).join(''):'<tr><td colspan="8" style="color:#8b949e;text-align:center">strategy_lab.py 실행 대기 (BT는 즉시, FWD/갭은 누적)</td></tr>');
 }
 
 function fillAI(ai){
