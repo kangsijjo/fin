@@ -698,6 +698,11 @@ def cmd_buy():
             try:
                 ono = client.order_buy(code, qty)
                 print(f"    [매수주문] {code} {name} {qty}주 @ {int(close):,} → {ono}")
+                try:
+                    import notifier
+                    notifier.safe_send(f"🟢 [KIS 매수] {name}({code}) {qty}주 @ {int(close):,}원  [{strat}]")
+                except Exception:
+                    pass
                 log_order({
                     "time": datetime.now().strftime("%H:%M:%S"), "side": "buy",
                     "code": code, "name": name, "strategy": strat,
@@ -762,6 +767,11 @@ def cmd_sell():
         try:
             ono = client.order_sell(code, qty)
             print(f"  [매도주문] {code} {name} {qty}주 ref:{ref_px:,}  사유:{reason} → {ono}")
+            try:
+                import notifier
+                notifier.safe_send(f"🔴 [KIS 매도] {name}({code}) {qty}주 ref:{ref_px:,}원  사유:{reason}  [{strat}]")
+            except Exception:
+                pass
             log_order({
                 "time": datetime.now().strftime("%H:%M:%S"), "side": "sell",
                 "code": code, "name": name, "strategy": strat,

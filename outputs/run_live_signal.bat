@@ -28,4 +28,7 @@ echo [%date% %time%] strategy_lab done. ExitCode=%errorlevel% >> %LOGFILE%
 
 :: 일일 자동화 자가점검 — 오늘 자동화가 제대로 돌았는지 한 장 요약을 logs\daily_audit_날짜.log 에 남김.
 .venv\Scripts\python.exe -u daily_audit.py >> %LOGFILE% 2>&1
+
+:: 일일 요약 텔레그램 푸시 (신호/보유/예수금 한 장).
+.venv\Scripts\python.exe -u daily_summary.py >> %LOGFILE% 2>&1
 endlocal

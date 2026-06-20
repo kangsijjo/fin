@@ -454,6 +454,11 @@ def cmd_buy():
                 )
                 ono = _pick(r, "ord_no", "odno", default="")
                 print(f"    [매수주문] {code} {name} {qty}주 @ {int(close):,} → {ono}")
+                try:
+                    import notifier
+                    notifier.safe_send(f"🟢 [키움 매수] {name}({code}) {qty}주 @ {int(close):,}원")
+                except Exception:
+                    pass
                 log_order({
                     "time": datetime.now().strftime("%H:%M:%S"), "side": "buy",
                     "code": code, "name": name, "strategy": strat,
@@ -560,6 +565,11 @@ def cmd_sell():
             )
             ono = _pick(r, "ord_no", "odno", default="")
             print(f"  [매도주문] {code} {name} {qty}주 ref:{ref_px:,} → {ono}")
+            try:
+                import notifier
+                notifier.safe_send(f"🔴 [키움 매도] {name}({code}) {qty}주 ref:{ref_px:,}원")
+            except Exception:
+                pass
             log_order({"time": datetime.now().strftime("%H:%M:%S"), "side": "sell",
                        "code": code, "name": name, "strategy": strat,
                        "qty": qty, "price": ref_px,
