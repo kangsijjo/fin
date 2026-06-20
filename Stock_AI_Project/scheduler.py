@@ -30,6 +30,13 @@ if sys.platform == 'win32':
     except Exception:
         pass
 
+# stdout/stderr 를 UTF-8 로 강제 — 로그 리다이렉트(scheduler.log) 시 한글이 cp949 로 깨지는 것 방지 (2026-06-20).
+try:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
 _FAIL_LOG = os.path.join(os.path.dirname(__file__), 'logs', 'failures.log')
 os.makedirs(os.path.dirname(_FAIL_LOG), exist_ok=True)
 
