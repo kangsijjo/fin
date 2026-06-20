@@ -96,11 +96,28 @@ def get_corp_code(ticker):
 # ==========================================
 # 3. 데이터 수집 및 저장 파이프라인
 # ==========================================
+def _last_pubdate(ticker):
+    """news 테이블의 해당 종목 최신 공시일(YYYYMMDD). 없으면 None — 증분 수집 기준."""
+    try:
+        conn = get_connection()
+        row = conn.execute("SELECT MAX(pubDate) FROM news WHERE ticker=?", (ticker,)).fetchone()
+        conn.close()
+        v = row[0] if row else None
+        return str(v).replace("-", "")[:8] if v else None
+    except Exception:
+        return None
+
+
 def fetch_dart_historical(ticker, name, start_date='20150101'):
-    """과거 공시 10년치 대량 수집 (업데이트)"""
+    """공시 수집. 이미 받은 종목은 최신일부터만 받는다 (증분 — 2015 전체 재수집 방지).
+    최초 수집(DB에 없음)일 때만 start_date(2015)부터 전체 백필."""
     corp_code = get_corp_code(ticker)
     if not corp_code: return []
-    
+
+    last = _last_pubdate(ticker)
+    if last and last > start_date:
+        start_date = last   # 증분 시작점. 경계일 중복은 save_news 가 제거.
+
     news_list = []
     page = 1
     while True:
@@ -126,12 +143,24 @@ def fetch_dart_historical(ticker, name, start_date='20150101'):
     return news_list
 
 def save_news(news_list):
-    """DB 저장 (업데이트: sentiment 및 source 반영)"""
+    """DB 저장 (증분: 이미 있는 link 는 제외해 중복 append 방지)."""
     if not news_list: return
-    df = pd.DataFrame(news_list)
+    df = pd.DataFrame(news_list).drop_duplicates(subset=['link'])
+    # 이미 DB에 있는 link 제외 (to_sql append 가 INSERT OR IGNORE 가 아니라 중복 방지 직접 처리)
+    try:
+        conn = get_connection()
+        tks = list(df['ticker'].unique())
+        q = "SELECT link FROM news WHERE ticker IN ({})".format(",".join("?" * len(tks)))
+        existing = set(pd.read_sql(q, conn, params=tks)['link'])
+        conn.close()
+        df = df[~df['link'].isin(existing)]
+    except Exception:
+        pass
+    if df.empty:
+        print("  새 공시 없음 (증분)")
+        return
     print(f"  감성분석 중 ({len(df)}개)...")
     df['sentiment'] = analyze_sentiment(df['title'].tolist(), df['source'].tolist())
-    
     conn = get_connection()
     df.to_sql('news', conn, if_exists='append', index=False)
     conn.close()
