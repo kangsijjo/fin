@@ -19,4 +19,10 @@ if not exist .venv\Scripts\python.exe (
 
 .venv\Scripts\python.exe -u live_signal.py >> %LOGFILE% 2>&1
 echo [%date% %time%] Live signal done. ExitCode=%errorlevel% >> %LOGFILE%
+
+:: 전략 랩 (forward 누적) — live_signal 직후 같은 데이터로 29전략 백테스트→forward 집계.
+:: 결정론적이라 매일 재실행하면 LAB_START 이후 완료 트레이드가 자동 누적됨.
+echo [%date% %time%] strategy_lab starting >> %LOGFILE%
+.venv\Scripts\python.exe -u strategy_lab.py >> %LOGFILE% 2>&1
+echo [%date% %time%] strategy_lab done. ExitCode=%errorlevel% >> %LOGFILE%
 endlocal

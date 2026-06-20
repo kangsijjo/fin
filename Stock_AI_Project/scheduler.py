@@ -105,8 +105,10 @@ def daily_data_job():
     # → 토요일 08:00 kiwoom_weekly_job 에서 주 1회 일괄 수집.
 
     if _news_module_available():
-        _run_subprocess("뉴스/공시 수집",
-                        [sys.executable, "-m", "src.processor.news"])
+        # 'historical all' = 전 섹터 공시 수집 (sec 없으면 ACTIVE_SECTOR 하나만 받던 버그 수정,
+        #  2026-06-20). news 가 증분이라 전 섹터도 빠름. 30분 realtime 잡은 주도섹터만 받음(빈도↑).
+        _run_subprocess("뉴스/공시 수집 (전체 섹터)",
+                        [sys.executable, "-m", "src.processor.news", "historical", "all"])
     else:
         log("transformers 미설치 - 뉴스/공시 수집 스킵", level='WARNING')
     log("===== 일일 데이터 수집 완료 =====")
