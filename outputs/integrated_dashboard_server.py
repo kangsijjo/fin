@@ -156,10 +156,14 @@ def _latest_price(code):
 # ── 1. data freshness ──────────────────────────────────────────────────────────
 def get_freshness():
     issues = []
+    # (테이블, 쿼리, 최대허용일) — 주기에 맞춘 임계. 일일수집=5~6, 뉴스=7, 신용잔고=주1회라 10.
     checks = [
-        ("korea_stocks", "SELECT MAX(date) FROM korea_stocks", 5),
-        ("macro_indicators", "SELECT MAX(date) FROM macro_indicators", 7),
-        ("news", "SELECT MAX(pubDate) FROM news", 14),
+        ("korea_stocks",     "SELECT MAX(date) FROM korea_stocks", 5),
+        ("supply_demand",    "SELECT MAX(date) FROM supply_demand", 5),
+        ("usa_stocks",       "SELECT MAX(date) FROM usa_stocks", 6),
+        ("macro_indicators", "SELECT MAX(date) FROM macro_indicators", 6),
+        ("credit_balance",   "SELECT MAX(date) FROM credit_balance", 10),   # 주1회(토) kiwoom_weekly — 한 주 누락 시만 경고
+        ("news",             "SELECT MAX(pubDate) FROM news", 6),
     ]
     for name, q, max_days in checks:
         rows = safe_db(q)
@@ -1201,6 +1205,14 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
 <!-- ===== 개요 ===== -->
 <div id="tab-overview" class="tab-content active">
   <div class="section">
+    <h2>&#xC8FC;&#xC694; &#xD30C;&#xC77C; &#xD604;&#xD669;</h2>
+    <table><thead><tr>
+      <th>&#xD30C;&#xC77C;</th><th class="r">&#xD06C;&#xAE30;</th><th>&#xC218;&#xC815;&#xC2DC;&#xAC01;</th><th>&#xC0C1;&#xD0DC;</th>
+    </tr></thead>
+    <tbody id="dl-files"></tbody>
+    </table>
+  </div>
+  <div class="section">
     <h2>&#xCC9C;&#xC5B5;&#xC774; &#xC131;&#xACFC; (&#xBC31;&#xD14;&#xC2A4;&#xD2B8; &#xD3BC;&#xD3EC;)</h2>
     <div class="stats-row">
       <div class="stat"><div class="v pos" id="ov-cap">-</div><div class="l">&#xCD5C;&#xC885; &#xC790;&#xBCF8;</div></div>
@@ -1371,14 +1383,6 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
   <div class="section">
     <h2>&#xD398;&#xC774;&#xD37C; &#xB85C;&#xADF8; (paper_*.log)</h2>
     <pre class="logbox" id="log-live">&#xB85C;&#xB529;&#xC911;...</pre>
-  </div>
-  <div class="section">
-    <h2>&#xC8FC;&#xC694; &#xD30C;&#xC77C; &#xD604;&#xD669;</h2>
-    <table><thead><tr>
-      <th>&#xD30C;&#xC77C;</th><th class="r">&#xD06C;&#xAE30;</th><th>&#xC218;&#xC815;&#xC2DC;&#xAC01;</th><th>&#xC0C1;&#xD0DC;</th>
-    </tr></thead>
-    <tbody id="dl-files"></tbody>
-    </table>
   </div>
 </div>
 
