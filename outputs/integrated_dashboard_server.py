@@ -402,7 +402,12 @@ def get_strategy_compare():
 def get_strategy_lab():
     """전략 랩 — strategy_lab.py 가 만든 forward(OOS) 전략별 성과. results/strategy_lab_*.csv 최신본."""
     out = {"rows": [], "updated": ""}
-    files = sorted(RESULTS_DIR.glob("strategy_lab_*.csv"))
+    # ★ glob "strategy_lab_*.csv" 는 요약본(strategy_lab_YYYYMMDD.csv, 48행)뿐 아니라
+    #   거래내역(strategy_lab_trades_YYYYMMDD.csv, 25만행/12MB)까지 잡고,
+    #   정렬상 trades 파일이 뒤로 가 files[-1] 로 선택돼 25만행이 통째로 브라우저에 전송→
+    #   DOM 폭발(렌더러 수 GB) 버그가 있었다. trades 파일을 제외한다.
+    files = sorted(f for f in RESULTS_DIR.glob("strategy_lab_*.csv")
+                   if "_trades_" not in f.name)
     if not files:
         return out
     latest = files[-1]
@@ -1679,7 +1684,7 @@ function fillBacktest(bt, sc){
 }
 
 function fillLab(lab){
-  const rows=(lab&&lab.rows)||[];
+  const rows=((lab&&lab.rows)||[]).slice(0,200);   // 방어적 상한(대량 반환 시 DOM 폭발 방지)
   setHtml('lab-rows', rows.length?rows.map(r=>
     `<tr>
       <td style="font-size:12px">${r.strategy||''}</td>
@@ -1848,17 +1853,10 @@ async function load(){
   fetch('/api/intraday').then(r=>r.json()).then(fillIntraday).catch(()=>{});
 }
 
-// 탭이 보일 때만 새로고침. 평소엔 부분 갱신(부드러움), 30분마다 하드 리로드로
-// 누적 메모리를 통째로 회수한다(장시간 떠 있는 SPA 가 GB 단위로 부푸는 것 방지).
-let _cyc=0;
+// 탭이 보일 때만 새로고침(백그라운드/최소화 시 불필요한 서버호출·렌더 중단).
 window.addEventListener('load',()=>{
   load();
-  setInterval(()=>{
-    if(document.visibilityState!=='visible') return;   // 백그라운드면 건너뜀
-    _cyc++;
-    if(_cyc % 6 === 0) location.reload();               // 30분마다 메모리 회수
-    else load();                                        // 그 외 5분 부분갱신
-  }, 300_000);
+  setInterval(()=>{ if(document.visibilityState==='visible') load(); }, 300_000);
 });
 </script>
 </body>
