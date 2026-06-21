@@ -1638,7 +1638,9 @@ function fillBal(elId, snap){
   // 총평가금액 = 예수금 + 보유평가 (앱 헤드라인과 동일). 있으면 맨 앞에.
   if(snap.total_eval!=null)
     h+=`<div class="stat"><div class="v">${fmt(snap.total_eval)}원</div><div class="l">총평가금액</div></div>`;
-  h+=`<div class="stat"><div class="v" style="font-size:18px">${fmt(snap.deposit)}원</div><div class="l">예수금</div></div>`;
+  h+=`<div class="stat"><div class="v" style="font-size:18px">${fmt(snap.deposit)}원</div><div class="l">예수금(정산완료)</div></div>`;
+  if(snap.orderable!=null && snap.orderable!==snap.deposit)
+    h+=`<div class="stat"><div class="v" style="font-size:18px">${fmt(snap.orderable)}원</div><div class="l">주문가능(D+2)</div></div>`;
   if(snap.eval_pnl!=null)
     h+=`<div class="stat"><div class="v ${clr(snap.eval_pnl)}" style="font-size:18px">${fmt(snap.eval_pnl)}원</div><div class="l">평가손익</div></div>`;
   h+=`<div class="stat"><div class="v">${npos}</div><div class="l">보유 종목</div></div>`;

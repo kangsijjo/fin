@@ -254,11 +254,12 @@ class KISMockClient:
         # 총평가금액·평가손익 등 요약(앱 헤드라인과 동일 항목). 반환 시그니처는 유지하고
         # 마지막 조회 요약을 속성에 보관 → cmd_status 가 스냅샷에 함께 기록.
         self.last_summary = {
-            "deposit":      deposit,                                     # 예수금총금액
-            "total_eval":   _to_int(o2d.get("tot_evlu_amt", 0)),        # 총평가금액(예수금+보유평가)
-            "securities":   _to_int(o2d.get("scts_evlu_amt", 0)),       # 유가증권 평가금액
-            "eval_pnl":     _to_int(o2d.get("evlu_pfls_smtl_amt", 0)),  # 평가손익합계
-            "purchase_amt": _to_int(o2d.get("pchs_amt_smtl_amt", 0)),   # 매입금액합계
+            "deposit":      deposit,                                       # 예수금총금액(정산완료분)
+            "orderable":    _to_int(o2d.get("prvs_rcdl_excc_amt", 0)),    # 가수도정산금액(D+2 정산대기 포함 주문가능)
+            "total_eval":   _to_int(o2d.get("tot_evlu_amt", 0)),          # 총평가금액(앱 헤드라인)
+            "securities":   _to_int(o2d.get("scts_evlu_amt", 0)),         # 유가증권 평가금액
+            "eval_pnl":     _to_int(o2d.get("evlu_pfls_smtl_amt", 0)),    # 평가손익합계
+            "purchase_amt": _to_int(o2d.get("pchs_amt_smtl_amt", 0)),     # 매입금액합계
         }
 
         positions = {}
@@ -560,8 +561,9 @@ def cmd_status():
     kis_pos = load_kis_positions()
 
     _sm = getattr(client, "last_summary", {}) or {}
-    print(f"\n[KIS 모의 — 안D] 총평가금액: {_sm.get('total_eval', 0):,} 원"
-          f"  (예수금 {deposit:,} + 보유평가 {_sm.get('securities', 0):,})")
+    print(f"\n[KIS 모의 — 안D] 총평가금액: {_sm.get('total_eval', 0):,} 원")
+    print(f"  예수금(정산완료) {deposit:,}  /  주문가능(D+2정산포함) {_sm.get('orderable', 0):,}"
+          f"  /  보유평가 {_sm.get('securities', 0):,}")
     print(f"[평가손익] {_sm.get('eval_pnl', 0):,} 원  (매입합계 {_sm.get('purchase_amt', 0):,})")
     print(f"[보유 종목] {len(positions)} / {MAX_CONCURRENT} 슬롯")
     for strat in STRATEGY_PRIORITY:
@@ -583,6 +585,7 @@ def cmd_status():
             "time":      datetime.now().strftime("%H:%M"),
             "broker":    "KIS_mock_andD",
             "deposit":   deposit,
+            "orderable":    _sm.get("orderable"),      # 주문가능(D+2 정산대기 포함)
             "total_eval":   _sm.get("total_eval"),     # 총평가금액(앱 헤드라인)
             "securities":   _sm.get("securities"),     # 보유 평가금액
             "eval_pnl":     _sm.get("eval_pnl"),       # 평가손익합계
