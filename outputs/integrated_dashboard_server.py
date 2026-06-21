@@ -1169,6 +1169,7 @@ _RUN_TASKS = {
     "ai_dataset":    [_VENV_PYTHON, str(BASE / "make_trades_history_v3.py")],        # AI 학습 데이터셋 생성
     "ai_train":      [_VENV_PYTHON, str(BASE / "ai_trainer_v4.py")],                 # meta_model_v4 재학습
     "strategy_lab":  [_VENV_PYTHON, str(BASE / "strategy_lab.py")],                  # 전략 랩 forward 집계
+    "stop_cf":       [_VENV_PYTHON, str(BASE / "build_stop_counterfactual.py")],     # 장중손절 반사실 라벨 누적
 }
 
 
