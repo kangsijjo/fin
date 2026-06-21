@@ -1634,10 +1634,16 @@ function fillBal(elId, snap){
   const el=document.getElementById(elId); if(!el) return;
   if(!snap || snap.deposit==null){ el.innerHTML='<div style="color:#8b949e;font-size:13px">스냅샷 없음</div>'; return; }
   const npos=(snap.positions||[]).length;
-  el.innerHTML=
-    `<div class="stat"><div class="v">${fmt(snap.deposit)}원</div><div class="l">예수금</div></div>`
-   +`<div class="stat"><div class="v">${npos}</div><div class="l">보유 종목</div></div>`
-   +`<div class="stat"><div class="v" style="font-size:14px">${snap.date||''} ${snap.time||''}</div><div class="l">스냅샷 기준</div></div>`;
+  let h='';
+  // 총평가금액 = 예수금 + 보유평가 (앱 헤드라인과 동일). 있으면 맨 앞에.
+  if(snap.total_eval!=null)
+    h+=`<div class="stat"><div class="v">${fmt(snap.total_eval)}원</div><div class="l">총평가금액</div></div>`;
+  h+=`<div class="stat"><div class="v" style="font-size:18px">${fmt(snap.deposit)}원</div><div class="l">예수금</div></div>`;
+  if(snap.eval_pnl!=null)
+    h+=`<div class="stat"><div class="v ${clr(snap.eval_pnl)}" style="font-size:18px">${fmt(snap.eval_pnl)}원</div><div class="l">평가손익</div></div>`;
+  h+=`<div class="stat"><div class="v">${npos}</div><div class="l">보유 종목</div></div>`;
+  h+=`<div class="stat"><div class="v" style="font-size:14px">${snap.date||''} ${snap.time||''}</div><div class="l">스냅샷 기준</div></div>`;
+  el.innerHTML=h;
 }
 function fillOrders(elId, cntId, orders, total){
   const tb=document.getElementById(elId); if(!tb) return;
