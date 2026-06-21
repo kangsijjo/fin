@@ -99,6 +99,23 @@ try {
         -Action $a7 -Trigger $t7 -Settings $s7 -Principal $principal -Force | Out-Null
     Write-Host "[OK] StockAI\KisBalance (weekdays 15:40, runs on wake if missed)" -ForegroundColor Green
 
+    # 8. KIS intraday stop-loss check: weekdays, every 15 min 09:05~15:20 (bat 내부 장중 가드)
+    Write-Host "[8/8] Registering KIS intraday stop-loss check..."
+    $a8 = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_kis_stopcheck.bat"
+    $t8 = New-ScheduledTaskTrigger -Daily -At "09:05"
+    # 15분 간격 반복(6시간15분 동안) 부착 — Once 트리거의 Repetition 을 복사
+    $rep = (New-ScheduledTaskTrigger -Once -At "09:05" `
+                -RepetitionInterval (New-TimeSpan -Minutes 15) `
+                -RepetitionDuration (New-TimeSpan -Hours 6 -Minutes 15)).Repetition
+    $t8.Repetition = $rep
+    $s8 = New-ScheduledTaskSettingsSet `
+              -MultipleInstances IgnoreNew `
+              -StartWhenAvailable `
+              -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+    Register-ScheduledTask -TaskName "StockAI\KisStopCheck" `
+        -Action $a8 -Trigger $t8 -Settings $s8 -Principal $principal -Force | Out-Null
+    Write-Host "[OK] StockAI\KisStopCheck (weekdays, every 15min 09:05-15:20)" -ForegroundColor Green
+
     Write-Host ""
     Write-Host "=== Registered Tasks ===" -ForegroundColor Cyan
     Get-ScheduledTask -TaskPath "\StockAI\" | Format-Table TaskName, State -AutoSize

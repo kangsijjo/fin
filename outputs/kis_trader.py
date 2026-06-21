@@ -268,7 +268,12 @@ class KISMockClient:
             qty  = _to_int(it.get("hldg_qty", "0"))
             name = it.get("prdt_name", "")
             if code and qty > 0:
-                positions[code] = {"qty": qty, "name": name}
+                positions[code] = {
+                    "qty": qty, "name": name,
+                    "price":     _to_int(it.get("prpr", 0)),          # 현재가(장중 라이브)
+                    "avg_price": _to_int(it.get("pchs_avg_pric", 0)),  # 매입평균
+                    "pnl_pct":   _to_float(it.get("evlu_pfls_rt", 0)), # 평가손익률(%)
+                }
         return deposit, positions
 
     def order_buy(self, code: str, qty: int) -> str:
@@ -815,6 +820,99 @@ def cmd_sell():
     print(f"[sell] 주문 {n_placed}건 완료")
 
 
+def cmd_stop_check():
+    """장중 손절 전용(stop-only). 15분마다 호출.
+
+    잔고 API 의 종목별 현재가(라이브)로 '진입가 대비' 손절가 도달분만 시장가 매도.
+    만기청산은 건드리지 않는다(그건 15:21 cmd_sell 담당).
+    진입가: 우리 추적치(kis_positions.csv) 우선, 없으면 broker 매입평균.
+    멱등: 같은 날 이미 매도주문 낸 종목은 today_ordered_codes 로 스킵.
+    """
+    client = KISMockClient()
+    _, positions = client.get_balance()
+    if not positions:
+        print("[stop] 보유 종목 없음 — 종료")
+        return
+
+    kis_pos = load_kis_positions()
+    strategy_map = get_signal_strategy_map()
+    already = today_ordered_codes("sell")
+
+    targets = []
+    monitor = []   # 대시보드 표시용 — 보유 전종목의 손익 vs 손절 현황(매 15분 갱신)
+    for code, p in positions.items():
+        strat = strategy_map.get(str(code).zfill(6), "")
+        stop_pct = STRATEGY_STOP.get(strat)
+        cur = float(p.get("price", 0) or 0)
+        entry_px = float(kis_pos.get(code, {}).get("entry_px", 0) or 0)
+        if entry_px <= 0:
+            entry_px = float(p.get("avg_price", 0) or 0)   # 추적치 없으면 broker 매입평균
+        pnl = (cur / entry_px - 1) if (cur > 0 and entry_px > 0) else None
+        if stop_pct is not None and pnl is not None:
+            # 손절가까지 남은 여유(%p). 0 이하면 발동.
+            room = (pnl - stop_pct) * 100
+            monitor.append({
+                "code": code, "name": p["name"], "pnl_pct": round(pnl * 100, 2),
+                "stop_pct": round(stop_pct * 100, 1), "room_pp": round(room, 2),
+                "imminent": room <= 3.0,   # 손절까지 3%p 이내면 임박
+            })
+        if code in already:
+            continue
+        if stop_pct is None or pnl is None:
+            continue
+        if pnl <= stop_pct:
+            targets.append((code, p["name"], int(p["qty"]), strat, cur, pnl))
+
+    # 손절 모니터 저장(대시보드 읽기 전용)
+    try:
+        os.makedirs(ORDERS_DIR, exist_ok=True)
+        with open(f"{ORDERS_DIR}/kis_stop_monitor.json", "w", encoding="utf-8") as f:
+            json.dump({"updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                       "items": sorted(monitor, key=lambda x: x["room_pp"])}, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+    if not targets:
+        print(f"[stop] 보유 {len(positions)}건 점검 — 손절 발동 없음")
+        return
+
+    print(f"[stop] 손절 발동 {len(targets)}건")
+    n = 0
+    for code, name, qty, strat, cur, pnl in targets:
+        try:
+            ono = client.order_sell(code, qty)
+            print(f"  [손절매도] {code} {name} {qty}주 현재:{cur:,} 손익:{pnl*100:.1f}% → {ono}")
+            try:
+                import notifier
+                notifier.queue_fill("sell", name, code, qty, cur)
+            except Exception:
+                pass
+            log_order({
+                "time": datetime.now().strftime("%H:%M:%S"), "side": "sell",
+                "code": code, "name": name, "strategy": strat,
+                "qty": qty, "price": int(cur),
+                "order_type": "시장가(VTTC0801U)", "reason": "stop_intraday",
+                "ok": True, "order_no": ono, "msg": f"pnl={pnl*100:.1f}%",
+            })
+            remove_kis_position(code)
+            n += 1
+        except Exception as e:
+            print(f"  [실패] {code} {name}: {e}")
+            log_order({
+                "time": datetime.now().strftime("%H:%M:%S"), "side": "sell",
+                "code": code, "name": name, "strategy": strat,
+                "qty": qty, "price": int(cur),
+                "order_type": "시장가(VTTC0801U)", "reason": "stop_intraday",
+                "ok": False, "order_no": "", "msg": str(e)[:200],
+            })
+    print(f"[stop] 손절 주문 {n}건 완료")
+    try:
+        import notifier
+        notifier.flush_fills("[KIS 손절]")
+    except Exception:
+        pass
+
+
 # ── 진입점 ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
@@ -828,6 +926,8 @@ if __name__ == "__main__":
             cmd_buy()
         elif cmd == "sell":
             cmd_sell()
+        elif cmd == "stopcheck":
+            cmd_stop_check()
         elif cmd == "daily":
             # stop-loss는 전일 종가 기준 → 오전/오후 구분 없이 항상 sell 먼저 실행
             # (만기 청산은 오후에만 발동. 오전 실행 시 stop 발동 건만 매도됨)
@@ -837,7 +937,7 @@ if __name__ == "__main__":
             cmd_status()
         else:
             print(f"[main] 알 수 없는 명령: {cmd}")
-            print("사용법: python kis_trader.py [status|buy|sell|daily]")
+            print("사용법: python kis_trader.py [status|buy|sell|stopcheck|daily]")
             sys.exit(1)
 
     # 체결 묶음 알림 — 이번 실행에서 쌓인 매수/매도를 1통으로 (없으면 전송 안 함)

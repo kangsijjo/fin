@@ -511,6 +511,13 @@ def get_kis_mock(date_from="", date_to=""):
             out["snapshot"] = json.loads(snap_path.read_text(encoding="utf-8"))
         except Exception:
             pass
+    # 장중 손절 모니터(kis_trader stopcheck 가 15분마다 기록 — 읽기 전용)
+    mon_path = KIWOOM_DIR / "kis_stop_monitor.json"
+    if mon_path.exists():
+        try:
+            out["stop_monitor"] = json.loads(mon_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
     # 진입가 추적 (stop-loss 모니터링)
     pos_path = KIS_DIR / "kis_positions.csv"
     if pos_path.exists():
@@ -1401,6 +1408,14 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
     <div class="stats-row" id="kis-bal"></div>
   </div>
   <div class="section">
+    <h2>KIS 손절 모니터 <span id="kis-stop-ts" style="color:#8b949e;font-size:11px;font-weight:400"></span></h2>
+    <table><thead><tr>
+      <th>종목</th><th class="r">현재손익</th><th class="r">손절선</th><th class="r">여유(%p)</th><th>상태</th>
+    </tr></thead>
+    <tbody id="kis-stop-rows"><tr><td colspan="5" style="color:#8b949e;text-align:center">장중 15분마다 갱신 (보유 없음/장외)</td></tr></tbody>
+    </table>
+  </div>
+  <div class="section">
     <h2>KIS &#xBAA8;&#xC758;&#xD22C;&#xC790; &#xC2AC;&#xB86F;</h2>
     <div class="stats-row" id="kis-slots"></div>
   </div>
@@ -1668,6 +1683,29 @@ function fillOrders(elId, cntId, orders, total){
   }).join('') : '<tr><td colspan="7" style="color:#8b949e;text-align:center">매매내역 없음</td></tr>';
 }
 
+function fillStopMonitor(elId, tsId, mon){
+  const tb=document.getElementById(elId); if(!tb) return;
+  const items=(mon&&mon.items)||[];
+  const ts=document.getElementById(tsId);
+  if(ts) ts.textContent = mon&&mon.updated ? '('+mon.updated+')' : '';
+  if(!items.length){
+    tb.innerHTML='<tr><td colspan="5" style="color:#8b949e;text-align:center">장중 15분마다 갱신 (보유 없음/장외)</td></tr>';
+    return;
+  }
+  tb.innerHTML=items.map(x=>{
+    const fired=x.room_pp<=0, imm=x.imminent;
+    const badge=fired?'<span style="color:#f85149;font-weight:bold">● 발동</span>'
+              :imm?'<span style="color:#d29922;font-weight:bold">▲ 임박</span>'
+              :'<span style="color:#3fb950">정상</span>';
+    return `<tr>
+      <td>${x.name||''} <span style="color:#8b949e;font-size:11px">${x.code||''}</span></td>
+      <td class="r ${clr(x.pnl_pct)}">${(x.pnl_pct>=0?'+':'')+x.pnl_pct}%</td>
+      <td class="r neg">${x.stop_pct}%</td>
+      <td class="r ${x.room_pp<=3?'neg':'neu'}">${x.room_pp}</td>
+      <td>${badge}</td></tr>`;
+  }).join('');
+}
+
 function fillMock(mock, kis){
   // Kiwoom
   if(mock&&!mock.error){
@@ -1686,6 +1724,7 @@ function fillMock(mock, kis){
   // KIS
   if(kis&&!kis.error){
     fillBal('kis-bal', kis.snapshot);
+    fillStopMonitor('kis-stop-rows','kis-stop-ts', kis.stop_monitor);
     fillOrders('kis-orders','kis-ord-cnt', kis.orders, kis.order_total);
     fillSlots('kis-slots', kis.slots||[]);
     const pos=kis.positions||[];
