@@ -446,7 +446,7 @@ def get_kiwoom_mock(date_from="", date_to=""):
             if date_to and date_str > date_to.replace("-",""):
                 continue
             try:
-                df = pd.read_csv(f, dtype={"code": str})
+                df = pd.read_csv(f, dtype={"code": str}, encoding="utf-8-sig")
                 df["date"] = date_str
                 frames.append(df)
             except Exception:
@@ -530,7 +530,7 @@ def get_kis_mock(date_from="", date_to=""):
             if date_to and date_str > date_to.replace("-", ""):
                 continue
             try:
-                df = pd.read_csv(f, dtype={"code": str})
+                df = pd.read_csv(f, dtype={"code": str}, encoding="utf-8-sig")
                 df["date"] = date_str
                 frames.append(df)
             except Exception:
@@ -1370,6 +1370,10 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
 <div id="tab-mock" class="tab-content">
   <!-- Kiwoom -->
   <div class="section">
+    <h2>키움 잔고</h2>
+    <div class="stats-row" id="mock-bal"></div>
+  </div>
+  <div class="section">
     <h2>&#xD0A4;&#xC6C0; &#xBAA8;&#xC758;&#xD22C;&#xC790; &#xC2AC;&#xB86F;</h2>
     <div class="stats-row" id="mock-slots"></div>
   </div>
@@ -1382,7 +1386,20 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
     <tbody id="mock-pos"><tr><td colspan="7" style="color:#8b949e;text-align:center">&#xBCF4;&#xC720; &#xD3EC;&#xC9C0;&#xC158; &#xC5C6;&#xC74C;</td></tr></tbody>
     </table>
   </div>
+  <div class="section">
+    <h2>키움 매매내역 <span id="mock-ord-cnt" style="color:#8b949e;font-size:11px;font-weight:400"></span></h2>
+    <table><thead><tr>
+      <th class="r">시각</th><th>구분</th><th>종목</th><th>전략</th>
+      <th class="r">수량</th><th class="r">가격</th><th>사유</th>
+    </tr></thead>
+    <tbody id="mock-orders"><tr><td colspan="7" style="color:#8b949e;text-align:center">매매내역 없음</td></tr></tbody>
+    </table>
+  </div>
   <!-- KIS -->
+  <div class="section">
+    <h2>KIS 잔고</h2>
+    <div class="stats-row" id="kis-bal"></div>
+  </div>
   <div class="section">
     <h2>KIS &#xBAA8;&#xC758;&#xD22C;&#xC790; &#xC2AC;&#xB86F;</h2>
     <div class="stats-row" id="kis-slots"></div>
@@ -1394,6 +1411,15 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
       <th class="r">&#xD3C9;&#xADE0;&#xB2E8;&#xAC00;</th><th class="r">&#xD604;&#xC7AC;&#xAC00;</th><th class="r">&#xD3C9;&#xAC00;&#xC190;&#xC775;</th><th class="r">&#xC9C4;&#xC785;&#xC77C;</th>
     </tr></thead>
     <tbody id="kis-pos"><tr><td colspan="7" style="color:#8b949e;text-align:center">&#xBCF4;&#xC720; &#xD3EC;&#xC9C0;&#xC158; &#xC5C6;&#xC74C;</td></tr></tbody>
+    </table>
+  </div>
+  <div class="section">
+    <h2>KIS 매매내역 <span id="kis-ord-cnt" style="color:#8b949e;font-size:11px;font-weight:400"></span></h2>
+    <table><thead><tr>
+      <th class="r">시각</th><th>구분</th><th>종목</th><th>전략</th>
+      <th class="r">수량</th><th class="r">가격</th><th>사유</th>
+    </tr></thead>
+    <tbody id="kis-orders"><tr><td colspan="7" style="color:#8b949e;text-align:center">매매내역 없음</td></tr></tbody>
     </table>
   </div>
 </div>
@@ -1602,9 +1628,41 @@ function fillSlots(elId, slots){
   }).join('');
 }
 
+function fillBal(elId, snap){
+  const el=document.getElementById(elId); if(!el) return;
+  if(!snap || snap.deposit==null){ el.innerHTML='<div style="color:#8b949e;font-size:13px">스냅샷 없음</div>'; return; }
+  const npos=(snap.positions||[]).length;
+  el.innerHTML=
+    `<div class="stat"><div class="v">${fmt(snap.deposit)}원</div><div class="l">예수금</div></div>`
+   +`<div class="stat"><div class="v">${npos}</div><div class="l">보유 종목</div></div>`
+   +`<div class="stat"><div class="v" style="font-size:14px">${snap.date||''} ${snap.time||''}</div><div class="l">스냅샷 기준</div></div>`;
+}
+function fillOrders(elId, cntId, orders, total){
+  const tb=document.getElementById(elId); if(!tb) return;
+  const rows=(orders||[]).slice(-50).reverse();   // 최신 50건만(최신순)
+  const cnt=document.getElementById(cntId);
+  if(cnt) cnt.textContent = total ? `(전체 ${fmt(total)}건 중 최근 ${rows.length})` : '';
+  tb.innerHTML = rows.length ? rows.map(o=>{
+    const sell=String(o.side||'').toLowerCase()==='sell';
+    const d=String(o.date||'');
+    const dstr=d.length>=8 ? d.slice(4,6)+'/'+d.slice(6,8)+' ' : '';
+    const fail=(o.ok===false || o.ok==='False');
+    return `<tr>
+      <td class="r" style="font-size:11px">${dstr}${o.time||''}</td>
+      <td class="${sell?'neg':'pos'}">${sell?'매도':'매수'}</td>
+      <td>${o.name||''} <span style="color:#8b949e;font-size:11px">${o.code||''}</span></td>
+      <td style="color:#8b949e;font-size:11px">${o.strategy||''}</td>
+      <td class="r">${fmt(o.qty)}</td>
+      <td class="r">${fmt(o.price)}</td>
+      <td style="font-size:11px;color:#8b949e">${o.reason||''}${fail?' ✕실패':''}</td></tr>`;
+  }).join('') : '<tr><td colspan="7" style="color:#8b949e;text-align:center">매매내역 없음</td></tr>';
+}
+
 function fillMock(mock, kis){
   // Kiwoom
   if(mock&&!mock.error){
+    fillBal('mock-bal', mock.snapshot);
+    fillOrders('mock-orders','mock-ord-cnt', mock.orders, mock.order_total);
     fillSlots('mock-slots', mock.slots||[]);
     const pos=mock.positions||[];
     setHtml('mock-pos', pos.length?pos.map(r=>
@@ -1617,6 +1675,8 @@ function fillMock(mock, kis){
   }
   // KIS
   if(kis&&!kis.error){
+    fillBal('kis-bal', kis.snapshot);
+    fillOrders('kis-orders','kis-ord-cnt', kis.orders, kis.order_total);
     fillSlots('kis-slots', kis.slots||[]);
     const pos=kis.positions||[];
     setHtml('kis-pos', pos.length?pos.map(r=>
