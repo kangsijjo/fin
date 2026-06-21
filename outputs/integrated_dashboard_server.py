@@ -1694,7 +1694,7 @@ function fillStopMonitor(elId, tsId, mon){
   }
   tb.innerHTML=items.map(x=>{
     const fired=x.room_pp<=0, imm=x.imminent;
-    const badge=fired?'<span style="color:#f85149;font-weight:bold">● 발동</span>'
+    const badge=fired?'<span style="color:#f85149;font-weight:bold">● 손절선도달(마감청산)</span>'
               :imm?'<span style="color:#d29922;font-weight:bold">▲ 임박</span>'
               :'<span style="color:#3fb950">정상</span>';
     return `<tr>
