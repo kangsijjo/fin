@@ -636,6 +636,34 @@ def todays_signals():
     return s[s["signal_date"] == target].to_dict("records")
 
 
+def _reconcile_diff(positions):
+    """브로커 잔고 vs 로컬 추적(kis_positions.csv) 불일치 계산.
+    반환: (orphan, stale) — orphan=브로커만 보유(추적 누락), stale=로컬만 보유(브로커 없음).
+    """
+    broker = set(str(c).zfill(6) for c in positions.keys())
+    local = set(str(c).zfill(6) for c in load_kis_positions().keys())
+    return sorted(broker - local), sorted(local - broker)
+
+
+def cmd_reconcile():
+    """장 시작 직전/직후 잔고 정합성 점검. 불일치 시 텔레그램 경고."""
+    client = KISMockClient()
+    _, positions = client.get_balance()
+    orphan, stale = _reconcile_diff(positions)
+    print(f"[reconcile] 브로커 보유 {len(positions)}건 / orphan(브로커만) {orphan} / stale(로컬만) {stale}")
+    if orphan or stale:
+        msg = (f"⚠ 잔고 정합성 불일치\n브로커만(추적누락): {orphan}\n로컬만(브로커없음): {stale}\n"
+               f"→ 손절·매수 관리 사각지대. 확인 필요.")
+        try:
+            import notifier
+            notifier.safe_send(msg)
+        except Exception:
+            pass
+        return False
+    print("[reconcile] 일치 — 정상")
+    return True
+
+
 def cmd_buy():
     sigs = todays_signals()
     if not sigs:
@@ -644,6 +672,27 @@ def cmd_buy():
 
     client = KISMockClient()
     deposit, positions = client.get_balance()
+
+    # ── 정합성 게이트(오주문 방지) ──────────────────────────────────────────
+    # 브로커 잔고가 비었는데 로컬 추적엔 보유가 있으면 = API 응답 누락 의심.
+    # 이 상태로 슬롯을 세면 '다 비었다'고 오판해 과다 매수 → 강제 중단.
+    orphan, stale = _reconcile_diff(positions)
+    if not positions and load_kis_positions():
+        print("[buy] 잔고 응답 의심(브로커 0 / 로컬 보유 있음) — 오주문 방지 위해 매수 중단")
+        try:
+            import notifier
+            notifier.safe_send("⛔ [KIS buy 중단] 잔고 응답이 비어 있음(로컬은 보유). API 누락 의심 → 매수 스킵.")
+        except Exception:
+            pass
+        return
+    if orphan or stale:
+        print(f"[buy] 정합성 경고 — orphan(브로커만){orphan} / stale(로컬만){stale} (경고만, 매수는 진행)")
+        try:
+            import notifier
+            notifier.safe_send(f"⚠ [KIS buy] 잔고 불일치 orphan{orphan}/stale{stale} — 진행하되 확인 권장")
+        except Exception:
+            pass
+
     already = today_ordered_codes("buy")
     strategy_map = get_signal_strategy_map()
     slot_used = count_slots_by_strategy(positions.keys(), strategy_map)
@@ -928,6 +977,8 @@ if __name__ == "__main__":
             cmd_sell()
         elif cmd == "stopcheck":
             cmd_stop_check()
+        elif cmd == "reconcile":
+            cmd_reconcile()
         elif cmd == "daily":
             # stop-loss는 전일 종가 기준 → 오전/오후 구분 없이 항상 sell 먼저 실행
             # (만기 청산은 오후에만 발동. 오전 실행 시 stop 발동 건만 매도됨)
@@ -937,7 +988,7 @@ if __name__ == "__main__":
             cmd_status()
         else:
             print(f"[main] 알 수 없는 명령: {cmd}")
-            print("사용법: python kis_trader.py [status|buy|sell|stopcheck|daily]")
+            print("사용법: python kis_trader.py [status|buy|sell|stopcheck|reconcile|daily]")
             sys.exit(1)
 
     # 체결 묶음 알림 — 이번 실행에서 쌓인 매수/매도를 1통으로 (없으면 전송 안 함)
