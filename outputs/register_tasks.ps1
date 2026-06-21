@@ -87,6 +87,18 @@ try {
         -Action $a6 -Trigger $t6 -Settings $s6 -Principal $principal -Force | Out-Null
     Write-Host "[OK] StockAI\Dashboard (at logon, 60s delay)" -ForegroundColor Green
 
+    # 7. KIS balance snapshot refresh: weekdays 15:40 (after market close)
+    Write-Host "[7/7] Registering KIS balance refresh..."
+    $a7  = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_kis_status.bat"
+    $t7  = New-ScheduledTaskTrigger -Weekly `
+               -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "15:40"
+    $s7  = New-ScheduledTaskSettingsSet `
+               -StartWhenAvailable `
+               -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
+    Register-ScheduledTask -TaskName "StockAI\KisBalance" `
+        -Action $a7 -Trigger $t7 -Settings $s7 -Principal $principal -Force | Out-Null
+    Write-Host "[OK] StockAI\KisBalance (weekdays 15:40, runs on wake if missed)" -ForegroundColor Green
+
     Write-Host ""
     Write-Host "=== Registered Tasks ===" -ForegroundColor Cyan
     Get-ScheduledTask -TaskPath "\StockAI\" | Format-Table TaskName, State -AutoSize

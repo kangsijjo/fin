@@ -1520,6 +1520,8 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
       <button class="runbtn" onclick="runTask('live_signal','&#xC2E0;&#xD638; &#xAC10;&#xC9C0;')">&#xC2E0;&#xD638; &#xAC10;&#xC9C0;</button>
       <button class="runbtn" onclick="runTask('paper_tracker','&#xD398;&#xC774;&#xD37C; &#xCD94;&#xC801;')">&#xD398;&#xC774;&#xD37C; &#xCD94;&#xC801;</button>
       <button class="runbtn" onclick="runTask('recheck','&#xB370;&#xC774;&#xD130; &#xC7AC;&#xAC80;&#xC99D;')">&#xC7AC;&#xAC80;&#xC99D;</button>
+      <button class="runbtn" onclick="runTask('kis_status','KIS 잔고 새로고침',5000)">KIS 잔고 새로고침</button>
+      <button class="runbtn" onclick="runTask('kiwoom_status','키움 잔고 새로고침',5000)">키움 잔고 새로고침</button>
       <button class="runbtn danger" onclick="runTask('scheduler_restart','&#xC2A4;&#xCF00;&#xC904;&#xB7EC; &#xC7AC;&#xC2DC;&#xC791;')">&#xC2A4;&#xCF00;&#xC904;&#xB7EC; &#xC7AC;&#xC2DC;&#xC791;</button>
     </div>
     <div id="run-status" style="margin-top:10px;color:#8b949e;font-size:13px">&#xBC84;&#xD2BC;&#xC744; &#xB204;&#xB974;&#xBA74; &#xD574;&#xB2F9; &#xC791;&#xC5C5;&#xC774; &#xBC31;&#xADF8;&#xB77C;&#xC6B4;&#xB4DC;&#xB85C; &#xC2E4;&#xD589;&#xB429;&#xB2C8;&#xB2E4; (&#xB85C;&#xADF8;: logs/ &#xD3F4;&#xB354;).</div>
@@ -1811,12 +1813,14 @@ function fillAI(ai){
   }).join(''));
 }
 
-function runTask(task, label){
+function runTask(task, label, reloadMs){
   if(!confirm(label+' 실행할까요?')) return;
   const el=document.getElementById('run-status');
   if(el) el.textContent=label+' 시작 요청 중...';
   fetch('/api/run/'+task,{method:'POST'}).then(r=>r.json()).then(d=>{
     if(el) el.textContent='['+label+'] '+(d.msg||(d.ok?'시작됨':'실패'))+'  ('+new Date().toLocaleTimeString()+')';
+    // reloadMs 지정 시(예: 잔고 새로고침) 작업이 끝날 시간을 준 뒤 데이터만 다시 불러온다.
+    if(reloadMs && d.ok){ if(el) el.textContent+=' — '+(reloadMs/1000)+'초 후 갱신'; setTimeout(()=>load(), reloadMs); }
   }).catch(e=>{ if(el) el.textContent='['+label+'] 오류: '+e.message; });
 }
 
