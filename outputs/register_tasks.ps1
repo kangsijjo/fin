@@ -116,6 +116,39 @@ try {
         -Action $a8 -Trigger $t8 -Settings $s8 -Principal $principal -Force | Out-Null
     Write-Host "[OK] StockAI\KisStopCheck (weekdays, every 15min 09:05-15:20)" -ForegroundColor Green
 
+    # 9. Kiwoom trader (안C): weekdays 09:03 매수 + 15:21 매도
+    #    ※ run_kiwoom.bat 은 'daily' 가 시계로 분기(12시 이전=buy, 이후=sell)라 두 번 실행 필요.
+    #    ※ 인자 'auto' 없으면 bat 이 pause 로 멈춤 → 반드시 -Argument "auto".
+    Write-Host "[9/9] Registering Kiwoom trader..."
+    $a9  = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_kiwoom.bat" -Argument "auto"
+    $t9a = New-ScheduledTaskTrigger -Weekly `
+               -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "09:03"
+    $t9b = New-ScheduledTaskTrigger -Weekly `
+               -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "15:21"
+    $s9  = New-ScheduledTaskSettingsSet `
+               -MultipleInstances IgnoreNew `
+               -StartWhenAvailable `
+               -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+    Register-ScheduledTask -TaskName "StockAI\KiwoomTrader" `
+        -Action $a9 -Trigger $t9a,$t9b -Settings $s9 -Principal $principal -Force | Out-Null
+    Write-Host "[OK] StockAI\KiwoomTrader (weekdays 09:03 buy + 15:21 sell)" -ForegroundColor Green
+
+    # 10. 장중 잠정 예비후보(정보용): weekdays, 매시간 09:30~15:30 (bat 내부 장중 가드)
+    Write-Host "[10/10] Registering intraday preview..."
+    $a10 = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_intraday_preview.bat"
+    $t10 = New-ScheduledTaskTrigger -Daily -At "09:30"
+    $rep10 = (New-ScheduledTaskTrigger -Once -At "09:30" `
+                  -RepetitionInterval (New-TimeSpan -Hours 1) `
+                  -RepetitionDuration (New-TimeSpan -Hours 6)).Repetition
+    $t10.Repetition = $rep10
+    $s10 = New-ScheduledTaskSettingsSet `
+               -MultipleInstances IgnoreNew `
+               -StartWhenAvailable `
+               -ExecutionTimeLimit (New-TimeSpan -Minutes 20)
+    Register-ScheduledTask -TaskName "StockAI\IntradayPreview" `
+        -Action $a10 -Trigger $t10 -Settings $s10 -Principal $principal -Force | Out-Null
+    Write-Host "[OK] StockAI\IntradayPreview (weekdays, hourly 09:30-15:30)" -ForegroundColor Green
+
     Write-Host ""
     Write-Host "=== Registered Tasks ===" -ForegroundColor Cyan
     Get-ScheduledTask -TaskPath "\StockAI\" | Format-Table TaskName, State -AutoSize

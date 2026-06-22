@@ -1135,6 +1135,18 @@ def api_logfile(name):
     except Exception as e:
         return jsonify({"name": name, "content": "", "error": str(e)[:80]})
 
+@app.route("/api/preview")
+def api_preview():
+    """장중 잠정 예비후보(intraday_preview.py 생성) — 정보용, 매매 트리거 아님."""
+    p = BASE / "db" / "kiwoom" / "intraday_preview.json"
+    if not p.exists():
+        return jsonify({"items": [], "updated": None})
+    try:
+        return jsonify(json.loads(p.read_text(encoding="utf-8")))
+    except Exception as e:
+        return jsonify({"items": [], "error": str(e)[:80]})
+
+
 @app.route("/api/intraday")
 def api_intraday():
     """장중 시황 캐시 반환 — intraday_monitor.py 가 생성한 JSON 파일을 서빙."""
@@ -1215,6 +1227,7 @@ _RUN_TASKS = {
     "ai_train":      [_VENV_PYTHON, str(BASE / "ai_trainer_v4.py")],                 # meta_model_v4 재학습
     "strategy_lab":  [_VENV_PYTHON, str(BASE / "strategy_lab.py")],                  # 전략 랩 forward 집계
     "stop_cf":       [_VENV_PYTHON, str(BASE / "build_stop_counterfactual.py")],     # 장중손절 반사실 라벨 누적
+    "preview":       [_VENV_PYTHON, str(BASE / "intraday_preview.py")],              # 장중 잠정 예비후보
 }
 
 
@@ -1622,6 +1635,14 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
       <th>&#xD56D;&#xBAA9;</th><th class="r">&#xD604;&#xC7AC;</th><th class="r">&#xC804;&#xC77C;&#xB300;&#xBE44;</th>
     </tr></thead>
     <tbody id="intra-idx"></tbody>
+    </table>
+  </div>
+  <div class="section">
+    <h2>장중 잠정 예비후보 <span id="prev-ts" style="color:#8b949e;font-size:11px;font-weight:400"></span>
+      <span style="color:#d29922;font-size:11px;font-weight:400;margin-left:6px">※ 잠정(종가에 바뀔 수 있음)·정보용, 매매 아님</span>
+    </h2>
+    <table><thead><tr><th>전략</th><th>종목</th><th class="r">잠정가</th></tr></thead>
+    <tbody id="prev-rows"><tr><td colspan="3" style="color:#8b949e;text-align:center">장중 매시간 갱신 (intraday_preview.py)</td></tr></tbody>
     </table>
   </div>
 </div>
@@ -2040,6 +2061,24 @@ async function load(){
   _r(fillLogs, d.logs, d.files);
   // intraday — 별도 API
   fetch('/api/intraday').then(r=>r.json()).then(fillIntraday).catch(()=>{});
+  fetch('/api/preview').then(r=>r.json()).then(fillPreview).catch(()=>{});
+}
+
+const _STRAT_KR={high_52w_filt:'52주신고가',rsi_reversal:'RSI반전',rsi_vol:'RSI+거래량'};
+function fillPreview(d){
+  const tb=document.getElementById('prev-rows'); if(!tb) return;
+  const ts=document.getElementById('prev-ts');
+  if(ts) ts.textContent=d&&d.updated?'('+d.updated+' 기준)':'';
+  const items=(d&&d.items)||[];
+  if(!items.length){
+    tb.innerHTML='<tr><td colspan="3" style="color:#8b949e;text-align:center">잠정 후보 없음 (장중 갱신)</td></tr>';
+    return;
+  }
+  tb.innerHTML=items.slice(0,40).map(x=>
+    `<tr><td style="font-size:11px;color:#8b949e">${_STRAT_KR[x.strategy]||x.strategy}</td>
+     <td>${x.name||''} <span style="color:#8b949e;font-size:11px">${x.code||''}</span></td>
+     <td class="r">${fmt(x.price)}</td></tr>`
+  ).join('');
 }
 
 // 탭이 보일 때만 새로고침(백그라운드/최소화 시 불필요한 서버호출·렌더 중단).
