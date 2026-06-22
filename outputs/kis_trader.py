@@ -338,7 +338,7 @@ def load_kis_positions():
                 "entry_px":    float(r.get("entry_px", 0)),
                 "strategy":    str(r.get("strategy", "")),
                 "signal_date": str(r.get("signal_date", "")),
-                "holding_days": int(r.get("holding_days", HOLDING_DAYS_DEFAULT)),
+                "holding_days": _to_int(r.get("holding_days"), HOLDING_DAYS_DEFAULT),
             }
         return result
     except Exception as e:
@@ -513,7 +513,7 @@ def codes_due_for_exit(close_map):
     s["code"] = s["code"].astype(str).str.zfill(6)
     if "holding_days" not in s.columns:
         s["holding_days"] = HOLDING_DAYS_DEFAULT
-    s["holding_days"] = s["holding_days"].fillna(HOLDING_DAYS_DEFAULT).astype(int)
+    s["holding_days"] = pd.to_numeric(s["holding_days"], errors="coerce").fillna(HOLDING_DAYS_DEFAULT).astype(int)
     if "strategy" not in s.columns:
         s["strategy"] = "h52w_for3d_mkt"
 
@@ -622,7 +622,7 @@ def todays_signals():
         s["strategy"] = "h52w_for3d_mkt"
     if "holding_days" not in s.columns:
         s["holding_days"] = HOLDING_DAYS_DEFAULT
-    s["holding_days"] = s["holding_days"].fillna(HOLDING_DAYS_DEFAULT).astype(int)
+    s["holding_days"] = pd.to_numeric(s["holding_days"], errors="coerce").fillna(HOLDING_DAYS_DEFAULT).astype(int)
 
     target_raw = latest_macro_date()
     if not target_raw:
@@ -791,7 +791,7 @@ def cmd_buy():
                     entry_px=close,
                     strategy=strat,
                     signal_date=str(sig.get("signal_date", "")),
-                    holding_days=int(sig.get("holding_days", HOLDING_DAYS_DEFAULT)),
+                    holding_days=_to_int(sig.get("holding_days"), HOLDING_DAYS_DEFAULT),
                 )
                 remaining_dep -= qty * close
                 n_placed += 1

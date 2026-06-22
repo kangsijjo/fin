@@ -50,12 +50,14 @@ def compute_stock_features(df):
     #       shift 를 그룹 내부에서 수행하도록 transform 으로 교체.
     vol_ma20 = df.groupby("code")["volume"].transform(
         lambda s: s.shift(1).rolling(20, min_periods=20).mean())
-    df["vol_ratio"] = df["volume"] / vol_ma20
+    # [fix 2026-06-22] 0 분모 → inf 방지. 라이브 factor_scorer 와 동일하게 0→NaN 처리
+    #   (이전엔 inf 가 trades_history 에 남아 IC 왜곡 + train/live 피처 불일치).
+    df["vol_ratio"] = df["volume"] / vol_ma20.replace(0, np.nan)
 
     # 거래대금 비율
     tv_ma20 = df.groupby("code")["trading_value"].transform(
         lambda s: s.shift(1).rolling(20, min_periods=20).mean())
-    df["tv_ratio"] = df["trading_value"] / tv_ma20
+    df["tv_ratio"] = df["trading_value"] / tv_ma20.replace(0, np.nan)
 
     # 외인/기관 5일 누적 (현재 행 포함, 시가총액으로 정규화)
     df["for_5d_sum"] = df.groupby("code")["foreign_net"].rolling(5, min_periods=5).sum().reset_index(0, drop=True)

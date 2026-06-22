@@ -121,9 +121,20 @@ def load_existing_signals():
 def append_signals(new_rows):
     """신호 행을 kis_paper_signals.csv에 append."""
     file_exists = os.path.exists(SIGNALS_CSV)
+    # 기존 헤더 순서대로 쓴다 — CSV_FIELDS 가 나중에 재정렬돼도 컬럼이 어긋나지 않게
+    # (paper_signals.csv 컬럼 어긋남 회귀와 동일 클래스 예방).
+    fields = CSV_FIELDS
+    if file_exists:
+        try:
+            with open(SIGNALS_CSV, encoding="utf-8-sig") as hf:
+                cols = [c.strip() for c in hf.readline().lstrip("﻿").strip().split(",") if c.strip()]
+            if set(cols) == set(CSV_FIELDS):
+                fields = cols
+        except Exception:
+            pass
     with open(SIGNALS_CSV, "a" if file_exists else "w",
               newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
+        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         if not file_exists:
             writer.writeheader()
         writer.writerows(new_rows)

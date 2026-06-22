@@ -279,6 +279,43 @@ def get_positions(api):
     return pos
 
 
+def _snapshot_codes():
+    """직전 snapshot.json 의 보유 종목코드 집합 — 잔고 정합성 비교 기준.
+    (키움은 KIS 의 kis_positions.csv 같은 독립 진입추적 원장이 없어 스냅샷을 기준으로 쓴다.)
+    """
+    try:
+        d = json.load(open(f"{ORDERS_DIR}/snapshot.json", encoding="utf-8"))
+        return set(str(x.get("code", "")).zfill(6) for x in d.get("positions", []) if x.get("code"))
+    except Exception:
+        return set()
+
+
+def cmd_reconcile():
+    """잔고 정합성 점검 — 브로커 보유 vs 직전 스냅샷. 불일치 시 텔레그램 경고."""
+    api = get_api()
+    pos = get_positions(api)
+    broker = set(str(c).zfill(6) for c in pos.keys())
+    snap = _snapshot_codes()
+    drift_out = sorted(broker - snap)   # 브로커엔 있는데 스냅샷에 없음
+    drift_in = sorted(snap - broker)    # 스냅샷엔 있는데 브로커 없음
+    print(f"[reconcile] 브로커 보유 {len(pos)}건 / 스냅샷대비 추가{drift_out} 누락{drift_in}")
+    if not pos and snap:
+        msg = "⛔ [키움 reconcile] 브로커 잔고 0 인데 직전 스냅샷엔 보유 있음 — API 누락 의심"
+        print(msg)
+        try:
+            import notifier; notifier.safe_send(msg)
+        except Exception:
+            pass
+        return False
+    if drift_out or drift_in:
+        try:
+            import notifier
+            notifier.safe_send(f"⚠ [키움 잔고] 스냅샷 대비 변동 추가{drift_out}/누락{drift_in} — 확인 권장")
+        except Exception:
+            pass
+    return True
+
+
 def cmd_status():
     api = get_api()
     dep = get_deposit(api)
@@ -342,7 +379,7 @@ def todays_signals():
         s["strategy"] = "high_52w_filt"
     if "holding_days" not in s.columns:
         s["holding_days"] = HOLDING_DAYS_DEFAULT
-    s["holding_days"] = s["holding_days"].fillna(HOLDING_DAYS_DEFAULT).astype(int)
+    s["holding_days"] = pd.to_numeric(s["holding_days"], errors="coerce").fillna(HOLDING_DAYS_DEFAULT).astype(int)
 
     target_raw = latest_macro_date()   # "YYYYMMDD" (파일명 기반)
     if not target_raw:
@@ -364,6 +401,20 @@ def cmd_buy():
         return
     api = get_api()
     pos = get_positions(api)
+
+    # ── 정합성 게이트(오주문 방지) ──────────────────────────────────────────
+    # get_positions 는 스키마 인식 실패/일시 글리치 시 조용히 {} 를 반환할 수 있다.
+    # 브로커 0건인데 직전 스냅샷엔 보유가 있었으면 = 응답 누락 의심 → 슬롯 오판으로
+    # 이미 보유한 종목에 과다 매수가 날 수 있으므로 강제 중단.
+    if not pos and _snapshot_codes():
+        print("[buy] 잔고 응답 의심(브로커 0 / 직전 스냅샷 보유 있음) — 오주문 방지 위해 매수 중단")
+        try:
+            import notifier
+            notifier.safe_send("⛔ [키움 buy 중단] 잔고 응답이 비어 있음(스냅샷은 보유). API 누락 의심 → 매수 스킵.")
+        except Exception:
+            pass
+        return
+
     already = today_ordered_codes("buy")
     dep = get_deposit(api)
 
@@ -502,7 +553,7 @@ def codes_due_for_exit():
     # v2 schema 호환
     if "holding_days" not in s.columns:
         s["holding_days"] = HOLDING_DAYS_DEFAULT
-    s["holding_days"] = s["holding_days"].fillna(HOLDING_DAYS_DEFAULT).astype(int)
+    s["holding_days"] = pd.to_numeric(s["holding_days"], errors="coerce").fillna(HOLDING_DAYS_DEFAULT).astype(int)
 
     df = load_macro_daily()
     code_dates = {c: sorted(g["date"].astype(str).tolist())
@@ -614,11 +665,13 @@ if __name__ == "__main__":
             cmd_buy()
         elif cmd == "sell":
             cmd_sell()
+        elif cmd == "reconcile":
+            cmd_reconcile()
         elif cmd == "daily":
             cmd_daily()
         else:
             print(f"[main] 알 수 없는 명령: {cmd}")
-            print("사용법: python kiwoom_trader.py [status|buy|sell|daily]")
+            print("사용법: python kiwoom_trader.py [status|buy|sell|reconcile|daily]")
             sys.exit(1)
 
     # 체결 묶음 알림 — 이번 실행에서 쌓인 매수/매도를 1통으로 (없으면 전송 안 함)
