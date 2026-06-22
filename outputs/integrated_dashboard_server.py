@@ -1090,6 +1090,51 @@ def api_logs():
     return jsonify({"sch": tail_log(_latest_log("collect_*.log"), 100),
                     "live": tail_log(_latest_log("paper_*.log"), 50)})
 
+
+@app.route("/api/logfiles")
+def api_logfiles():
+    """logs/ 의 모든 .log 파일 목록(최신순) — 수동실행 run_*.log 포함."""
+    out = []
+    try:
+        for p in LOG_DIR.glob("*.log"):
+            try:
+                st = p.stat()
+                out.append({"name": p.name, "kb": round(st.st_size / 1024, 1),
+                            "mtime": datetime.fromtimestamp(st.st_mtime).strftime("%m-%d %H:%M")})
+            except Exception:
+                pass
+        out.sort(key=lambda x: x["mtime"], reverse=True)
+    except Exception as e:
+        return jsonify({"files": [], "error": str(e)[:80]})
+    return jsonify({"files": out})
+
+
+@app.route("/api/logfile/<name>")
+def api_logfile(name):
+    """선택한 로그 파일의 '전체' 내용(최대 ~500KB). 경로탈출 차단."""
+    # 파일명만 허용(디렉토리 구분자/.. 차단)
+    if "/" in name or "\\" in name or ".." in name or not name.endswith(".log"):
+        return jsonify({"name": name, "content": "", "error": "잘못된 파일명"}), 400
+    p = LOG_DIR / name
+    if not p.exists() or p.parent.resolve() != LOG_DIR.resolve():
+        return jsonify({"name": name, "content": "", "error": "파일 없음"}), 404
+    try:
+        raw = p.read_bytes()
+        truncated = len(raw) > 500_000
+        raw = raw[-500_000:]
+        for enc in ("utf-8", "cp949"):
+            try:
+                txt = raw.decode(enc); break
+            except UnicodeDecodeError:
+                continue
+        else:
+            txt = raw.decode("utf-8", errors="replace")
+        if truncated:
+            txt = "...(앞부분 생략 — 최근 500KB만 표시)...\n" + txt
+        return jsonify({"name": name, "content": txt, "kb": round(p.stat().st_size / 1024, 1)})
+    except Exception as e:
+        return jsonify({"name": name, "content": "", "error": str(e)[:80]})
+
 @app.route("/api/intraday")
 def api_intraday():
     """장중 시황 캐시 반환 — intraday_monitor.py 가 생성한 JSON 파일을 서빙."""
@@ -1550,6 +1595,15 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
     <h2>&#xD398;&#xC774;&#xD37C; &#xB85C;&#xADF8; (paper_*.log)</h2>
     <pre class="logbox" id="log-live">&#xB85C;&#xB529;&#xC911;...</pre>
   </div>
+  <div class="section">
+    <h2>전체 로그 보기
+      <select id="logfile-select" onchange="loadLogFile()" style="margin-left:8px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:4px 8px;font-size:12px"></select>
+      <button class="runbtn" style="padding:4px 10px" onclick="refreshLogFiles()">목록 새로고침</button>
+      <button class="runbtn" style="padding:4px 10px" onclick="loadLogFile()">불러오기</button>
+      <span id="logfile-info" style="color:#8b949e;font-size:11px;margin-left:6px"></span>
+    </h2>
+    <pre class="logbox" id="logfile-content" style="max-height:600px">파일을 선택하세요.</pre>
+  </div>
 </div>
 
 <!-- ===== 장중시황 ===== -->
@@ -1861,13 +1915,34 @@ function fillAI(ai){
   }).join(''));
 }
 
+// ── 로그 파일 뷰어 ──
+function refreshLogFiles(keepSel){
+  return fetch('/api/logfiles').then(r=>r.json()).then(d=>{
+    const sel=document.getElementById('logfile-select'); if(!sel) return d;
+    const cur=keepSel||sel.value;
+    sel.innerHTML=(d.files||[]).map(f=>`<option value="${f.name}">${f.name} (${f.kb}KB · ${f.mtime})</option>`).join('');
+    if(cur && [...sel.options].some(o=>o.value===cur)) sel.value=cur;
+    return d;
+  }).catch(()=>{});
+}
+function loadLogFile(){
+  const sel=document.getElementById('logfile-select'); if(!sel||!sel.value) return;
+  const el=document.getElementById('logfile-content'), info=document.getElementById('logfile-info');
+  if(el) el.textContent='불러오는 중...';
+  fetch('/api/logfile/'+encodeURIComponent(sel.value)).then(r=>r.json()).then(d=>{
+    if(el){ el.textContent=d.content||('(빈 파일)'+(d.error?' '+d.error:'')); el.scrollTop=el.scrollHeight; }
+    if(info) info.textContent=d.kb?d.kb+'KB':'';
+  }).catch(e=>{ if(el) el.textContent='로드 실패: '+e.message; });
+}
+
 function runTask(task, label, reloadMs){
   if(!confirm(label+' 실행할까요?')) return;
   const el=document.getElementById('run-status');
   if(el) el.textContent=label+' 시작 요청 중...';
   fetch('/api/run/'+task,{method:'POST'}).then(r=>r.json()).then(d=>{
     if(el) el.textContent='['+label+'] '+(d.msg||(d.ok?'시작됨':'실패'))+'  ('+new Date().toLocaleTimeString()+')';
-    // reloadMs 지정 시(예: 잔고 새로고침) 작업이 끝날 시간을 준 뒤 데이터만 다시 불러온다.
+    // 수동실행 직후 해당 run_<task>.log 를 로그 뷰어에 자동 표시(2초 뒤 — 로그가 생길 시간).
+    if(d.ok){ setTimeout(()=>{ refreshLogFiles('run_'+task+'.log').then(()=>loadLogFile()); }, 2000); }
     if(reloadMs && d.ok){ if(el) el.textContent+=' — '+(reloadMs/1000)+'초 후 갱신'; setTimeout(()=>load(), reloadMs); }
   }).catch(e=>{ if(el) el.textContent='['+label+'] 오류: '+e.message; });
 }
@@ -1970,6 +2045,7 @@ async function load(){
 // 탭이 보일 때만 새로고침(백그라운드/최소화 시 불필요한 서버호출·렌더 중단).
 window.addEventListener('load',()=>{
   load();
+  refreshLogFiles();   // 로그 파일 목록 채우기
   setInterval(()=>{ if(document.visibilityState==='visible') load(); }, 300_000);
 });
 </script>

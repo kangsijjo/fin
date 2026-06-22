@@ -205,6 +205,15 @@ def _check_health(logs):
     return {"status": "🟢 정상", "msg": f"마지막 실행 {hours_ago:.1f}시간 전, exit 0"}
 
 
+def _ffloat(v, default=0.0):
+    """문자열/None/NaN 등 어떤 값이 와도 float 로 안전 변환(실패 시 default). 크래시 방지."""
+    try:
+        f = float(v)
+        return f if f == f else default   # NaN 거르기
+    except (TypeError, ValueError):
+        return default
+
+
 def _load_pending_signals(signals_df, code_dates, price_map, name_cache, n=20):
     """매매 예정 종목 — paper_signals.csv 의 최근 signal_date 행들."""
     if signals_df.empty:
@@ -220,7 +229,7 @@ def _load_pending_signals(signals_df, code_dates, price_map, name_cache, n=20):
             "name": name_cache.get(code, _safe_name(sig.get("name"))),
             "signal_date": latest_date,
             "sig_close": int(sig_close) if sig_close else None,
-            "lookback_high": float(sig.get("lookback_high", 0) or 0),
+            "lookback_high": _ffloat(sig.get("lookback_high", 0)),
         })
     return items, latest_date
 

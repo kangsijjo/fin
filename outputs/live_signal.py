@@ -62,10 +62,11 @@ def _open_stock_db():
 # ─── 상수 ─────────────────────────────────────────────────────────────────────
 SIGNALS_CSV = "./paper_signals.csv"
 
+# ※ 순서는 기존 paper_signals.csv 헤더와 반드시 일치해야 한다(append 시 컬럼 어긋남 방지).
 CSV_FIELDS = [
     "signal_date", "code", "name", "entry_price_close",
-    "target_exit_date", "strategy", "holding_days",
-    "lookback_high", "market_strong",
+    "target_exit_date", "lookback_high", "market_strong",
+    "strategy", "holding_days",
 ]
 
 # ETF/우선주/스팩 제외
@@ -173,9 +174,20 @@ def append_signals(new_rows):
     file_exists = os.path.exists(SIGNALS_CSV)
     if file_exists:
         _migrate_signals_csv()
+    # 기존 파일이 있으면 그 헤더 순서대로 쓴다 — CSV_FIELDS 와 헤더 순서가 달라도
+    # 행 컬럼이 어긋나지 않게(과거 회귀 재발 방지). 컬럼 집합이 같을 때만 헤더 순서 채택.
+    fields = CSV_FIELDS
+    if file_exists:
+        try:
+            with open(SIGNALS_CSV, encoding="utf-8-sig") as hf:
+                cols = [c.strip() for c in hf.readline().lstrip("﻿").strip().split(",") if c.strip()]
+            if set(cols) == set(CSV_FIELDS):
+                fields = cols
+        except Exception:
+            pass
     with open(SIGNALS_CSV, "a" if file_exists else "w",
               newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
+        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         if not file_exists:
             writer.writeheader()
         for r in new_rows:
