@@ -1135,6 +1135,18 @@ def api_logfile(name):
     except Exception as e:
         return jsonify({"name": name, "content": "", "error": str(e)[:80]})
 
+@app.route("/api/marketgrid")
+def api_marketgrid():
+    """장중시황 2x6 그리드(market_grid.py 생성, 키움 순위) — 코스피·코스닥별 6지표."""
+    p = BASE / "db" / "kiwoom" / "market_grid.json"
+    if not p.exists():
+        return jsonify({"markets": {}, "updated": None})
+    try:
+        return jsonify(json.loads(p.read_text(encoding="utf-8")))
+    except Exception as e:
+        return jsonify({"markets": {}, "error": str(e)[:80]})
+
+
 @app.route("/api/preview")
 def api_preview():
     """장중 잠정 예비후보(intraday_preview.py 생성) — 정보용, 매매 트리거 아님."""
@@ -1228,6 +1240,7 @@ _RUN_TASKS = {
     "strategy_lab":  [_VENV_PYTHON, str(BASE / "strategy_lab.py")],                  # 전략 랩 forward 집계
     "stop_cf":       [_VENV_PYTHON, str(BASE / "build_stop_counterfactual.py")],     # 장중손절 반사실 라벨 누적
     "preview":       [_VENV_PYTHON, str(BASE / "intraday_preview.py")],              # 장중 잠정 예비후보
+    "market_grid":   [_VENV_PYTHON, str(BASE / "market_grid.py")],                   # 장중시황 2x6 그리드(키움)
 }
 
 
@@ -1636,6 +1649,10 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
     </tr></thead>
     <tbody id="intra-idx"></tbody>
     </table>
+  </div>
+  <div class="section">
+    <h2>장중 순위 (키움) <span id="grid-ts" style="color:#8b949e;font-size:11px;font-weight:400"></span></h2>
+    <div id="market-grid">로딩중...</div>
   </div>
   <div class="section">
     <h2>장중 잠정 예비후보 <span id="prev-ts" style="color:#8b949e;font-size:11px;font-weight:400"></span>
@@ -2062,6 +2079,44 @@ async function load(){
   // intraday — 별도 API
   fetch('/api/intraday').then(r=>r.json()).then(fillIntraday).catch(()=>{});
   fetch('/api/preview').then(r=>r.json()).then(fillPreview).catch(()=>{});
+  fetch('/api/marketgrid').then(r=>r.json()).then(fillMarketGrid).catch(()=>{});
+}
+
+function _pctS(v){v=Number(v||0);return '<span class="'+(v>=0?'pos':'neg')+'">'+(v>=0?'+':'')+v.toFixed(2)+'%</span>';}
+function _amtS(v){v=Number(v||0);return '<span class="'+(v>=0?'pos':'neg')+'">'+(v>=0?'+':'')+v.toLocaleString()+'</span>';}
+// [지표키, 제목, 값포맷] — 6개
+const _GRID=[
+  ['volume','거래량', r=>_pctS(r.change_pct)],
+  ['change','상승률', r=>_pctS(r.change_pct)],
+  ['netbuy','기관+외인 순매수(천만)', r=>_amtS(r.net)],
+  ['netsell','기관+외인 순매도(천만)', r=>_amtS(r.net)],
+  ['new_high','신고가', r=>_pctS(r.change_pct)],
+  ['sector','업종등락', r=>_pctS(r.change_pct)],
+];
+function _gridCard(title, rows, valf){
+  // 20위까지 담되, 칸 안쪽만 고정높이 스크롤(틀 크기는 5위 표시 때와 동일 유지).
+  const inner=(rows&&rows.length)
+    ? rows.slice(0,20).map((r,i)=>`<div style="display:flex;justify-content:space-between;gap:6px;font-size:12px;padding:2px 0">
+        <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${i+1}. ${r.name||r.code||''}</span>
+        <span style="white-space:nowrap">${valf(r)}</span></div>`).join('')
+    : '<div style="color:#8b949e;font-size:11px">-</div>';
+  return `<div style="flex:1;min-width:150px;background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:8px">
+    <div style="font-size:11px;color:#8b949e;margin-bottom:4px;font-weight:600">${title}</div>
+    <div style="max-height:96px;overflow-y:auto">${inner}</div></div>`;
+}
+function fillMarketGrid(d){
+  const el=document.getElementById('market-grid'); if(!el) return;
+  const ts=document.getElementById('grid-ts'); if(ts) ts.textContent=d&&d.updated?'('+d.updated+')':'';
+  const mk=(d&&d.markets)||{};
+  if(!Object.keys(mk).length){ el.innerHTML='<div style="color:#8b949e;font-size:13px">장중 갱신 대기 (market_grid.py)</div>'; return; }
+  let html='';
+  for(const [key,label] of [['kospi','코스피'],['kosdaq','코스닥']]){
+    const m=mk[key]||{};
+    html+=`<div style="font-size:12px;color:#58a6ff;font-weight:600;margin:8px 0 4px">${label}${m.error?' <span style="color:#f85149">'+m.error+'</span>':''}</div>`;
+    html+='<div style="display:flex;flex-wrap:wrap;gap:8px">'+
+      _GRID.map(([k,t,vf])=>_gridCard(t, m[k], vf)).join('')+'</div>';
+  }
+  el.innerHTML=html;
 }
 
 const _STRAT_KR={high_52w_filt:'52주신고가',rsi_reversal:'RSI반전',rsi_vol:'RSI+거래량'};
