@@ -1241,6 +1241,7 @@ _RUN_TASKS = {
     "stop_cf":       [_VENV_PYTHON, str(BASE / "build_stop_counterfactual.py")],     # 장중손절 반사실 라벨 누적
     "preview":       [_VENV_PYTHON, str(BASE / "intraday_preview.py")],              # 장중 잠정 예비후보
     "market_grid":   [_VENV_PYTHON, str(BASE / "market_grid.py")],                   # 장중시황 2x6 그리드(키움)
+    "daily_summary": [_VENV_PYTHON, str(BASE / "daily_summary.py")],                  # 텔레그램 하루요약 수동 전송
 }
 
 
