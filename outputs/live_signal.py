@@ -103,8 +103,16 @@ def _resolve_name(r, name_cache):
 
 
 def _compute_mkt_strong(df, ma_days=60):
-    """전체 평균 change_pct 의 N일 MA > 0 → {date: bool}."""
-    mkt = df.groupby("date")["change_pct"].mean()
+    """시장강세 게이트: 전체 종목 일일수익률 평균의 N일 MA > 0 → {date: bool}.
+
+    [fix 2026-06-23] 기존엔 change_pct 컬럼 평균을 썼는데, change_pct 가 최근 일부
+      macro_daily 파일에만 있어(과거 파일엔 컬럼 자체가 없음) 60일 MA 가 영구 NaN →
+      mkt_strong 이 항상 False → 시장게이트 쓰는 모든 전략이 영구 0건이던 버그.
+      모든 파일에 존재하는 close 로 일일수익률을 직접 산출해 견고화.
+    """
+    d = df.sort_values(["code", "date"])
+    ret = d.groupby("code")["close"].pct_change() * 100.0
+    mkt = ret.groupby(d["date"]).mean()
     mkt_ma = mkt.rolling(ma_days, min_periods=ma_days).mean()
     return (mkt_ma > 0).to_dict()
 
