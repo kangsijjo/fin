@@ -627,8 +627,10 @@ def todays_signals():
     target_raw = latest_macro_date()
     if not target_raw:
         return []
-    target = (f"{target_raw[:4]}-{target_raw[4:6]}-{target_raw[6:]}"
-              if len(target_raw) == 8 else target_raw)
+    # [fix 2026-06-23] CSV signal_date 는 'YYYYMMDD'(대시 없음). 과거엔 target 을 대시형식으로
+    #   바꿔 비교 → 항상 0건 → 매수 안 됨. 양쪽 대시 제거 후 비교.
+    s["signal_date"] = s["signal_date"].str.replace("-", "", regex=False)
+    target = target_raw.replace("-", "")
     today_raw = datetime.today().strftime("%Y%m%d")
     if target_raw == today_raw:
         return []

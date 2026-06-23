@@ -384,8 +384,11 @@ def todays_signals():
     target_raw = latest_macro_date()   # "YYYYMMDD" (파일명 기반)
     if not target_raw:
         return []
-    # signal_date in CSV 는 "YYYY-MM-DD" 형식 → 동일하게 변환
-    target = f"{target_raw[:4]}-{target_raw[4:6]}-{target_raw[6:]}" if len(target_raw) == 8 else target_raw
+    # [fix 2026-06-23] CSV signal_date 는 'YYYYMMDD'(대시 없음)인데, 과거엔 target 을
+    #   'YYYY-MM-DD'(대시)로 바꿔 비교 → 항상 0건 매칭 → 매수가 한 번도 안 나가던 버그.
+    #   양쪽 대시 제거 후 비교(형식 무관 안전).
+    s["signal_date"] = s["signal_date"].str.replace("-", "", regex=False)
+    target = target_raw.replace("-", "")
     today_raw = datetime.today().strftime("%Y%m%d")
     if target_raw == today_raw:
         return []
