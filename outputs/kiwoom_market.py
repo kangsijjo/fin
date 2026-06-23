@@ -154,27 +154,29 @@ class KiwoomMarket:
         r = self.rank.top_foreign_institution_trades_request_ka90009(
             mrkt_tp=_MRKT[market], amt_qty_tp="1", qry_dt_tp="0", stex_tp=_STEX)
         _, rows = _first_list(r)
-        agg = {}   # code -> {name, net}
-        for x in rows:
-            # 종목코드/명 (외인순매도/순매수 어느 쪽이든 stk_cd 류로 통일 시도)
-            code = str(_pick(x, "stk_cd", "for_netslmt_stk_cd", "for_netprps_stk_cd",
-                             "orgn_netslmt_stk_cd", "orgn_netprps_stk_cd")).zfill(6)
-            name = _pick(x, "stk_nm", "for_netslmt_stk_nm", "for_netprps_stk_nm",
-                         "orgn_netprps_stk_nm", "orgn_netslmt_stk_nm")
+        # ★ ka90009 실제 포맷(장중 프로브 확정): 한 행에 4개의 '서로 다른' 종목이
+        #   side-by-side 로 들어온다 — 외인순매도/외인순매수/기관순매도/기관순매수 각 i위.
+        #   따라서 행마다 4개 항목을 코드별로 집계해 (외인+기관) 순매수/순매도를 합산.
+        agg = {}   # code -> {name, net}  (순매수 +, 순매도 -)
+
+        def _add(code, name, amt):
+            code = str(code or "").zfill(6)
             if not code or code == "000000":
-                continue
-            # 순매수(+) / 순매도(-) 금액 — 외인+기관 합산
-            for_buy = _to_int(_pick(x, "for_netprps_amt", default=0))
-            for_sell = _to_int(_pick(x, "for_netslmt_amt", default=0))
-            org_buy = _to_int(_pick(x, "orgn_netprps_amt", default=0))
-            org_sell = _to_int(_pick(x, "orgn_netslmt_amt", default=0))
-            net = (for_buy + org_buy) - (for_sell + org_sell)
-            close = _to_int(_pick(x, "cur_prc", default=0))
-            chg = _to_float(_pick(x, "flu_rt", default=0))
-            e = agg.setdefault(code, {"name": name, "net": 0, "close": close, "change_pct": chg})
-            e["net"] += net
+                return
+            e = agg.setdefault(code, {"name": name or "", "net": 0})
+            e["net"] += amt
             if name and not e["name"]:
                 e["name"] = name
+
+        for x in rows:
+            _add(x.get("for_netprps_stk_cd"), x.get("for_netprps_stk_nm"),
+                 abs(_to_int(x.get("for_netprps_amt"))))      # 외인 순매수 (+)
+            _add(x.get("orgn_netprps_stk_cd"), x.get("orgn_netprps_stk_nm"),
+                 abs(_to_int(x.get("orgn_netprps_amt"))))     # 기관 순매수 (+)
+            _add(x.get("for_netslmt_stk_cd"), x.get("for_netslmt_stk_nm"),
+                 -abs(_to_int(x.get("for_netslmt_amt"))))     # 외인 순매도 (-)
+            _add(x.get("orgn_netslmt_stk_cd"), x.get("orgn_netslmt_stk_nm"),
+                 -abs(_to_int(x.get("orgn_netslmt_amt"))))    # 기관 순매도 (-)
 
         items = [{"code": c, **v} for c, v in agg.items()]
         buys = sorted([x for x in items if x["net"] > 0], key=lambda x: x["net"], reverse=True)[:n]

@@ -27,6 +27,8 @@ echo [ERROR] python not found >> "%LOGFILE%"
 endlocal & exit /b 1
 
 :run
+REM 장중시황 2x6 그리드(키움 순위, 별도 프로세스) + 예비후보(pykrx) 순차 실행
+!PYEXE! -u market_grid.py >> "%LOGFILE%" 2>&1
 !PYEXE! -u intraday_preview.py >> "%LOGFILE%" 2>&1
 set "EC=!ERRORLEVEL!"
 Forfiles /P "C:\fin\logs" /M intraday_preview_*.log /D -14 /C "cmd /c del @file" 2>nul
