@@ -356,6 +356,12 @@ def main():
     if all_new:
         append_signals(all_new)
         print(f"[kis_signal] 총 {len(all_new)}건 저장 → {SIGNALS_CSV}")
+        # 강도 백데이터 기록(실거래 영향 없음, 예외 자체흡수)
+        try:
+            import strength_logger
+            strength_logger.log_strength("KIS_안D", df, last_date, all_new)
+        except Exception as _e:
+            print(f"[strength_logger][warn] {_e}")
     else:
         print("[kis_signal] 신규 신호 없음")
 

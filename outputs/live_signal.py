@@ -438,6 +438,12 @@ def main():
             cnt = sum(1 for s in new if s["strategy"] == strat)
             if cnt:
                 print(f"  {strat}: {cnt}건")
+        # 강도 백데이터 기록(실거래 영향 없음, 예외 자체흡수)
+        try:
+            import strength_logger
+            strength_logger.log_strength("kiwoom_안C", df, last_date, new)
+        except Exception as _e:
+            print(f"[strength_logger][warn] {_e}")
     else:
         print("\n[skip] 모두 중복 신호 — CSV 저장 없음")
 
