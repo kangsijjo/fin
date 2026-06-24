@@ -64,10 +64,12 @@ def log(msg, level='INFO'):
 def _run_subprocess(label, cmd, capture_stderr=True):
     """subprocess 실행 + 실패 시 ERROR 로그 + failures.log 기록."""
     log(f"▶ 시작: {label}")
+    # encoding/errors 명시: 자식이 UTF-8/이모지를 내보내도 부모가 cp949 로 디코딩하다
+    # UnicodeDecodeError 로 죽지 않게 한다(text=True 만 쓰면 한국어 윈도우 기본 cp949).
     result = subprocess.run(
         cmd, check=False,
         stderr=subprocess.PIPE if capture_stderr else None,
-        text=True
+        encoding='utf-8', errors='replace'
     )
     if result.returncode != 0:
         err_preview = ''
@@ -211,12 +213,16 @@ def monthly_sector_update_job():
 
 
 def weekly_job():
-    """매주 일요일 07:00 - 전체 재학습"""
-    log("===== 주간 전체 재학습 시작 =====")
+    """매주 일요일 07:00 - 주간 데이터 정비.
+    [2026-06-20] 섹터모델(28개)은 라이브 매매에 미사용(backtest/explain 도구에서만 로드)임을
+    실사용 추적으로 확인 → train/backtest 단계 비활성(매주 수십 분 CPU 낭비 제거).
+    indicators(지표 테이블 갱신)는 데이터 정비라 유지. 다시 학습하려면 아래 두 줄 주석 해제.
+    """
+    log("===== 주간 데이터 정비 시작 =====")
     run_pipeline('indicators')
-    run_pipeline('train')
-    run_pipeline('backtest')
-    log("===== 주간 전체 재학습 완료 =====")
+    # run_pipeline('train')      # 섹터모델 학습 — 라이브 미사용이라 비활성
+    # run_pipeline('backtest')   # 섹터모델 백테스트 — 〃
+    log("===== 주간 데이터 정비 완료 =====")
 
 
 def heartbeat_job():
@@ -282,3 +288,17 @@ if __name__ == "__main__":
         log("Sat 08:00 kiwoom_weekly_job - kiwoom credit/program weekly")
         log("Sun 07:00 weekly_job - full retrain")
         log("[disabled] trading/monitor jobs handled by kiwoom_trader.py")
+
+        # ── 상주 루프 ────────────────────────────────────────────────────
+        # [2026-06-25 복구] 이 루프가 없어서 잡 '등록' 직후 프로세스가 즉시 종료
+        # (runner.log: scheduler exit code=0)되어, 06:30 등 어떤 스케줄도
+        # 발화하지 못해 데이터 수집이 통째로 멈췄음(korea/supply/usa 6일+ 정체).
+        # schedule.run_pending() 를 주기적으로 호출해야 등록된 잡이 시각에 실행됨.
+        # heartbeat_job(5분) 이 scheduler.log 에 ♥ 를 찍어 생존을 확인시켜 줌.
+        log("스케줄러 상주 루프 진입 (30초 주기) — Ctrl+C 또는 창 종료로 중지")
+        while True:
+            try:
+                schedule.run_pending()
+            except Exception as e:
+                log(f"run_pending 오류: {e}", level='ERROR')
+            time.sleep(30)
