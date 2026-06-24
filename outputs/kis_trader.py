@@ -595,7 +595,13 @@ def cmd_status():
             "securities":   _sm.get("securities"),     # 보유 평가금액
             "eval_pnl":     _sm.get("eval_pnl"),       # 평가손익합계
             "purchase_amt": _sm.get("purchase_amt"),   # 매입금액합계
-            "positions": [{"code": c, "name": p["name"], "qty": p["qty"]}
+            "positions": [{"code": c, "name": p["name"], "qty": p["qty"],
+                           "price":     p.get("price", 0),       # 현재가
+                           "avg_price": p.get("avg_price", 0),   # 매입평균
+                           # 평가손익(원) = 수량 × (현재가 − 매입평균). API 가 금액을
+                           # 안 주므로 계산(키움 스냅샷 pnl 과 동일 의미).
+                           "pnl":       p.get("qty", 0) * (p.get("price", 0) - p.get("avg_price", 0)),
+                           "pnl_pct":   p.get("pnl_pct", 0)}
                           for c, p in positions.items()],
         }
         with open(f"{ORDERS_DIR}/kis_snapshot.json", "w", encoding="utf-8") as f:

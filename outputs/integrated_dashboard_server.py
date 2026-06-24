@@ -58,6 +58,7 @@ MACRO_DAILY = BASE / "macro_data" / "daily"
 
 PAPER_CSV       = BASE / "paper_signals.csv"
 KIS_SIGNALS_CSV = BASE / "kis_paper_signals.csv"
+STRENGTH_LOG_CSV = BASE / "db" / "signal_strength_log.csv"
 INTRADAY_CACHE  = BASE / "db" / "kiwoom" / "intraday_cache.json"
 HISTORY_CSV = BASE / "trades_history_v3.csv"
 MODEL_JSON  = BASE / "ai_data" / "meta_model_v4.json"
@@ -430,10 +431,13 @@ def get_kiwoom_mock(date_from="", date_to=""):
         try:
             out["snapshot"] = json.loads(snap_path.read_text(encoding="utf-8"))
             # 보유 포지션 표용 — 스냅샷 positions 를 그대로 노출(fillMock 이 mock.positions 로 읽음).
+            # 평가금액(evlt_amt)=수량×현재가, 손익(pnl, 원)도 함께 노출.
             out["positions"] = [
                 {"code": p.get("code", ""), "name": p.get("name", ""),
                  "qty": p.get("qty", 0), "avg_price": p.get("avg_price", 0),
-                 "cur_price": p.get("price", 0), "pnl_pct": p.get("pnl_pct", 0)}
+                 "cur_price": p.get("price", 0),
+                 "evlt_amt": p.get("evlt_amt", (p.get("qty", 0) or 0) * (p.get("price", 0) or 0)),
+                 "pnl": p.get("pnl", 0), "pnl_pct": p.get("pnl_pct", 0)}
                 for p in out["snapshot"].get("positions", [])
             ]
         except Exception:
@@ -525,15 +529,32 @@ def get_kis_mock(date_from="", date_to=""):
             out["stop_monitor"] = json.loads(mon_path.read_text(encoding="utf-8"))
         except Exception:
             pass
-    # 진입가 추적 (stop-loss 모니터링)
+    # 보유 포지션 — 키움과 동일하게 '스냅샷'을 단일 진실원천으로 사용(이름+금액 포함).
+    # 전략/진입일은 kis_positions.csv(진입가 추적)에서 code 로 머지(보조정보).
+    track = {}
     pos_path = KIS_DIR / "kis_positions.csv"
     if pos_path.exists():
         try:
             pos_df = pd.read_csv(pos_path, dtype={"code": str})
             pos_df["code"] = pos_df["code"].str.zfill(6)
-            out["positions"] = pos_df.fillna("").to_dict("records")
+            for _, r in pos_df.iterrows():
+                track[str(r["code"]).zfill(6)] = {
+                    "strategy": r.get("strategy", ""),
+                    "entry_date": str(r.get("signal_date", "")),
+                }
         except Exception:
             pass
+    snap_pos = (out.get("snapshot") or {}).get("positions") or []
+    out["positions"] = [
+        {"code": str(p.get("code", "")).zfill(6), "name": p.get("name", ""),
+         "qty": p.get("qty", 0), "avg_price": p.get("avg_price", 0),
+         "cur_price": p.get("price", 0),
+         "evlt_amt": p.get("evlt_amt", (p.get("qty", 0) or 0) * (p.get("price", 0) or 0)),
+         "pnl": p.get("pnl", 0), "pnl_pct": p.get("pnl_pct", 0),
+         "strategy": track.get(str(p.get("code", "")).zfill(6), {}).get("strategy", ""),
+         "entry_date": track.get(str(p.get("code", "")).zfill(6), {}).get("entry_date", "")}
+        for p in snap_pos
+    ]
     # 주문 로그 (kis_orders_*.csv)
     if KIWOOM_DIR.exists():
         frames = []
@@ -560,6 +581,68 @@ def get_kis_mock(date_from="", date_to=""):
             out["signals_total"] = int(len(pd.read_csv(KIS_SIGNALS_CSV)))
         except Exception:
             pass
+    return out
+
+
+# ── 4c. 신호 강도 백데이터 (signal_strength_log.csv) ──────────────────────────
+def get_strength(limit=300):
+    """
+    strength_logger.py 가 누적한 신호 강도 원천값을 요약+최근기록으로 반환.
+    실거래와 무관(슬롯 균등분배). '이 강도면 이렇게' 사후검증용 데이터.
+    """
+    out = {"rows": [], "total": 0, "summary": {}, "by_strategy": []}
+    if not STRENGTH_LOG_CSV.exists():
+        return out
+    try:
+        df = pd.read_csv(STRENGTH_LOG_CSV, dtype={"code": str}, encoding="utf-8-sig")
+    except Exception as e:
+        out["error"] = str(e)[:200]
+        return out
+    if df.empty:
+        return out
+    df["code"] = df["code"].astype(str).str.zfill(6)
+    for c in ("score_ic", "score_tv", "slot_rank", "entry_close", "n_factors"):
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    n = int(len(df))
+    scored = int(df["score_ic"].notna().sum()) if "score_ic" in df.columns else 0
+    out["total"] = n
+    out["summary"] = {
+        "total": n,
+        "accounts": int(df["account"].nunique()) if "account" in df.columns else 0,
+        "strategies": int(df["strategy"].nunique()) if "strategy" in df.columns else 0,
+        "avg_score_ic": (round(float(df["score_ic"].mean()), 2)
+                         if scored else None),
+        "scored_pct": (int(round(100.0 * scored / n)) if n else 0),
+        "last_date": (str(df["signal_date"].astype(str).max())
+                      if "signal_date" in df.columns else ""),
+    }
+    # 전략별 집계
+    if "strategy" in df.columns:
+        try:
+            g = df.groupby("strategy").agg(
+                n=("code", "size"),
+                avg_ic=("score_ic", "mean"),
+                avg_tv=("score_tv", "mean"),
+            ).reset_index().sort_values("n", ascending=False)
+            out["by_strategy"] = [
+                {"strategy": r["strategy"], "n": int(r["n"]),
+                 "avg_ic": (round(float(r["avg_ic"]), 2) if pd.notna(r["avg_ic"]) else None),
+                 "avg_tv": (round(float(r["avg_tv"]), 1) if pd.notna(r["avg_tv"]) else None)}
+                for _, r in g.iterrows()
+            ]
+        except Exception:
+            pass
+    # 최근 기록 (신호일 내림차순 → 같은 날은 계좌/전략/강도순위 오름차순)
+    sort_cols = [c for c in ("signal_date", "account", "strategy", "slot_rank")
+                 if c in df.columns]
+    asc = [False] + [True] * (len(sort_cols) - 1)
+    try:
+        df2 = df.sort_values(sort_cols, ascending=asc).head(limit)
+    except Exception:
+        df2 = df.tail(limit)
+    out["rows"] = df2.drop(columns=["factors_json"], errors="ignore").fillna("").to_dict("records")
     return out
 
 
@@ -1077,6 +1160,7 @@ def api_all():
             "lab":        _safe(get_strategy_lab),
             "mock":       _safe(get_kiwoom_mock, df, dt),
             "kis":        _safe(get_kis_mock, df, dt),
+            "strength":   _safe(get_strength),
             "pvbt":       _safe(get_paper_vs_bt),
             "ai":         _safe(get_ai_status),
             "train":      _safe(get_training_stats),
@@ -1381,6 +1465,7 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
   <div class="tab active"  onclick="showTab('overview')">&#x1F4CA; &#xAC1C;&#xC694;</div>
   <div class="tab"         onclick="showTab('cheonok')">&#x1F4CC; &#xCC9C;&#xC5B5;&#xC774;</div>
   <div class="tab"         onclick="showTab('mock')">&#x1F3E6; &#xBAA8;&#xC758;&#xACC4;&#xC88C;</div>
+  <div class="tab"         onclick="showTab('strength')">&#x1F4AA; &#xAC15;&#xB3C4;&#xB9E4;&#xB9E4;</div>
   <div class="tab"         onclick="showTab('backtest')">&#x1F4C8; &#xBC31;&#xD14C;&#xC2A4;&#xD2B8;</div>
   <div class="tab"         onclick="showTab('aimodel')">&#x1F916; AI&#xBAA8;&#xB378;</div>
   <div class="tab"         onclick="showTab('datalogs')">&#x1F4DC; &#xB370;&#xC774;&#xD130;+&#xB85C;&#xADF8;</div>
@@ -1468,9 +1553,9 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
     <h2>&#xD0A4;&#xC6C0; &#xBCF4;&#xC720; &#xD3EC;&#xC9C0;&#xC158;</h2>
     <table><thead><tr>
       <th>&#xC885;&#xBAA9;</th><th>&#xC804;&#xB7B5;</th><th class="r">&#xC218;&#xB7C9;</th>
-      <th class="r">&#xD3C9;&#xADE0;&#xB2E8;&#xAC00;</th><th class="r">&#xD604;&#xC7AC;&#xAC00;</th><th class="r">&#xD3C9;&#xAC00;&#xC190;&#xC775;</th><th class="r">&#xC9C4;&#xC785;&#xC77C;</th>
+      <th class="r">&#xD3C9;&#xADE0;&#xB2E8;&#xAC00;</th><th class="r">&#xD604;&#xC7AC;&#xAC00;</th><th class="r">&#xD3C9;&#xAC00;&#xAE08;&#xC561;</th><th class="r">&#xC190;&#xC775;(&#xC6D0;)</th><th class="r">&#xC190;&#xC775;&#xB960;</th><th class="r">&#xC9C4;&#xC785;&#xC77C;</th>
     </tr></thead>
-    <tbody id="mock-pos"><tr><td colspan="7" style="color:#8b949e;text-align:center">&#xBCF4;&#xC720; &#xD3EC;&#xC9C0;&#xC158; &#xC5C6;&#xC74C;</td></tr></tbody>
+    <tbody id="mock-pos"><tr><td colspan="9" style="color:#8b949e;text-align:center">&#xBCF4;&#xC720; &#xD3EC;&#xC9C0;&#xC158; &#xC5C6;&#xC74C;</td></tr></tbody>
     </table>
   </div>
   <div class="section">
@@ -1503,9 +1588,9 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
     <h2>KIS &#xBCF4;&#xC720; &#xD3EC;&#xC9C0;&#xC158;</h2>
     <table><thead><tr>
       <th>&#xC885;&#xBAA9;</th><th>&#xC804;&#xB7B5;</th><th class="r">&#xC218;&#xB7C9;</th>
-      <th class="r">&#xD3C9;&#xADE0;&#xB2E8;&#xAC00;</th><th class="r">&#xD604;&#xC7AC;&#xAC00;</th><th class="r">&#xD3C9;&#xAC00;&#xC190;&#xC775;</th><th class="r">&#xC9C4;&#xC785;&#xC77C;</th>
+      <th class="r">&#xD3C9;&#xADE0;&#xB2E8;&#xAC00;</th><th class="r">&#xD604;&#xC7AC;&#xAC00;</th><th class="r">&#xD3C9;&#xAC00;&#xAE08;&#xC561;</th><th class="r">&#xC190;&#xC775;(&#xC6D0;)</th><th class="r">&#xC190;&#xC775;&#xB960;</th><th class="r">&#xC9C4;&#xC785;&#xC77C;</th>
     </tr></thead>
-    <tbody id="kis-pos"><tr><td colspan="7" style="color:#8b949e;text-align:center">&#xBCF4;&#xC720; &#xD3EC;&#xC9C0;&#xC158; &#xC5C6;&#xC74C;</td></tr></tbody>
+    <tbody id="kis-pos"><tr><td colspan="9" style="color:#8b949e;text-align:center">&#xBCF4;&#xC720; &#xD3EC;&#xC9C0;&#xC158; &#xC5C6;&#xC74C;</td></tr></tbody>
     </table>
   </div>
   <div class="section">
@@ -1515,6 +1600,32 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
       <th class="r">수량</th><th class="r">가격</th><th>사유</th>
     </tr></thead>
     <tbody id="kis-orders"><tr><td colspan="7" style="color:#8b949e;text-align:center">매매내역 없음</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ===== 강도매매 ===== -->
+<div id="tab-strength" class="tab-content">
+  <div class="section">
+    <h2>신호 강도 백데이터 <span style="color:#8b949e;font-size:12px;font-weight:400">&mdash; 실거래는 슬롯 균등분배(강도 무관). 여기는 "이 강도면 이렇게 매매했을 것"을 사후 검증하기 위한 누적 기록</span></h2>
+    <div class="stats-row" id="st-summary"></div>
+  </div>
+  <div class="section">
+    <h2>전략별 강도 요약</h2>
+    <table><thead><tr>
+      <th>전략</th><th class="r">기록수</th><th class="r">평균 강도(score_ic)</th><th class="r">평균 거래대금순위</th>
+    </tr></thead>
+    <tbody id="st-bystrat"><tr><td colspan="4" style="color:#8b949e;text-align:center">데이터 없음</td></tr></tbody>
+    </table>
+  </div>
+  <div class="section">
+    <h2>강도 기록 (최근 300건)</h2>
+    <div style="color:#8b949e;font-size:12px;margin-bottom:8px">강도(IC)=IC가중 통합 팩터점수(0~10, 높을수록 강함) · 거래대금순위=당일 전체순위(1=최대) · 슬롯순위=같은 전략 내 강도 우선순위(1=최강)</div>
+    <table><thead><tr>
+      <th class="r">신호일</th><th>계좌</th><th>전략</th><th>종목</th>
+      <th class="r">진입가</th><th class="r">강도(IC)</th><th class="r">거래대금순위</th><th class="r">슬롯순위</th><th>시장</th>
+    </tr></thead>
+    <tbody id="st-rows"><tr><td colspan="9" style="color:#8b949e;text-align:center">강도 기록 없음 &mdash; 다음 신호생성(18:30) 때 첫 데이터 누적</td></tr></tbody>
     </table>
   </div>
 </div>
@@ -1681,7 +1792,7 @@ function safe(v,fallback='-'){return (v===null||v===undefined||v==='')?fallback:
 function fmtB(n){const v=Number(n||0);if(v>=1e8)return (v/1e8).toFixed(1)+'억';if(v>=1e4)return (v/1e4).toFixed(0)+'만';return fmt(v)}
 
 function showTab(id){
-  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',['overview','cheonok','mock','backtest','aimodel','datalogs','intraday'][i]===id));
+  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',['overview','cheonok','mock','strength','backtest','aimodel','datalogs','intraday'][i]===id));
   document.querySelectorAll('.tab-content').forEach(t=>t.classList.toggle('active',t.id==='tab-'+id));
 }
 
@@ -1814,13 +1925,16 @@ function fillMock(mock, kis){
     fillOrders('mock-orders','mock-ord-cnt', mock.orders, mock.order_total);
     fillSlots('mock-slots', mock.slots||[]);
     const pos=mock.positions||[];
-    setHtml('mock-pos', pos.length?pos.map(r=>
-      `<tr><td>${r.code||''} ${r.name||''}</td><td style="color:#8b949e;font-size:11px">${r.strategy||''}</td>
+    setHtml('mock-pos', pos.length?pos.map(r=>{
+      const ev=(r.evlt_amt!=null&&r.evlt_amt!=='')?r.evlt_amt:(Number(r.qty)||0)*(Number(r.cur_price||r.current_price)||0);
+      return `<tr><td>${r.code||''} ${r.name||''}</td><td style="color:#8b949e;font-size:11px">${r.strategy||''}</td>
        <td class="r">${fmt(r.qty)}</td><td class="r">${fmt(r.avg_price)}</td>
        <td class="r">${fmt(r.cur_price||r.current_price)}</td>
+       <td class="r">${fmt(ev)}원</td>
+       <td class="r ${clr(r.pnl)}">${fmt(r.pnl)}원</td>
        <td class="r ${clr(r.pnl_pct)}">${pct(r.pnl_pct)}</td>
-       <td class="r" style="font-size:11px">${String(r.entry_date||'').slice(0,10)}</td></tr>`
-    ).join(''):'<tr><td colspan="7" style="color:#8b949e;text-align:center">보유 포지션 없음</td></tr>');
+       <td class="r" style="font-size:11px">${String(r.entry_date||'').slice(0,10)}</td></tr>`;
+    }).join(''):'<tr><td colspan="9" style="color:#8b949e;text-align:center">보유 포지션 없음</td></tr>');
   }
   // KIS
   if(kis&&!kis.error){
@@ -1829,14 +1943,51 @@ function fillMock(mock, kis){
     fillOrders('kis-orders','kis-ord-cnt', kis.orders, kis.order_total);
     fillSlots('kis-slots', kis.slots||[]);
     const pos=kis.positions||[];
-    setHtml('kis-pos', pos.length?pos.map(r=>
-      `<tr><td>${r.code||''} ${r.name||''}</td><td style="color:#8b949e;font-size:11px">${r.strategy||''}</td>
+    setHtml('kis-pos', pos.length?pos.map(r=>{
+      const ev=(r.evlt_amt!=null&&r.evlt_amt!=='')?r.evlt_amt:(Number(r.qty)||0)*(Number(r.cur_price||r.current_price)||0);
+      return `<tr><td>${r.code||''} ${r.name||''}</td><td style="color:#8b949e;font-size:11px">${r.strategy||''}</td>
        <td class="r">${fmt(r.qty)}</td><td class="r">${fmt(r.avg_price)}</td>
        <td class="r">${fmt(r.cur_price||r.current_price)}</td>
+       <td class="r">${fmt(ev)}원</td>
+       <td class="r ${clr(r.pnl)}">${fmt(r.pnl)}원</td>
        <td class="r ${clr(r.pnl_pct)}">${pct(r.pnl_pct)}</td>
-       <td class="r" style="font-size:11px">${String(r.entry_date||'').slice(0,10)}</td></tr>`
-    ).join(''):'<tr><td colspan="7" style="color:#8b949e;text-align:center">보유 포지션 없음</td></tr>');
+       <td class="r" style="font-size:11px">${String(r.entry_date||'').slice(0,10)}</td></tr>`;
+    }).join(''):'<tr><td colspan="9" style="color:#8b949e;text-align:center">보유 포지션 없음</td></tr>');
   }
+}
+
+function fillStrength(st){
+  if(!st){ return; }
+  const s=st.summary||{};
+  setHtml('st-summary', st.total ? `
+    <div class="stat"><div class="v">${fmt(s.total)}</div><div class="l">총 기록 신호</div></div>
+    <div class="stat"><div class="v">${safe(s.avg_score_ic,'-')}</div><div class="l">평균 강도(IC)</div></div>
+    <div class="stat"><div class="v">${safe(s.scored_pct,'0')}%</div><div class="l">채점 성공률</div></div>
+    <div class="stat"><div class="v">${s.strategies||0}</div><div class="l">전략 수</div></div>
+    <div class="stat"><div class="v">${s.accounts||0}</div><div class="l">계좌 수</div></div>
+    <div class="stat"><div class="v" style="font-size:14px">${s.last_date||'-'}</div><div class="l">최근 기록일</div></div>
+  ` : '<div style="color:#8b949e;font-size:13px">강도 기록 없음 &mdash; 다음 신호생성(18:30) 때 첫 데이터가 누적됩니다.</div>');
+  const bs=st.by_strategy||[];
+  setHtml('st-bystrat', bs.length?bs.map(r=>
+    `<tr><td>${r.strategy||''}</td><td class="r">${fmt(r.n)}</td>
+     <td class="r">${safe(r.avg_ic,'-')}</td><td class="r">${safe(r.avg_tv,'-')}</td></tr>`
+  ).join(''):'<tr><td colspan="4" style="color:#8b949e;text-align:center">데이터 없음</td></tr>');
+  const rows=st.rows||[];
+  setHtml('st-rows', rows.length?rows.map(r=>{
+    const msv=String(r.market_strong);
+    const ms=(msv==='True'||msv==='true')?'<span style="color:#3fb950">강세</span>'
+            :(msv==='False'||msv==='false')?'<span style="color:#8b949e">약세</span>':'';
+    return `<tr>
+      <td class="r" style="font-size:11px">${String(r.signal_date||'')}</td>
+      <td style="font-size:11px">${r.account||''}</td>
+      <td style="color:#8b949e;font-size:11px">${r.strategy||''}</td>
+      <td>${r.code||''} ${r.name||''}</td>
+      <td class="r">${fmt(r.entry_close)}</td>
+      <td class="r" style="font-weight:bold">${safe(r.score_ic,'-')}</td>
+      <td class="r">${safe(r.score_tv,'-')}</td>
+      <td class="r">${safe(r.slot_rank,'-')}</td>
+      <td>${ms}</td></tr>`;
+  }).join(''):'<tr><td colspan="9" style="color:#8b949e;text-align:center">강도 기록 없음</td></tr>');
 }
 
 function fillBacktest(bt, sc){
@@ -2080,6 +2231,7 @@ async function load(){
   _r(fillOverview, d.cheonok, d.ai, d.candidates);
   _r(fillCheonok, d.cheonok);
   _r(fillMock, d.mock, d.kis);
+  _r(fillStrength, d.strength);
   _r(fillBacktest, d.bt, d.sc);
   _r(fillLab, d.lab);
   _r(fillAI, d.ai);
