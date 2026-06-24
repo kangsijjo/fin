@@ -176,6 +176,13 @@ def _to_int(v, default=0):
         return default
 
 
+def _to_float(v, default=0.0):
+    try:
+        return round(float(str(v).replace(",", "").replace("+", "").strip()), 2)
+    except Exception:
+        return default
+
+
 def log_order(row):
     os.makedirs(ORDERS_DIR, exist_ok=True)
     path = f"{ORDERS_DIR}/orders_{datetime.today():%Y%m%d}.csv"
@@ -275,7 +282,16 @@ def get_positions(api):
         qty = _to_int(_pick(it, "rmnd_qty", "hldg_qty", "qty", default=0))
         name = _pick(it, "stk_nm", "stock_name", default="")
         if code and qty > 0:
-            pos[code] = {"qty": qty, "name": name}
+            # 현재가/매입가는 kiwoom 이 방향부호(+/-)를 붙여 줄 때가 있어 abs 로 정규화.
+            # 평가손익/수익률은 부호 유지.
+            pos[code] = {
+                "qty": qty, "name": name,
+                "price":     abs(_to_int(_pick(it, "cur_prc", "prpr", default=0))),
+                "avg_price": abs(_to_int(_pick(it, "pur_pric", "pchs_avg_pric", "buy_uv", default=0))),
+                "evlt_amt":  abs(_to_int(_pick(it, "evlt_amt", "evlu_amt", default=0))),
+                "pnl":       _to_int(_pick(it, "evltv_prft", "evlt_pl", "evlu_pfls_amt", default=0)),
+                "pnl_pct":   _to_float(_pick(it, "prft_rt", "pl_rt", "evlu_pfls_rt", default=0)),
+            }
     return pos
 
 
@@ -320,10 +336,14 @@ def cmd_status():
     api = get_api()
     dep = get_deposit(api)
     pos = get_positions(api)
-    print(f"\n[예수금(주문가능)] {dep:,} 원")
+    securities = sum(p.get("evlt_amt", 0) for p in pos.values())   # 보유 평가금액 합
+    eval_pnl   = sum(p.get("pnl", 0) for p in pos.values())        # 평가손익 합
+    total_eval = dep + securities                                  # 총평가 = 예수금 + 보유평가
+    print(f"\n[총평가금액] {total_eval:,} 원  (예수금 {dep:,} + 보유평가 {securities:,})")
+    print(f"[평가손익] {eval_pnl:+,} 원")
     print(f"[보유 종목] {len(pos)} / {MAX_CONCURRENT} 슬롯")
     for c, p in pos.items():
-        print(f"  {c} {p['name']}: {p['qty']:,}주")
+        print(f"  {c} {p['name']}: {p['qty']:,}주  현재 {p.get('price',0):,}  손익 {p.get('pnl',0):+,}({p.get('pnl_pct',0):+.2f}%)")
 
     # 대시보드용 스냅샷 저장
     try:
@@ -333,7 +353,10 @@ def cmd_status():
                 "time": datetime.now().strftime("%H:%M"),
                 "env": config.KIWOOM_ENV,
                 "deposit": dep,
-                "positions": [{"code": c, "name": p["name"], "qty": p["qty"]}
+                "total_eval": total_eval, "securities": securities, "eval_pnl": eval_pnl,
+                "positions": [{"code": c, "name": p["name"], "qty": p["qty"],
+                               "price": p.get("price", 0), "avg_price": p.get("avg_price", 0),
+                               "pnl": p.get("pnl", 0), "pnl_pct": p.get("pnl_pct", 0)}
                               for c, p in pos.items()]}
         with open(f"{ORDERS_DIR}/snapshot.json", "w", encoding="utf-8") as f:
             json.dump(snap, f, ensure_ascii=False, indent=1)

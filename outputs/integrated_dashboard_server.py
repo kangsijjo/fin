@@ -424,11 +424,18 @@ def get_strategy_lab():
 
 # ── 4. kiwoom mock account ─────────────────────────────────────────────────────
 def get_kiwoom_mock(date_from="", date_to=""):
-    out = {"snapshot": {}, "equity": [], "orders": [], "order_total": 0}
+    out = {"snapshot": {}, "equity": [], "orders": [], "order_total": 0, "positions": []}
     snap_path = KIWOOM_DIR / "snapshot.json"
     if snap_path.exists():
         try:
             out["snapshot"] = json.loads(snap_path.read_text(encoding="utf-8"))
+            # 보유 포지션 표용 — 스냅샷 positions 를 그대로 노출(fillMock 이 mock.positions 로 읽음).
+            out["positions"] = [
+                {"code": p.get("code", ""), "name": p.get("name", ""),
+                 "qty": p.get("qty", 0), "avg_price": p.get("avg_price", 0),
+                 "cur_price": p.get("price", 0), "pnl_pct": p.get("pnl_pct", 0)}
+                for p in out["snapshot"].get("positions", [])
+            ]
         except Exception:
             pass
     eq_path = KIWOOM_DIR / "equity_history.csv"
