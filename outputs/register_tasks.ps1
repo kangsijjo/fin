@@ -150,6 +150,17 @@ try {
         -Action $a10 -Trigger $t10 -Settings $s10 -Principal $principal -Force | Out-Null
     Write-Host "[OK] StockAI\IntradayPreview (weekdays, every 15min 09:15-15:30)" -ForegroundColor Green
 
+    # 11. Weekly AI pipeline (light, gated): Sunday 03:00 - collect -> dataset -> train (Optuna)
+    Write-Host "[11/11] Registering weekly AI pipeline..."
+    $a11 = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_ai_pipeline.bat" -Argument "auto"
+    $t11 = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At "03:00"
+    $s11 = New-ScheduledTaskSettingsSet `
+               -StartWhenAvailable `
+               -ExecutionTimeLimit (New-TimeSpan -Hours 3)
+    Register-ScheduledTask -TaskName "StockAI\AIPipeline" `
+        -Action $a11 -Trigger $t11 -Settings $s11 -Principal $principal -Force | Out-Null
+    Write-Host "[OK] StockAI\AIPipeline (Sunday 03:00, gated: collect->dataset->train)" -ForegroundColor Green
+
     Write-Host ""
     Write-Host "=== Registered Tasks ===" -ForegroundColor Cyan
     Get-ScheduledTask -TaskPath "\StockAI\" | Format-Table TaskName, State -AutoSize

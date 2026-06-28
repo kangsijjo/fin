@@ -49,7 +49,7 @@ _LOG_PATH = os.path.join(_HERE, "db", "signal_strength_log.csv")
 _FIELDS = [
     "logged_at", "signal_date", "account", "strategy", "code", "name",
     "entry_close", "market_strong", "score_ic", "n_factors", "score_tv",
-    "slot_rank", "factors_json",
+    "ai_prob", "slot_rank", "factors_json",
 ]
 
 # stock.db 후보 경로 (live_signal._open_stock_db 와 동일 정책)
@@ -112,6 +112,7 @@ def log_strength(account, df, last_date, signals, *, verbose=True):
         if not rows:
             return
         os.makedirs(os.path.dirname(_LOG_PATH), exist_ok=True)
+        _migrate_header(_LOG_PATH, _FIELDS)   # 컬럼 추가(ai_prob 등) 시 기존파일 헤더 정합화
         new_file = not os.path.exists(_LOG_PATH) or os.path.getsize(_LOG_PATH) == 0
         # utf-8-sig: 엑셀에서 한글 안 깨지게
         with open(_LOG_PATH, "a", newline="", encoding="utf-8-sig") as f:
@@ -126,6 +127,27 @@ def log_strength(account, df, last_date, signals, *, verbose=True):
     except Exception as e:  # 절대 신호생성을 막지 않는다
         if verbose:
             print(f"[strength_logger][warn] 강도기록 건너뜀: {e}")
+
+
+def _migrate_header(path, fields):
+    """기존 CSV 헤더가 fields 와 다르면(컬럼 추가 등) 새 헤더로 재작성.
+    누락 컬럼은 공란으로 채워 과거 행 보존 → DictWriter append 시 정렬붕괴 방지."""
+    try:
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            return
+        with open(path, encoding="utf-8-sig") as f:
+            header_line = f.readline().rstrip("\r\n")
+        if header_line == ",".join(fields):
+            return   # 이미 최신 헤더
+        with open(path, encoding="utf-8-sig", newline="") as f:
+            old_rows = list(csv.DictReader(f))
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+            w.writeheader()
+            for r in old_rows:
+                w.writerow({k: r.get(k, "") for k in fields})
+    except Exception as e:
+        print(f"[strength_logger][warn] 헤더 마이그레이션 실패(무시): {e}")
 
 
 def _build_rows(account, df, last_date, signals, *, verbose=True):
@@ -168,6 +190,7 @@ def _build_rows(account, df, last_date, signals, *, verbose=True):
         score_ic = None
         n_factors = None
         score_tv = None
+        ai_prob = None   # meta_model_v4 forward 예측확률(big-win)
         feats = {}
         if scorer is not None:
             try:
@@ -178,6 +201,11 @@ def _build_rows(account, df, last_date, signals, *, verbose=True):
                 score_ic = _clean(ic.get("total"))
                 n_factors = ic.get("n_available")
                 score_tv = _clean(feats.get("score_tv"))
+                # forward AI 누적: 신호시점 모델 확률(없으면 None) — 나중에 실현수익과 조인
+                try:
+                    ai_prob = scorer.model_proba(feats)
+                except Exception:
+                    ai_prob = None
             except Exception:
                 feats = {}
         factors_clean = {k: _clean(v) for k, v in feats.items()}
@@ -193,6 +221,7 @@ def _build_rows(account, df, last_date, signals, *, verbose=True):
             "score_ic": score_ic if score_ic is not None else "",
             "n_factors": n_factors if n_factors is not None else "",
             "score_tv": score_tv if score_tv is not None else "",
+            "ai_prob": ai_prob if ai_prob is not None else "",
             "slot_rank": None,  # 아래서 채움
             "factors_json": json.dumps(factors_clean, ensure_ascii=False),
         })

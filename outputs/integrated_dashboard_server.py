@@ -601,7 +601,7 @@ def get_strength(limit=300):
     if df.empty:
         return out
     df["code"] = df["code"].astype(str).str.zfill(6)
-    for c in ("score_ic", "score_tv", "slot_rank", "entry_close", "n_factors"):
+    for c in ("score_ic", "score_tv", "slot_rank", "entry_close", "n_factors", "ai_prob"):
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
@@ -1313,6 +1313,13 @@ if not Path(_VENV_PYTHON).exists():
 
 _NO_WIN = getattr(_sp, "CREATE_NO_WINDOW", 0x08000000)   # Windows 콘솔창 숨김
 
+# Stock_AI_Project 수집기(개별 수동실행용) — 자체 venv + cwd 필요.
+_STOCK_AI_DIR = BASE.parent / "Stock_AI_Project"
+_STOCK_AI_PY  = str(_STOCK_AI_DIR / "venv" / "Scripts" / "python.exe")
+if not Path(_STOCK_AI_PY).exists():
+    _STOCK_AI_PY = _VENV_PYTHON   # fallback
+_CREDIT_SINCE = (datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d")
+
 _RUN_TASKS = {
     "live_signal":   [_VENV_PYTHON, str(BASE / "live_signal.py")],
     "paper_tracker": [_VENV_PYTHON, str(BASE / "paper_tracker.py")],
@@ -1328,11 +1335,25 @@ _RUN_TASKS = {
                       str(BASE.parent / "Stock_AI_Project" / "run_backfill.ps1")],   # Stock_AI 수집기 일괄(자체 cwd/venv)
     "ai_dataset":    [_VENV_PYTHON, str(BASE / "make_trades_history_v3.py")],        # AI 학습 데이터셋 생성
     "ai_train":      [_VENV_PYTHON, str(BASE / "ai_trainer_v4.py")],                 # meta_model_v4 재학습
+    "ai_pipeline":   ["cmd", "/c", str(BASE / "run_ai_pipeline.bat"), "auto"],       # 주1회 경량 AI 갱신(수집→데이터셋→학습, 게이팅)
     "strategy_lab":  [_VENV_PYTHON, str(BASE / "strategy_lab.py")],                  # 전략 랩 forward 집계
     "stop_cf":       [_VENV_PYTHON, str(BASE / "build_stop_counterfactual.py")],     # 장중손절 반사실 라벨 누적
     "preview":       [_VENV_PYTHON, str(BASE / "intraday_preview.py")],              # 장중 잠정 예비후보
     "market_grid":   [_VENV_PYTHON, str(BASE / "market_grid.py")],                   # 장중시황 2x6 그리드(키움)
     "daily_summary": [_VENV_PYTHON, str(BASE / "daily_summary.py")],                  # 텔레그램 하루요약 수동 전송
+    "kis_stopcheck": [_VENV_PYTHON, str(BASE / "kis_trader.py"), "stopcheck"],        # KIS 장중 손절 모니터
+    # ── 개별 데이터 수집기 (정체분만 콕 집어 수동수집 — Stock_AI venv/cwd) ──
+    "supply_demand": [_STOCK_AI_PY, "-m", "src.collector.supply_demand"],            # 외국인/기관 수급(KIS)
+    "macro":         [_STOCK_AI_PY, "-m", "src.collector.macro"],                    # 거시지표(NASDAQ/VIX/환율)
+    "credit":        [_STOCK_AI_PY, "-m", "src.collector.kiwoom_extra",
+                      "--backfill", "--since", _CREDIT_SINCE],                       # 신용/대차(키움 주간)
+}
+
+# 작업별 cwd (미지정 시 outputs). Stock_AI 수집기는 프로젝트 루트에서 실행해야 -m 임포트가 됨.
+_RUN_CWD = {
+    "supply_demand": str(_STOCK_AI_DIR),
+    "macro":         str(_STOCK_AI_DIR),
+    "credit":        str(_STOCK_AI_DIR),
 }
 
 
@@ -1374,7 +1395,7 @@ def api_run(task):
         log_dir.mkdir(exist_ok=True)
         logf = open(log_dir / f"run_{task}.log", "w", encoding="utf-8", errors="replace")
         proc = _sp.Popen(
-            _RUN_TASKS[task], cwd=str(BASE),
+            _RUN_TASKS[task], cwd=_RUN_CWD.get(task, str(BASE)),
             stdout=logf, stderr=_sp.STDOUT,
             creationflags=_NO_WIN,
         )
@@ -1401,6 +1422,10 @@ a{color:#58a6ff}
 .runbtn:hover{background:#30363d;border-color:#58a6ff}
 .runbtn.danger{border-color:#6e2a2a}
 .runbtn.danger:hover{background:#3d1f1f;border-color:#f85149}
+.runbtn.stale{background:#3d1f1f;border-color:#f85149;color:#ffb3ad;
+  box-shadow:0 0 0 1px #f85149;animation:stalepulse 1.6s ease-in-out infinite}
+.runbtn.stale::before{content:"\26A0 ";color:#f85149}
+@keyframes stalepulse{0%,100%{box-shadow:0 0 2px 0 #f85149}50%{box-shadow:0 0 9px 1px #f85149}}
 /* header */
 header{background:#161b22;padding:8px 16px;display:flex;justify-content:space-between;align-items:center;
        border-bottom:1px solid #30363d;position:sticky;top:0;z-index:20}
@@ -1623,9 +1648,9 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
     <div style="color:#8b949e;font-size:12px;margin-bottom:8px">강도(IC)=IC가중 통합 팩터점수(0~10, 높을수록 강함) · 거래대금순위=당일 전체순위(1=최대) · 슬롯순위=같은 전략 내 강도 우선순위(1=최강)</div>
     <table><thead><tr>
       <th class="r">신호일</th><th>계좌</th><th>전략</th><th>종목</th>
-      <th class="r">진입가</th><th class="r">강도(IC)</th><th class="r">거래대금순위</th><th class="r">슬롯순위</th><th>시장</th>
+      <th class="r">진입가</th><th class="r">강도(IC)</th><th class="r">AI확률</th><th class="r">거래대금순위</th><th class="r">슬롯순위</th><th>시장</th>
     </tr></thead>
-    <tbody id="st-rows"><tr><td colspan="9" style="color:#8b949e;text-align:center">강도 기록 없음 &mdash; 다음 신호생성(18:30) 때 첫 데이터 누적</td></tr></tbody>
+    <tbody id="st-rows"><tr><td colspan="10" style="color:#8b949e;text-align:center">강도 기록 없음 &mdash; 다음 신호생성(18:30) 때 첫 데이터 누적</td></tr></tbody>
     </table>
   </div>
 </div>
@@ -1718,17 +1743,40 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
 <div id="tab-datalogs" class="tab-content">
   <div class="section">
     <h2>&#xC218;&#xB3D9; &#xC2E4;&#xD589; (&#xC81C;&#xC5B4;&#xD310;)</h2>
-    <div style="display:flex;flex-wrap:wrap;gap:8px">
-      <button class="runbtn" onclick="runTask('backfill','&#xB370;&#xC774;&#xD130; &#xC218;&#xC9D1;(backfill)')">&#xB370;&#xC774;&#xD130; &#xC218;&#xC9D1;</button>
-      <button class="runbtn" onclick="runTask('ai_dataset','AI &#xD559;&#xC2B5; &#xB370;&#xC774;&#xD130;&#xC14B;')">AI &#xB370;&#xC774;&#xD130;&#xC14B;</button>
-      <button class="runbtn" onclick="runTask('ai_train','AI &#xBAA8;&#xB378; &#xD559;&#xC2B5;')">AI &#xD559;&#xC2B5;</button>
-      <button class="runbtn" onclick="runTask('strategy_lab','&#xC804;&#xB7B5; &#xB7A9;')">&#xC804;&#xB7B5; &#xB7A9;</button>
-      <button class="runbtn" onclick="runTask('live_signal','&#xC2E0;&#xD638; &#xAC10;&#xC9C0;')">&#xC2E0;&#xD638; &#xAC10;&#xC9C0;</button>
-      <button class="runbtn" onclick="runTask('paper_tracker','&#xD398;&#xC774;&#xD37C; &#xCD94;&#xC801;')">&#xD398;&#xC774;&#xD37C; &#xCD94;&#xC801;</button>
-      <button class="runbtn" onclick="runTask('recheck','&#xB370;&#xC774;&#xD130; &#xC7AC;&#xAC80;&#xC99D;')">&#xC7AC;&#xAC80;&#xC99D;</button>
-      <button class="runbtn" onclick="runTask('kis_status','KIS 잔고 새로고침',5000)">KIS 잔고 새로고침</button>
-      <button class="runbtn" onclick="runTask('kiwoom_status','키움 잔고 새로고침',5000)">키움 잔고 새로고침</button>
-      <button class="runbtn danger" onclick="runTask('scheduler_restart','&#xC2A4;&#xCF00;&#xC904;&#xB7EC; &#xC7AC;&#xC2DC;&#xC791;')">&#xC2A4;&#xCF00;&#xC904;&#xB7EC; &#xC7AC;&#xC2DC;&#xC791;</button>
+    <div style="color:#8b949e;font-size:12px;margin-bottom:6px">정체된 데이터가 있으면 해당 버튼이 &#xF85149;빨갛게 깜빡입니다 &mdash; 그 버튼을 누르세요.</div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+        <span style="color:#8b949e;font-size:12px;min-width:72px">데이터수집</span>
+        <button class="runbtn" data-fresh="korea_stocks,usa_stocks,macro_indicators,supply_demand,news" onclick="runTask('backfill','전체 수집(backfill)')">전체 수집</button>
+        <button class="runbtn" data-fresh="supply_demand" onclick="runTask('supply_demand','수급 수집')">수급</button>
+        <button class="runbtn" data-fresh="macro_indicators" onclick="runTask('macro','거시지표 수집')">거시지표</button>
+        <button class="runbtn" data-fresh="credit_balance" onclick="runTask('credit','신용/대차 수집')">신용/대차</button>
+        <button class="runbtn" onclick="runTask('recheck','데이터 재검증')">재검증</button>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+        <span style="color:#8b949e;font-size:12px;min-width:72px">신호·매매</span>
+        <button class="runbtn" data-sig="1" onclick="runTask('live_signal','키움 신호감지')">키움 신호</button>
+        <button class="runbtn" data-sig="1" onclick="runTask('kis_signal','KIS 신호감지')">KIS 신호</button>
+        <button class="runbtn" onclick="runTask('kiwoom_buy','키움 매수')">키움 매수</button>
+        <button class="runbtn" onclick="runTask('kiwoom_sell','키움 매도')">키움 매도</button>
+        <button class="runbtn" onclick="runTask('kis_daily','KIS 매매(daily)')">KIS 매매</button>
+        <button class="runbtn" onclick="runTask('kis_stopcheck','KIS 손절체크')">KIS 손절체크</button>
+        <button class="runbtn" onclick="runTask('kiwoom_status','키움 잔고 새로고침',5000)">키움 잔고</button>
+        <button class="runbtn" onclick="runTask('kis_status','KIS 잔고 새로고침',5000)">KIS 잔고</button>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+        <span style="color:#8b949e;font-size:12px;min-width:72px">AI·분석·장중</span>
+        <button class="runbtn" onclick="runTask('ai_pipeline','AI 파이프라인(수집→학습)')">AI 파이프라인</button>
+        <button class="runbtn" onclick="runTask('ai_dataset','AI 학습 데이터셋')">AI 데이터셋</button>
+        <button class="runbtn" onclick="runTask('ai_train','AI 모델 학습')">AI 학습</button>
+        <button class="runbtn" onclick="runTask('strategy_lab','전략 랩')">전략 랩</button>
+        <button class="runbtn" onclick="runTask('stop_cf','손절 반사실 누적')">손절반사실</button>
+        <button class="runbtn" onclick="runTask('paper_tracker','페이퍼 추적')">페이퍼 추적</button>
+        <button class="runbtn" onclick="runTask('preview','장중 예비후보')">장중예비</button>
+        <button class="runbtn" onclick="runTask('market_grid','장중시황 그리드')">시황그리드</button>
+        <button class="runbtn" onclick="runTask('daily_summary','텔레그램 하루요약')">텔레그램요약</button>
+        <button class="runbtn danger" onclick="runTask('scheduler_restart','스케줄러 재시작')">스케줄러 재시작</button>
+      </div>
     </div>
     <div id="run-status" style="margin-top:10px;color:#8b949e;font-size:13px">&#xBC84;&#xD2BC;&#xC744; &#xB204;&#xB974;&#xBA74; &#xD574;&#xB2F9; &#xC791;&#xC5C5;&#xC774; &#xBC31;&#xADF8;&#xB77C;&#xC6B4;&#xB4DC;&#xB85C; &#xC2E4;&#xD589;&#xB429;&#xB2C8;&#xB2E4; (&#xB85C;&#xADF8;: logs/ &#xD3F4;&#xB354;).</div>
   </div>
@@ -1956,6 +2004,19 @@ function fillMock(mock, kis){
   }
 }
 
+function fillRunButtons(d){
+  // 정체 데이터(freshness)·신호정체(health) 에 해당하는 수동버튼을 빨갛게(stale).
+  const stale=new Set((d.freshness||[]).map(f=>f.table));
+  const sigStale=(d.health||[]).some(h=>String(h.msg||'').indexOf('신호')>=0);
+  document.querySelectorAll('.runbtn[data-fresh]').forEach(b=>{
+    const tabs=(b.getAttribute('data-fresh')||'').split(',').filter(Boolean);
+    b.classList.toggle('stale', tabs.some(t=>stale.has(t)));
+  });
+  document.querySelectorAll('.runbtn[data-sig]').forEach(b=>{
+    b.classList.toggle('stale', sigStale);
+  });
+}
+
 function fillStrength(st){
   if(!st){ return; }
   const s=st.summary||{};
@@ -1984,10 +2045,11 @@ function fillStrength(st){
       <td>${r.code||''} ${r.name||''}</td>
       <td class="r">${fmt(r.entry_close)}</td>
       <td class="r" style="font-weight:bold">${safe(r.score_ic,'-')}</td>
+      <td class="r">${(r.ai_prob!=null&&r.ai_prob!=='')?(Number(r.ai_prob)*100).toFixed(1)+'%':'-'}</td>
       <td class="r">${safe(r.score_tv,'-')}</td>
       <td class="r">${safe(r.slot_rank,'-')}</td>
       <td>${ms}</td></tr>`;
-  }).join(''):'<tr><td colspan="9" style="color:#8b949e;text-align:center">강도 기록 없음</td></tr>');
+  }).join(''):'<tr><td colspan="10" style="color:#8b949e;text-align:center">강도 기록 없음</td></tr>');
 }
 
 function fillBacktest(bt, sc){
@@ -2232,6 +2294,7 @@ async function load(){
   _r(fillCheonok, d.cheonok);
   _r(fillMock, d.mock, d.kis);
   _r(fillStrength, d.strength);
+  _r(fillRunButtons, d);
   _r(fillBacktest, d.bt, d.sc);
   _r(fillLab, d.lab);
   _r(fillAI, d.ai);

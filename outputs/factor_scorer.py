@@ -89,7 +89,13 @@ class FactorScorer:
     def __init__(self,
                  trades_csv: str = TRADES_CSV,
                  model_json: str = MODEL_JSON,
-                 features_csv: str = FEATURES_CSV):
+                 features_csv: str = FEATURES_CSV,
+                 use_shap: bool = False):
+        # use_shap=False(기본): XGBoost 모델 로드+SHAP 계산을 건너뛴다.
+        #   라이브 매수순위는 score_ic(IC 가중 팩터점수)가 단독 결정하므로
+        #   SHAP/proba 는 점수에 미반영 — 매 신호 모델 로드 비용만 발생했다.
+        #   다시 "AI 근거" 표시가 필요하면 FactorScorer(use_shap=True) 로 호출.
+        self.use_shap: bool = use_shap
         self.ic_weights: dict = {}      # {feat: IC 값}
         self.feat_stats: dict = {}      # {feat: (sorted_values, mean)} for percentile
         self._model = None              # XGBoost model (lazy load)
@@ -496,6 +502,37 @@ class FactorScorer:
             print(f"[FactorScorer] 모델 로드 실패: {e}")
             return False
 
+    def model_proba(self, feats: dict):
+        """meta_model_v4 예측확률(긍정=big-win 클래스)만 반환 — SHAP/explainer 불필요(경량).
+        forward 라이브 누적(strength_logger)에서 신호별 AI 확률을 싸게 얻기 위함.
+        모델 없거나 실패 시 None."""
+        try:
+            import xgboost as xgb
+            import pandas as pd
+        except Exception:
+            return None
+        m = getattr(self, "_proba_model", None)
+        if m is None:
+            if not os.path.exists(self._model_json):
+                return None
+            try:
+                m = xgb.XGBClassifier()
+                m.load_model(self._model_json)
+                self._proba_model = m
+            except Exception:
+                return None
+        try:
+            vec = []
+            for f in MODEL_FEATURE_ORDER:
+                v = feats.get(f)
+                if v is None or (isinstance(v, float) and np.isnan(v)):
+                    v = 0.0
+                vec.append(float(v))
+            X = pd.DataFrame([vec], columns=MODEL_FEATURE_ORDER)
+            return round(float(m.predict_proba(X)[0][1]), 4)
+        except Exception:
+            return None
+
     def score_shap(self, feats: dict) -> dict:
         """
         XGBoost SHAP 값 계산.
@@ -559,7 +596,7 @@ class FactorScorer:
     def score(self, code: str, name: str, feats: dict) -> dict:
         """IC 점수 + SHAP 결합 결과 dict."""
         ic_result   = self.score_ic(feats)
-        shap_result = self.score_shap(feats)
+        shap_result = self.score_shap(feats) if self.use_shap else {"available": False}
 
         return {
             "code": code,
