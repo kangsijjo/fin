@@ -57,6 +57,20 @@ FEATURES = [
 ]
 CAT = {"strategy"}  # one-hot
 
+# [개선] 지표 조합 탐색 — 개별 22피처를 2^22 로 켜고끄면 과적합 → '의미 그룹' 단위 토글.
+#   CORE 는 항상 포함(기본 가격·기술·유동성), 나머지 그룹만 Optuna 가 on/off.
+#   strat_* one-hot 도 항상 포함. purged-CV 사이징 스프레드로 평가 + 간결성 페널티로 과적합 억제.
+CORE_FEATURES = ["rsi14", "atr_pct", "vol_ratio", "tv_ratio", "score_tv", "mcap_class"]
+FEATURE_GROUPS = {
+    "supply_pykrx": ["for_5d", "ins_5d"],
+    "news":         ["news_sent_7d", "news_cnt_7d"],
+    "macro":        ["vix", "vix_chg_5d", "sox_ret_5d", "usdkrw_chg_5d", "kospi_ret_20d"],
+    "credit":       ["crd_remn_rt", "crd_remn_chg_5d"],
+    "supply_db":    ["for_net5_db", "ins_net5_db"],
+    "tech_db":      ["rsi_db", "macd_hist_db", "bb_pct_db"],
+    "program":      ["prm_net_5d_ratio"],
+}
+
 
 def main():
     if not os.path.exists(TRADES_PATH):
@@ -109,19 +123,147 @@ def main():
         print("[abort] 표본 부족 — 데이터 백필 후 재시도 (python pykrx_collector.py 8)")
         sys.exit(1)
 
+    # 지표조합 탐색이 채울 최종 피처(폴백/비-XGB 경로는 전체 사용)
+    final_cols = list(X_all.columns)
+
+    # ---- [업데이트] Optuna AutoML: 하이퍼파라미터 + 지표조합(그룹 on/off) 동시 탐색 ----
     if _has_xgb:
-        model = xgb.XGBClassifier(
-            n_estimators=300, learning_rate=0.04, max_depth=4,
-            subsample=0.8, colsample_bytree=0.8, min_child_weight=5,
-            random_state=42, eval_metric="logloss",
-        )
+        try:
+            import optuna
+            optuna.logging.set_verbosity(optuna.logging.WARNING) # 로그 최소화
+
+            from optuna.samplers import TPESampler
+
+            # [개선 B] 목적함수 = 단일분할 AUC → purged 시계열 CV 의 '사이징 스프레드'.
+            #   이 모델 용도는 분류정확도(AUC)가 아니라 '확률 상위에 더 큰 비중' 사이징이므로,
+            #   상위-하위 분위 실수익 스프레드를 직접 최적화한다. embargo+청산겹침 제거로 누수 차단.
+            #   표본이 적으면 단일분할 AUC 로 자동 폴백.
+            meta_tr = tr[["date", "exit_date", "net_pct"]].reset_index(drop=True)
+            X_arr = Xtr.reset_index(drop=True)
+            y_arr = ytr.reset_index(drop=True)
+            tr_dates = sorted(meta_tr["date"].unique())
+            K = 3
+            use_cv = len(tr_dates) >= (K + 1) * 10
+
+            # 지표조합 탐색용 — 코어/그룹/전략 컬럼(실제 존재하는 것만)
+            strat_cols = [c for c in X_arr.columns if c.startswith("strat_")]
+            avail_core = [c for c in CORE_FEATURES if c in X_arr.columns]
+            group_avail = {g: [c for c in cols if c in X_arr.columns]
+                           for g, cols in FEATURE_GROUPS.items()}
+            usable_groups = [g for g, cols in group_avail.items() if cols]
+
+            def sel_cols(enabled):
+                cols = list(avail_core)
+                for g in enabled:
+                    cols += group_avail[g]
+                cols += strat_cols
+                seen, out = set(), []
+                for c in cols:
+                    if c not in seen:
+                        seen.add(c)
+                        out.append(c)
+                return out if len(out) >= 3 else list(X_arr.columns)
+
+            fold_bounds = []
+            for _k in range(1, K + 1):
+                _vs = tr_dates[int(len(tr_dates) * _k / (K + 1))]
+                _ve = tr_dates[int(len(tr_dates) * (_k + 1) / (K + 1))] if _k < K else None
+                fold_bounds.append((_vs, _ve))
+
+            def _spread_on_fold(params, cols, val_start, val_end):
+                gi = dates.index(val_start) if val_start in dates else None
+                emb = dates[max(0, gi - EMBARGO_BDAYS)] if gi is not None else val_start
+                trm = (meta_tr["date"] < emb) & (meta_tr["exit_date"] < val_start)
+                if val_end is None:
+                    vlm = (meta_tr["date"] >= val_start)
+                else:
+                    vlm = (meta_tr["date"] >= val_start) & (meta_tr["date"] < val_end)
+                if trm.sum() < 100 or vlm.sum() < 30 or int(y_arr[trm].sum()) < 10:
+                    return None
+                Xc = X_arr[cols]
+                m = xgb.XGBClassifier(**params)
+                m.fit(Xc[trm.values], y_arr[trm.values])
+                p = m.predict_proba(Xc[vlm.values])[:, 1]
+                net = meta_tr.loc[vlm, "net_pct"].values
+                try:
+                    q = pd.qcut(p, 5, labels=False, duplicates="drop")
+                except Exception:
+                    return None
+                dq = pd.DataFrame({"q": q, "net": net}).groupby("q")["net"].mean()
+                if len(dq) < 2:
+                    return None
+                return float(dq.iloc[-1] - dq.iloc[0])
+
+            def objective(trial):
+                params = {
+                    "n_estimators": trial.suggest_int("n_estimators", 100, 400, step=100),
+                    "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1),
+                    "max_depth": trial.suggest_int("max_depth", 3, 6),
+                    "subsample": trial.suggest_float("subsample", 0.6, 0.9),
+                    "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 0.9),
+                    "min_child_weight": trial.suggest_int("min_child_weight", 1, 7),
+                    "random_state": 42,
+                    "eval_metric": "logloss",
+                }
+                # 지표조합: 그룹별 on/off (코어는 항상 포함)
+                enabled = [g for g in usable_groups
+                           if trial.suggest_categorical(f"grp_{g}", [False, True])]
+                cols = sel_cols(enabled)
+                penalty = 0.02 * len(enabled)   # 간결성: 동률이면 적은 그룹 선호(과적합 억제)
+                if use_cv:
+                    sp = []
+                    for vs, ve in fold_bounds:
+                        s = _spread_on_fold(params, cols, vs, ve)
+                        if s is not None:
+                            sp.append(s)
+                    return (float(np.mean(sp)) - penalty) if sp else -999.0
+                # 폴백: 단일분할 AUC
+                vi = int(len(X_arr) * 0.8)
+                Xc = X_arr[cols]
+                m = xgb.XGBClassifier(**params)
+                m.fit(Xc.iloc[:vi], y_arr.iloc[:vi])
+                pv = m.predict_proba(Xc.iloc[vi:])[:, 1]
+                try:
+                    return roc_auc_score(y_arr.iloc[vi:], pv) - penalty * 0.01
+                except Exception:
+                    return 0.5
+
+            metric_name = "분위 스프레드%(purged CV)" if use_cv else "AUC(단일분할 폴백)"
+            print(f"\n[AutoML] 하이퍼파라미터+지표조합 탐색 40회 — 목적함수: {metric_name}")
+            study = optuna.create_study(direction="maximize", sampler=TPESampler(seed=42))
+            study.optimize(objective, n_trials=40)
+            best_all = study.best_params
+
+            # 하이퍼파라미터와 그룹토글 분리 → 최종 피처셋 확정
+            hp = {k: v for k, v in best_all.items() if not k.startswith("grp_")}
+            enabled = [g for g in usable_groups if best_all.get(f"grp_{g}", False)]
+            final_cols = sel_cols(enabled)
+            print(f"[AutoML] 완료! best_value={study.best_value:+.3f}")
+            print(f"  하이퍼파라미터: {hp}")
+            print(f"  선택 지표그룹({len(enabled)}/{len(usable_groups)}): {enabled or '코어만'}")
+            print(f"  최종 피처 {len(final_cols)}개 (코어 {len(avail_core)} + 그룹 + 전략 {len(strat_cols)})")
+
+            hp["random_state"] = 42
+            hp["eval_metric"] = "logloss"
+            model = xgb.XGBClassifier(**hp)
+
+        except ImportError:
+            print("[warn] optuna 미설치. 기본 파라미터로 학습합니다.")
+            model = xgb.XGBClassifier(
+                n_estimators=300, learning_rate=0.04, max_depth=4,
+                subsample=0.8, colsample_bytree=0.8, min_child_weight=5,
+                random_state=42, eval_metric="logloss",
+            )
     else:
+        # sklearn GradientBoosting (XGBoost 없을 때 대비)
         model = GradientBoostingClassifier(
             n_estimators=300, learning_rate=0.04, max_depth=4,
             subsample=0.8, random_state=42)
-    model.fit(Xtr, ytr)
+            
+    # 최종 모델 학습 — 탐색이 고른 지표조합(final_cols)으로
+    model.fit(Xtr[final_cols], ytr)
 
-    prob = model.predict_proba(Xte)[:, 1]
+    prob = model.predict_proba(Xte[final_cols])[:, 1]
     try:
         auc = roc_auc_score(yte, prob)
     except Exception:
@@ -144,7 +286,7 @@ def main():
           f"({'유의미 — 사이징에 활용 가능' if top - bot > 3 else '약함 — 표시 전용 유지 권장'})")
 
     if hasattr(model, "feature_importances_"):
-        imp = sorted(zip(X_all.columns, model.feature_importances_), key=lambda x: -x[1])[:10]
+        imp = sorted(zip(final_cols, model.feature_importances_), key=lambda x: -x[1])[:10]
         print("\n[Feature Importance Top10]")
         for c, v in imp:
             print(f"  {c}: {v*100:.1f}%")
@@ -155,7 +297,30 @@ def main():
     else:
         import joblib
         joblib.dump(model, MODEL_PATH + ".pkl")
-    pd.Series(list(X_all.columns)).to_csv(MODEL_PATH + ".features.csv", index=False)
+    pd.Series(final_cols).to_csv(MODEL_PATH + ".features.csv", index=False)
+    # ---- AI 예측 누적 저장 (버전별 append — 모델 진화 추적) ----
+    # 기존: 매 학습마다 덮어쓰기 → 진화 이력 소실. 변경: run_date+model_version 붙여 append,
+    # (model_version,date,code,strategy) 중복 제거, 최근 12개 버전만 유지(무한증식 방지).
+    from datetime import datetime as _dt
+    run_ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+    cols_to_save = ["date", "code", "strategy", "entry_date", "exit_date", "net_pct", "prob", "q", "label"]
+    pred = te2[cols_to_save].copy()
+    pred.insert(0, "run_date", _dt.now().strftime("%Y-%m-%d"))
+    pred.insert(1, "model_version", run_ts)
+    pred_path = f"{AI_DIR}/ai_predictions_history.csv"
+    if os.path.exists(pred_path):
+        try:
+            old = pd.read_csv(pred_path, dtype={"code": str})
+            pred = pd.concat([old, pred], ignore_index=True)
+            pred = pred.drop_duplicates(
+                subset=["model_version", "date", "code", "strategy"], keep="last")
+            keep_vers = sorted(pred["model_version"].astype(str).unique())[-12:]
+            pred = pred[pred["model_version"].astype(str).isin(keep_vers)]
+        except Exception as e:
+            print(f"[warn] 기존 예측 병합 실패(새로 작성): {e}")
+    pred.to_csv(pred_path, index=False, encoding="utf-8-sig")
+    _nv = pred["model_version"].nunique() if "model_version" in pred.columns else 1
+    print(f"[saved] {pred_path} (예측 누적 — {len(pred):,}행 / {_nv}개 버전)")
     print(f"\n[saved] {MODEL_PATH} (+ features 목록)")
     print("주의: 매매 결정 자동 반영 안 됨 (USE_AI=False 유지). 사이징 스프레드가")
     print("      수개월 연속 +3%p 이상으로 안정되면 그때 사이징 연동 논의.")
