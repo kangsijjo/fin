@@ -125,6 +125,8 @@ def main():
 
     # 지표조합 탐색이 채울 최종 피처(폴백/비-XGB 경로는 전체 사용)
     final_cols = list(X_all.columns)
+    sel_groups = []      # 선택된 지표그룹(레지스트리 기록용; 폴백 경로는 빈 리스트)
+    best_value = None    # CV 목적함수 best(레지스트리 기록용)
 
     # ---- [업데이트] Optuna AutoML: 하이퍼파라미터 + 지표조합(그룹 on/off) 동시 탐색 ----
     if _has_xgb:
@@ -238,6 +240,8 @@ def main():
             hp = {k: v for k, v in best_all.items() if not k.startswith("grp_")}
             enabled = [g for g in usable_groups if best_all.get(f"grp_{g}", False)]
             final_cols = sel_cols(enabled)
+            sel_groups = enabled                 # 레지스트리용
+            best_value = float(study.best_value)  # 레지스트리용
             print(f"[AutoML] 완료! best_value={study.best_value:+.3f}")
             print(f"  하이퍼파라미터: {hp}")
             print(f"  선택 지표그룹({len(enabled)}/{len(usable_groups)}): {enabled or '코어만'}")
@@ -321,6 +325,38 @@ def main():
     pred.to_csv(pred_path, index=False, encoding="utf-8-sig")
     _nv = pred["model_version"].nunique() if "model_version" in pred.columns else 1
     print(f"[saved] {pred_path} (예측 누적 — {len(pred):,}행 / {_nv}개 버전)")
+
+    # ---- AI 모델 레지스트리 (학습마다 1행 — 대시보드 '모델 진화' 패널 소스) ----
+    try:
+        _spread = float(top - bot) if (top == top and bot == bot) else None  # NaN 가드
+    except Exception:
+        _spread = None
+    reg_row = {
+        "run_date":      _dt.now().strftime("%Y-%m-%d %H:%M"),
+        "model_version": run_ts,
+        "engine":        "xgboost" if _has_xgb else "sklearn",
+        "n_features":    len(final_cols),
+        "n_groups":      len(sel_groups),
+        "groups":        "|".join(sel_groups) if sel_groups else "core_only",
+        "test_auc":      round(float(auc), 4) if auc == auc else "",
+        "spread_pp":     round(_spread, 3) if _spread is not None else "",
+        "cv_best":       round(best_value, 3) if best_value is not None else "",
+        "train_n":       int(len(tr)),
+        "test_n":        int(len(te)),
+    }
+    reg_path = f"{AI_DIR}/ai_model_registry.csv"
+    try:
+        import csv as _csv
+        _new = not os.path.exists(reg_path) or os.path.getsize(reg_path) == 0
+        with open(reg_path, "a", newline="", encoding="utf-8-sig") as _f:
+            _w = _csv.DictWriter(_f, fieldnames=list(reg_row.keys()))
+            if _new:
+                _w.writeheader()
+            _w.writerow(reg_row)
+        print(f"[saved] {reg_path} (모델 진화 레지스트리)")
+    except Exception as e:
+        print(f"[warn] 레지스트리 기록 실패(무시): {e}")
+
     print(f"\n[saved] {MODEL_PATH} (+ features 목록)")
     print("주의: 매매 결정 자동 반영 안 됨 (USE_AI=False 유지). 사이징 스프레드가")
     print("      수개월 연속 +3%p 이상으로 안정되면 그때 사이징 연동 논의.")

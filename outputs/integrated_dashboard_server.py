@@ -719,6 +719,25 @@ def _get_scorer_cached():
 
 
 # ── 6. AI project status ───────────────────────────────────────────────────────
+def get_ai_registry(limit=24):
+    """ai_model_registry.csv (ai_trainer_v4 가 학습마다 1행 기록) → 모델 진화 표(최신순).
+    버전별 선택 지표그룹·test AUC·사이징 스프레드·CV best 를 보여줘 '스스로 발전'을 가시화."""
+    out = {"rows": [], "total": 0}
+    path = BASE / "ai_data" / "ai_model_registry.csv"
+    if not path.exists():
+        return out
+    try:
+        df = pd.read_csv(path)
+    except Exception as e:
+        out["error"] = str(e)[:200]
+        return out
+    if df.empty:
+        return out
+    out["total"] = int(len(df))
+    out["rows"] = df.tail(limit).iloc[::-1].fillna("").to_dict("records")   # 최신순
+    return out
+
+
 def get_ai_status():
     out = {}
     db_info = {}
@@ -1163,6 +1182,7 @@ def api_all():
             "strength":   _safe(get_strength),
             "pvbt":       _safe(get_paper_vs_bt),
             "ai":         _safe(get_ai_status),
+            "ai_registry": _safe(get_ai_registry),
             "train":      _safe(get_training_stats),
             "candidates": _safe(get_candidates),
             "files":      _safe(get_file_meta),
@@ -1707,6 +1727,15 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
     </div>
   </div>
   <div class="section">
+    <h2>모델 진화 <span style="color:#8b949e;font-size:12px;font-weight:400">&mdash; 학습마다 선택된 지표조합·성능 기록(최신순). 매주 AI 파이프라인이 한 줄씩 쌓음. 스프레드%p가 +3 이상 안정되면 사이징 연동 검토</span></h2>
+    <table><thead><tr>
+      <th class="r">학습일</th><th>엔진</th><th>선택 지표그룹</th><th class="r">피처</th>
+      <th class="r">test AUC</th><th class="r">스프레드%p</th><th class="r">CV best</th><th class="r">train/test</th>
+    </tr></thead>
+    <tbody id="ai-reg-rows"><tr><td colspan="8" style="color:#8b949e;text-align:center">아직 기록 없음 &mdash; 다음 AI 학습 때부터 쌓입니다</td></tr></tbody>
+    </table>
+  </div>
+  <div class="section">
     <h2>IC &#xAC00;&#xC911;&#xCE58; (Spearman &#xC815;&#xBCF4;&#xACC4;&#xC218;)</h2>
     <table><thead><tr>
       <th>&#xD53C;&#xCC98;</th><th>&#xC124;&#xBA85;</th><th class="r">IC</th><th>&#xBC14;</th>
@@ -2123,6 +2152,24 @@ function fillLab(lab){
   ).join(''):'<tr><td colspan="8" style="color:#8b949e;text-align:center">strategy_lab.py 실행 대기 (BT는 즉시, FWD/갭은 누적)</td></tr>');
 }
 
+function fillAIRegistry(reg){
+  const rows=(reg&&reg.rows)||[];
+  setHtml('ai-reg-rows', rows.length?rows.map(r=>{
+    const grp=String(r.groups||'').replace(/\|/g,', ');
+    const sp=r.spread_pp;
+    const spc=(sp!==''&&sp!=null)?(Number(sp)>=3?'pos':(Number(sp)<0?'neg':'')):'';
+    return `<tr>
+      <td class="r" style="font-size:11px">${r.run_date||''}</td>
+      <td style="font-size:11px">${r.engine||''}</td>
+      <td style="font-size:11px">${grp||'-'}</td>
+      <td class="r">${r.n_features||''}</td>
+      <td class="r">${(r.test_auc!==''&&r.test_auc!=null)?Number(r.test_auc).toFixed(3):'-'}</td>
+      <td class="r ${spc}">${(sp!==''&&sp!=null)?((Number(sp)>=0?'+':'')+Number(sp).toFixed(2)):'-'}</td>
+      <td class="r">${(r.cv_best!==''&&r.cv_best!=null)?Number(r.cv_best).toFixed(2):'-'}</td>
+      <td class="r" style="font-size:11px">${fmt(r.train_n)}/${fmt(r.test_n)}</td></tr>`;
+  }).join(''):'<tr><td colspan="8" style="color:#8b949e;text-align:center">아직 기록 없음 &mdash; 다음 AI 학습 때부터 쌓입니다</td></tr>');
+}
+
 function fillAI(ai){
   const errBox=document.getElementById('ai-err-box');
   if(!ai){errBox.style.display='block';errBox.textContent='AI 데이터 없음';return;}
@@ -2298,6 +2345,7 @@ async function load(){
   _r(fillBacktest, d.bt, d.sc);
   _r(fillLab, d.lab);
   _r(fillAI, d.ai);
+  _r(fillAIRegistry, d.ai_registry);
   _r(fillLogs, d.logs, d.files);
   // intraday — 별도 API
   fetch('/api/intraday').then(r=>r.json()).then(fillIntraday).catch(()=>{});
