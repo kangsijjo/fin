@@ -42,9 +42,9 @@ db/
 data/
 macro_data/
 results/
-ai_data/*.csv
-ai_data/*.pkl
-ai_data/*.json          # 학습 산출물(meta_model_v4.json 등) — ai_trainer 가 재생성
+# AI 산출물(모델/예측/레지스트리/피처) — ai_trainer 가 재생성.
+# (이전 'ai_data/*.csv' 는 루트고정이라 outputs/ai_data 미적용 + 인라인주석 버그 → db/ 처럼 디렉토리 제외로 교정)
+ai_data/
 
 # 생성되는 대시보드 HTML (dashboard_generator 산출물). 템플릿(intraday/pt)은 추적 유지.
 dashboard.html
@@ -52,7 +52,11 @@ dashboard.html
 # 루트 대용량 산출물
 trades_history*.csv
 paper_signals.csv
+kis_paper_signals.csv
 paper_signals.csv.bak
+kis_paper_signals.csv.bak
+paper_signals.bak_*.csv
+kis_paper_signals.bak_*.csv
 paper_audit_result.csv
 paper_trades.db
 

@@ -27,12 +27,14 @@ class FiveDayMomentumStrategy(BaseStrategy):
         df = df.sort_values(["code", "date"]).copy()
         df["ret_5d"] = df.groupby("code")["close"].pct_change(5) * 100
 
-        # 유동성 필터
-        df = df[df["trading_value"] >= self.min_tv].copy()
+        # 유동성 필터 — 행을 드롭하지 않고 signal 에 AND 한다.
+        # (행을 빼면 종목 시계열에 구멍이 생겨 _make_trades_for_signals 의 groupby.shift
+        #  진입/청산이 캘린더 거래일과 어긋나 백테스트가 왜곡됨 — 다른 전략과 동일 계약 준수, 2026-06-30 수정)
+        liq = df["trading_value"] >= self.min_tv
 
-        # 날짜별 5일 수익률 상위 N
-        df["rank"] = df.groupby("date")["ret_5d"].rank(ascending=False, method="first")
-        df["signal"] = df["rank"] <= self.top_n
+        # 날짜별 5일 수익률 상위 N (유동성 통과분만 순위, 행은 유지)
+        df["rank"] = df["ret_5d"].where(liq).groupby(df["date"]).rank(ascending=False, method="first")
+        df["signal"] = liq & (df["rank"] <= self.top_n)
 
         return _make_trades_for_signals(
             df, holding_days=self.holding_days,

@@ -488,6 +488,8 @@ def cmd_buy():
     placed_per_strat = {k: 0 for k in STRATEGY_PRIORITY}  # 전략별 실제 배정 수 추적
 
     for strat in STRATEGY_PRIORITY:
+        if n_placed >= total_avail:   # 전역 동시보유 상한(레거시 반영) 도달 — 과다매수 방지(2026-06-29)
+            break
         avail = slot_avail[strat]
         if avail <= 0:
             continue
@@ -496,7 +498,8 @@ def cmd_buy():
 
         placed_this_strat = 0
         for sig in strat_sigs:
-            if placed_this_strat >= avail:
+            # 전략별 빈슬롯 OR 전역 가용슬롯(레거시 반영) 중 먼저 소진되면 중단
+            if placed_this_strat >= avail or n_placed >= total_avail:
                 break
             code = str(sig["code"]).zfill(6)
             name = str(sig.get("name", ""))
@@ -584,7 +587,11 @@ def codes_due_for_exit():
     df = load_macro_daily()
     code_dates = {c: sorted(g["date"].astype(str).tolist())
                   for c, g in df.groupby("code")}
-    today = datetime.today().strftime("%Y-%m-%d")   # ds 날짜 형식과 일치 (YYYY-MM-DD)
+    # ds(load_macro_daily date)·signal_date 와 동일한 대시 없는 'YYYYMMDD'.
+    # (과거 '%Y-%m-%d' 대시형이라 ds[exit_i] <= today 가 위치4 '숫자 vs -'로 항상 False →
+    #  키움 만기청산이 영영 미발동(보유일 초과해도 매도 안 됨). 2026-06-29 수정.
+    #  형제 함수 todays_signals() 는 2026-06-23 에 이미 같은 클래스 수정됨.)
+    today = datetime.today().strftime("%Y%m%d")
     due = set()
     for _, r in s.iterrows():
         ds = code_dates.get(r["code"])

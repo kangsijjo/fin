@@ -67,11 +67,12 @@ def compute_paper_returns(paper: pd.DataFrame) -> pd.DataFrame:
     for idx, (_, r) in enumerate(paper.iterrows(), 1):
         code = str(r["code"]).zfill(6)
         entry_px = float(r["entry_price_close"])
-        exit_date_str = str(int(r["target_exit_date"]))
+        # target_exit_date 는 NaN(만기 미산출) 가능 — int 변환 전 가드(과거 NaN 행에서 ValueError 크래시, 2026-06-30 수정)
+        exit_date_str = str(int(r["target_exit_date"])) if pd.notna(r["target_exit_date"]) else ""
         signal_date   = str(int(r["signal_date"]))
 
-        # 만기 미도래
-        if exit_date_str > today_str:
+        # 만기 미도래(또는 만기일 미산출=pending)
+        if (not exit_date_str) or exit_date_str > today_str:
             status = "pending"
             actual_exit_date = None
             exit_px = None

@@ -153,8 +153,9 @@ async def connect_websocket(codes, queue):
                     print("[웹소켓] 연결 종료됨.")
                     break
                 except Exception as e:
+                    # 개별 메시지 파싱 오류로 하루치 수집이 죽지 않게 건너뜀(연결종료만 break — 2026-06-30 수정)
                     print(f"[오류] 데이터 파싱 중 에러: {e}")
-                    break
+                    continue
     finally:
         # [안전장치] 웹소켓이 끊기거나 시간이 되면 db_worker에게 종료 신호를 던짐
         await queue.put(None)

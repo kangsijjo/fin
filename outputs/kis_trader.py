@@ -320,6 +320,15 @@ def _to_int(v, default=0):
         return default
 
 
+def _to_float(v, default=0.0):
+    # get_balance 의 evlu_pfls_rt(평가손익률 %) 등 실수 필드용 — 2026-06-29 추가.
+    # (과거 line 275 가 미정의 _to_float 를 호출해 get_balance NameError → 잔고/매수/매도 전부 크래시)
+    try:
+        return float(str(v).replace(",", "").replace("+", "").strip())
+    except Exception:
+        return default
+
+
 # ── 진입가 추적 (stop-loss 계산용) ────────────────────────────────────────────
 def load_kis_positions():
     """kis_positions.csv → {code: {entry_px, strategy, signal_date, holding_days}}.
@@ -469,7 +478,10 @@ def codes_due_for_exit(close_map):
     만기 판단: 진입일 포함 holding_days 영업일째
     """
     from strategies.daily_loader import load_macro_daily
-    today = datetime.today().strftime("%Y-%m-%d")
+    # 대시 없는 'YYYYMMDD' — ds(load_macro_daily date)·signal_date·target_exit_date 와 동일 형식.
+    # (과거 '%Y-%m-%d' 대시형이라 ds[xi] <= today 가 위치4 '숫자 vs -' 로 항상 False →
+    #  KIS 만기청산이 영영 미발동하던 버그. 2026-06-29 수정. 과거 매수 0건 버그와 동일 클래스.)
+    today = datetime.today().strftime("%Y%m%d")
     due = {}
 
     # ── kis_positions.csv의 target_exit_date 기반 즉시 만기 ───────────────────
@@ -744,6 +756,8 @@ def cmd_buy():
     placed_per_strat = {k: 0 for k in STRATEGY_PRIORITY}
 
     for strat in STRATEGY_PRIORITY:
+        if n_placed >= total_avail:   # 전역 동시보유 상한(레거시 반영) 도달 — 과다매수 방지(2026-06-29)
+            break
         avail = slot_avail[strat]
         if avail <= 0:
             continue
@@ -752,7 +766,8 @@ def cmd_buy():
 
         placed_this = 0
         for sig in strat_sigs:
-            if placed_this >= avail:
+            # 전략별 빈슬롯 OR 전역 가용슬롯(레거시 반영) 중 먼저 소진되면 중단
+            if placed_this >= avail or n_placed >= total_avail:
                 break
             code = str(sig["code"]).zfill(6)
             name = str(sig.get("name", ""))
@@ -921,6 +936,36 @@ def cmd_stop_check():
     print(f"[stop-monitor] 보유 {len(monitor)}건 점검 / 손절선 도달 {reached}건(청산은 EOD cmd_sell)")
 
 
+def _wait_balance_settle(max_wait=20, interval=4):
+    """매수/매도 직후 KIS 모의 잔고조회 API 가 체결을 즉시 반영하지 못해
+    스냅샷이 pre-buy 로 박제되는 문제 방지. 우리 기록(kis_positions.csv)의
+    보유종목이 API 잔고에 모두 잡힐 때까지 폴링(최대 max_wait 초).
+    타임아웃이어도 그냥 진행(다음 status 가 보정). 아무 보유 기록 없으면 즉시 반환.
+    """
+    try:
+        expected = set(load_kis_positions().keys())
+    except Exception:
+        expected = set()
+    if not expected:
+        return
+    try:
+        client = KISMockClient()
+    except Exception:
+        return
+    waited = 0
+    while waited < max_wait:
+        try:
+            _, positions = client.get_balance()
+            if set(positions.keys()) >= expected:
+                print(f"[daily] 잔고 체결 반영 확인({waited}s) — 보유 {len(positions)}건")
+                return
+        except Exception:
+            pass
+        time.sleep(interval)
+        waited += interval
+    print(f"[daily] 잔고 반영 대기 타임아웃({max_wait}s) — 다음 status 가 보정")
+
+
 # ── 진입점 ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
@@ -944,6 +989,9 @@ if __name__ == "__main__":
             print("[daily] 매도(만기/stop) 후 매수")
             cmd_sell()
             cmd_buy()
+            # 매수 직후 잔고API 체결반영 지연 대비 — 우리 기록이 잔고에 잡힐 때까지
+            # 잠깐 대기 후 스냅샷 기록(대시보드가 당일 보유를 바로 반영).
+            _wait_balance_settle()
             cmd_status()
         else:
             print(f"[main] 알 수 없는 명령: {cmd}")

@@ -301,7 +301,7 @@ def get_positions(price_map: dict, name_map: dict, kis_client=None) -> list[dict
     try:
         df = pd.read_csv(PAPER_CSV, dtype={"code": str})
         df["code"] = df["code"].str.zfill(6)
-        today_str = datetime.today().strftime("%Y-%m-%d")
+        today_str = datetime.today().strftime("%Y%m%d")   # target_exit_date 는 YYYYMMDD(대시없음) — 형식 일치(2026-06-30 수정)
         if "target_exit_date" in df.columns:
             active = df[df["target_exit_date"].astype(str) >= today_str]
         else:

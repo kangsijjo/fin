@@ -1,6 +1,8 @@
 @echo off
 :: run_live_signal.bat
-:: 평일 18:30 실전 신호 감지 자동 실행 (작업 스케줄러 호출)
+:: Weekday 18:30 live signal detection (called by Task Scheduler).
+:: ASCII-only: cmd reads .bat in OEM codepage (cp949 on KR Windows); UTF-8/Korean
+:: comments here previously broke parsing (task returned 0xFF, no log). Keep this file ASCII.
 setlocal
 set PYTHONIOENCODING=utf-8
 if not exist C:\fin\logs mkdir C:\fin\logs
@@ -20,15 +22,15 @@ if not exist .venv\Scripts\python.exe (
 .venv\Scripts\python.exe -u live_signal.py >> %LOGFILE% 2>&1
 echo [%date% %time%] Live signal done. ExitCode=%errorlevel% >> %LOGFILE%
 
-:: 전략 랩 (forward 누적) — live_signal 직후 같은 데이터로 29전략 백테스트→forward 집계.
-:: 결정론적이라 매일 재실행하면 LAB_START 이후 완료 트레이드가 자동 누적됨.
+:: strategy lab (forward accumulation): same data, 29-strategy backtest -> forward aggregate.
+:: deterministic, so a daily re-run auto-accumulates trades completed after LAB_START.
 echo [%date% %time%] strategy_lab starting >> %LOGFILE%
 .venv\Scripts\python.exe -u strategy_lab.py >> %LOGFILE% 2>&1
 echo [%date% %time%] strategy_lab done. ExitCode=%errorlevel% >> %LOGFILE%
 
-:: 일일 자동화 자가점검 — 오늘 자동화가 제대로 돌았는지 한 장 요약을 logs\daily_audit_날짜.log 에 남김.
+:: daily self-audit: one-page summary of today's automation to logs\daily_audit_DATE.log
 .venv\Scripts\python.exe -u daily_audit.py >> %LOGFILE% 2>&1
 
-:: 일일 요약 텔레그램 푸시 (신호/보유/예수금 한 장).
+:: daily summary telegram push (signals / holdings / cash, one message)
 .venv\Scripts\python.exe -u daily_summary.py >> %LOGFILE% 2>&1
 endlocal

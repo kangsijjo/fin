@@ -95,7 +95,9 @@ class High52wShortDecreaseStrategy(BaseStrategy):
                       on=["code", "date"], how="left")
 
         # 공매도 비중 감소: 오늘 < N일 전
-        df["short_ratio_Nd_ago"] = grp["short_ratio"].shift(self.short_lookback)
+        # merge 후 df 를 다시 그룹핑 — 옛 grp(79줄, 병합 전)엔 short_ratio 가 없어
+        # 'Column not found: short_ratio' 예외로 전략이 통째 실패했음(2026-06-30 수정).
+        df["short_ratio_Nd_ago"] = df.groupby("code")["short_ratio"].shift(self.short_lookback)
         short_decrease = (
             df["short_ratio"].notna() &
             df["short_ratio_Nd_ago"].notna() &

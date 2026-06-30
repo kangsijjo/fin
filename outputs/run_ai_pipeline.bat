@@ -1,9 +1,12 @@
 @echo off
 REM run_ai_pipeline.bat - Weekly LIGHT AI refresh, gated end-to-end.
-REM   1) data collection (run_backfill.ps1: OHLCV+macro+supply+news)
-REM   2) build training dataset (make_trades_history_v3.py)
-REM   3) train meta-model with Optuna (ai_trainer_v4.py)
-REM Each step ABORTS the pipeline if the previous one fails (no silent training on stale data).
+REM   1) preflight regression tests (ci_gate.py -> pytest tests)
+REM   2) data collection (run_backfill.ps1: OHLCV+macro+supply+news)
+REM   3) build training dataset (make_trades_history_v3.py)
+REM   4) train meta-model with Optuna (ai_trainer_v4.py)
+REM   5) post-train verification (ci_gate.py -> pytest tests)
+REM Each step ABORTS the pipeline if it fails (no silent training on a broken state).
+REM On abort, ci_gate.py sends a Telegram alert (test failure -> training stopped).
 REM Manual double-click: shows the log and pauses. Scheduler must pass "auto" to skip pause.
 REM Heavy full backtest is NOT here - see Stock_AI_Project\run_full_pipeline.ps1 (monthly).
 setlocal EnableExtensions EnableDelayedExpansion
@@ -41,28 +44,52 @@ echo.
 REM python (outputs venv) detection
 set "PYEXE=%OUT%\.venv\Scripts\python.exe"
 if not exist "%PYEXE%" set "PYEXE=python"
+cd /d "%OUT%"
 
-REM ---- 1/3 data collection (gated) ----
-echo [%time%] [1/3] Data collection running (OHLCV+macro+supply+news)... please wait
-echo [1/3] data collection (run_backfill.ps1) ... >> "%LOG%"
+REM ---- 1/5 preflight regression gate (gated) ----
+REM   Run pytest tests BEFORE training. If contracts are broken (feature dim,
+REM   signal CSV headers, etc.) ABORT and do NOT train on a broken state.
+set "STEP=preflight"
+echo [%time%] [1/5] Preflight regression tests (pytest tests)...
+echo [1/5] ci_gate.py gate (preflight pytest) ... >> "%LOG%"
+"%PYEXE%" ci_gate.py gate >> "%LOG%" 2>&1
+if errorlevel 1 ( echo [ABORT] preflight tests failed ^(exit !ERRORLEVEL!^) >> "%LOG%" & echo [X] preflight tests FAILED & goto :fail )
+echo [%time%] [1/5] done.
+
+REM ---- 2/5 data collection (gated) ----
+set "STEP=collect"
+echo [%time%] [2/5] Data collection running (OHLCV+macro+supply+news)... please wait
+echo [2/5] data collection (run_backfill.ps1) ... >> "%LOG%"
 powershell -ExecutionPolicy Bypass -File "%SAI%\run_backfill.ps1" >> "%LOG%" 2>&1
 if errorlevel 1 ( echo [ABORT] data collection failed ^(exit !ERRORLEVEL!^) >> "%LOG%" & echo [X] data collection FAILED & goto :fail )
-echo [%time%] [1/3] done.
+echo [%time%] [2/5] done.
 
-REM ---- 2/3 build training dataset (gated) ----
-echo [%time%] [2/3] Building training dataset (make_trades_history_v3)...
-echo [2/3] make_trades_history_v3.py ... >> "%LOG%"
+REM ---- 3/5 build training dataset (gated) ----
+set "STEP=dataset"
+echo [%time%] [3/5] Building training dataset (make_trades_history_v3)...
+echo [3/5] make_trades_history_v3.py ... >> "%LOG%"
 cd /d "%OUT%"
 "%PYEXE%" -u make_trades_history_v3.py >> "%LOG%" 2>&1
 if errorlevel 1 ( echo [ABORT] dataset build failed ^(exit !ERRORLEVEL!^) >> "%LOG%" & echo [X] dataset build FAILED & goto :fail )
-echo [%time%] [2/3] done.
+echo [%time%] [3/5] done.
 
-REM ---- 3/3 train meta-model (Optuna) (gated) ----
-echo [%time%] [3/3] Training meta-model (Optuna 40 trials)... a few minutes
-echo [3/3] ai_trainer_v4.py ... >> "%LOG%"
+REM ---- 4/5 train meta-model (Optuna) (gated) ----
+set "STEP=train"
+echo [%time%] [4/5] Training meta-model (Optuna 40 trials)... a few minutes
+echo [4/5] ai_trainer_v4.py ... >> "%LOG%"
 "%PYEXE%" -u ai_trainer_v4.py >> "%LOG%" 2>&1
 if errorlevel 1 ( echo [ABORT] training failed ^(exit !ERRORLEVEL!^) >> "%LOG%" & echo [X] training FAILED & goto :fail )
-echo [%time%] [3/3] done.
+echo [%time%] [4/5] done.
+
+REM ---- 5/5 post-train verification (gated) ----
+REM   Re-run pytest tests AFTER training to verify the freshly-written model
+REM   passes the dimension/contract tests before live scoring uses it.
+set "STEP=postcheck"
+echo [%time%] [5/5] Post-train verification (pytest tests)...
+echo [5/5] ci_gate.py gate (post-train pytest) ... >> "%LOG%"
+"%PYEXE%" ci_gate.py gate >> "%LOG%" 2>&1
+if errorlevel 1 ( echo [ABORT] post-train tests failed ^(exit !ERRORLEVEL!^) >> "%LOG%" & echo [X] post-train tests FAILED & goto :fail )
+echo [%time%] [5/5] done.
 
 echo [%date% %time%] AI pipeline DONE >> "%LOG%"
 del "%LOCK%" 2>nul
@@ -71,7 +98,9 @@ if /i not "%1"=="auto" ( echo. & type "%LOG%" & echo. & echo ===== DONE ===== & 
 endlocal & exit /b 0
 
 :fail
-echo [%date% %time%] AI pipeline FAILED - downstream steps skipped >> "%LOG%"
+echo [%date% %time%] AI pipeline FAILED at step "!STEP!" - downstream steps skipped >> "%LOG%"
+REM Telegram alert (Korean message built inside ci_gate.py; bat stays ASCII).
+"%PYEXE%" ci_gate.py notify-fail "!STEP!" >> "%LOG%" 2>&1
 del "%LOCK%" 2>nul
 if /i not "%1"=="auto" ( echo. & type "%LOG%" & echo. & echo ===== FAILED ^(see log^) ===== & pause )
 endlocal & exit /b 1

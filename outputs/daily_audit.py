@@ -176,7 +176,15 @@ else:
 lab = glob.glob(os.path.join(BASE, "results", f"strategy_lab_{TODAY}.csv"))
 chk(bool(lab), "오늘 strategy_lab 산출", "있음" if lab else "results/strategy_lab_오늘.csv 없음")
 
-# 5) 오늘 로그 에러 스캔
+# 5) AI 모델 신선도 (meta_model 만 점검 — 섹터모델은 라이브 미사용이라 학습 중단, 점검 제외)
+_meta = os.path.join(BASE, "ai_data", "meta_model_v4.json")
+if os.path.exists(_meta):
+    _age = _mtime_min(_meta) / 1440.0
+    chk(_age <= 10, "meta_model 학습", f"{int(_age)}일 전")
+else:
+    chk(False, "meta_model", "meta_model_v4.json 없음")
+
+# 6) 오늘 로그 에러 스캔
 err = 0
 for lg in glob.glob(os.path.join(LOGS, f"*{TODAY}*.log")):
     try:

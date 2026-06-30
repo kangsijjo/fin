@@ -3,12 +3,8 @@ rsi14
 atr_pct
 vol_ratio
 tv_ratio
-for_5d
-ins_5d
-mcap_class
 score_tv
-news_sent_7d
-news_cnt_7d
+mcap_class
 vix
 vix_chg_5d
 sox_ret_5d
@@ -19,7 +15,6 @@ ins_net5_db
 rsi_db
 macd_hist_db
 bb_pct_db
-prm_net_5d_ratio
 strat_h252_40
 strat_h500_20
 strat_h500_40_MKT

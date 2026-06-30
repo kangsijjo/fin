@@ -110,10 +110,11 @@ class KiwoomMarket:
         self.stock = _cls(stockinfo)
 
     # ── 거래량 상위 (ka10030) ────────────────────────────────────────────────
-    def volume_rank(self, market="all", n=5):
+    def volume_rank(self, market="all", n=5, mrkt_open_tp="0"):
+        # mrkt_open_tp: 0=전체(기본) / 1=장중 / 2=장전시간외 / 3=장후시간외
         r = self.rank.top_trading_volume_today_request_ka10030(
             mrkt_tp=_MRKT[market], sort_tp="1", mang_stk_incls="0", crd_tp="0",
-            trde_qty_tp="0", pric_tp="0", trde_prica_tp="0", mrkt_open_tp="0", stex_tp=_STEX)
+            trde_qty_tp="0", pric_tp="0", trde_prica_tp="0", mrkt_open_tp=mrkt_open_tp, stex_tp=_STEX)
         _, rows = _first_list(r)
         out = []
         for i, x in enumerate(rows[:n], 1):

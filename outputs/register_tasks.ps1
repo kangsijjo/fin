@@ -134,13 +134,14 @@ try {
         -Action $a9 -Trigger $t9a,$t9b -Settings $s9 -Principal $principal -Force | Out-Null
     Write-Host "[OK] StockAI\KiwoomTrader (weekdays 09:03 buy + 15:21 sell)" -ForegroundColor Green
 
-    # 10. 장중 생산기(시황 2x6 그리드 + 잠정 예비후보): weekdays, 15분마다 09:15~15:30
+    # 10. 장중 생산기(시황 2x6 그리드 + 잠정 예비후보): weekdays, 15분마다 09:15~15:00
+    #     (15:15/15:30 런 제거 → 15:21 키움 매도와 시황(키움) 호출 충돌 차단)
     Write-Host "[10/10] Registering intraday producer (grid+preview)..."
     $a10 = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_intraday_preview.bat"
     $t10 = New-ScheduledTaskTrigger -Daily -At "09:15"
     $rep10 = (New-ScheduledTaskTrigger -Once -At "09:15" `
                   -RepetitionInterval (New-TimeSpan -Minutes 15) `
-                  -RepetitionDuration (New-TimeSpan -Hours 6 -Minutes 15)).Repetition
+                  -RepetitionDuration (New-TimeSpan -Hours 5 -Minutes 45)).Repetition
     $t10.Repetition = $rep10
     $s10 = New-ScheduledTaskSettingsSet `
                -MultipleInstances IgnoreNew `
@@ -148,7 +149,7 @@ try {
                -ExecutionTimeLimit (New-TimeSpan -Minutes 14)
     Register-ScheduledTask -TaskName "StockAI\IntradayPreview" `
         -Action $a10 -Trigger $t10 -Settings $s10 -Principal $principal -Force | Out-Null
-    Write-Host "[OK] StockAI\IntradayPreview (weekdays, every 15min 09:15-15:30)" -ForegroundColor Green
+    Write-Host "[OK] StockAI\IntradayPreview (weekdays, every 15min 09:15-15:00)" -ForegroundColor Green
 
     # 11. Weekly AI pipeline (light, gated): Sunday 03:00 - collect -> dataset -> train (Optuna)
     Write-Host "[11/11] Registering weekly AI pipeline..."
@@ -160,6 +161,38 @@ try {
     Register-ScheduledTask -TaskName "StockAI\AIPipeline" `
         -Action $a11 -Trigger $t11 -Settings $s11 -Principal $principal -Force | Out-Null
     Write-Host "[OK] StockAI\AIPipeline (Sunday 03:00, gated: collect->dataset->train)" -ForegroundColor Green
+
+    # 12. Watchdog (silent-failure detector -> Telegram): problems-only at 07:45/09:20/18:50
+    Write-Host "[12/13] Registering watchdog (3x daily checks)..."
+    $a12  = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_watchdog.bat"
+    $t12a = New-ScheduledTaskTrigger -Daily -At "07:45"
+    $t12b = New-ScheduledTaskTrigger -Daily -At "09:20"
+    $t12c = New-ScheduledTaskTrigger -Daily -At "18:50"
+    $s12  = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+    Register-ScheduledTask -TaskName "StockAI\Watchdog" `
+        -Action $a12 -Trigger $t12a,$t12b,$t12c -Settings $s12 -Principal $principal -Force | Out-Null
+    Write-Host "[OK] StockAI\Watchdog (07:45/09:20/18:50, alert on problems)" -ForegroundColor Green
+
+    # 13. Watchdog daily heartbeat: 23:00 --daily (정상이어도 전송 → 침묵=경보)
+    Write-Host "[13/13] Registering watchdog daily heartbeat..."
+    $a13 = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_watchdog.bat" -Argument "--daily"
+    $t13 = New-ScheduledTaskTrigger -Daily -At "23:00"
+    $s13 = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+    Register-ScheduledTask -TaskName "StockAI\WatchdogDaily" `
+        -Action $a13 -Trigger $t13 -Settings $s13 -Principal $principal -Force | Out-Null
+    Write-Host "[OK] StockAI\WatchdogDaily (daily 23:00 heartbeat)" -ForegroundColor Green
+
+    # 14. After-market collector (시간외 단일가 등락률 → stock.db): weekdays 18:10 (16:00~18:00 종료 후)
+    Write-Host "[14/14] Registering after-market collector..."
+    $a14 = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_after_market.bat"
+    $t14 = New-ScheduledTaskTrigger -Weekly `
+               -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "18:10"
+    $s14 = New-ScheduledTaskSettingsSet `
+               -StartWhenAvailable `
+               -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+    Register-ScheduledTask -TaskName "StockAI\AfterMarket" `
+        -Action $a14 -Trigger $t14 -Settings $s14 -Principal $principal -Force | Out-Null
+    Write-Host "[OK] StockAI\AfterMarket (weekdays 18:10, 시간외 등락률 -> stock.db)" -ForegroundColor Green
 
     Write-Host ""
     Write-Host "=== Registered Tasks ===" -ForegroundColor Cyan

@@ -254,9 +254,13 @@ for name, cached in base_cache.items():
     tgt_info = (f"수익달성 {sp['hit_tgt%']}%" if TARGET_PCT and sp else "")
     stp_info = (f"손절 {sp['hit_stp%']}%"     if STOP_PCT   and sp else "")
     extra    = " / ".join(filter(None, [tgt_info, stp_info]))
-    print(f"  [{name}] {sb['n']:,} 거래  "
-          f"avg {sb['avg']:+.2f}% → {sp['avg']:+.2f}% "
-          f"(Δ{delta:+.2f}%)  {extra}")
+    if sp:
+        print(f"  [{name}] {sb['n']:,} 거래  "
+              f"avg {sb['avg']:+.2f}% → {sp['avg']:+.2f}% "
+              f"(Δ{delta:+.2f}%)  {extra}")
+    else:
+        # 오버레이 0건(stat None — 캐시/데이터 불일치 가능). None 역참조 크래시 방지(2026-06-30)
+        print(f"  [{name}] {sb['n']:,} 거래  (오버레이 0건 — --no-cache 권장)")
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 5. 비교 테이블 출력 (Δavg 내림차순 정렬)
@@ -315,10 +319,14 @@ print(_sum_hdr)
 print("  " + "─" * (len(_sum_hdr) - 2))
 for i, r in enumerate(results, 1):
     sb, sp = r["sb"], r["sp"]
-    marker = "▲" if r["delta"] > 0 else ("▼" if r["delta"] < 0 else " ")
+    if not sp:   # 오버레이 0건 — None 역참조(sp['avg']/delta>0) 방지(2026-06-30)
+        print(f"  {i:<4}  {r['name']:<24}  {sb['avg']:>+9.2f}  {'(N/A)':>9}")
+        continue
+    d = r["delta"] if r["delta"] is not None else 0.0
+    marker = "▲" if d > 0 else ("▼" if d < 0 else " ")
     line = (f"  {i:<4}  {r['name']:<24}  "
             f"{sb['avg']:>+9.2f}  {sp['avg']:>+9.2f}  "
-            f"{marker}{r['delta']:>+7.2f}")
+            f"{marker}{d:>+7.2f}")
     if TARGET_PCT: line += f"  {str(sp.get('hit_tgt%','-')):>9}"
     if STOP_PCT:   line += f"  {str(sp.get('hit_stp%','-')):>9}"
     print(line)

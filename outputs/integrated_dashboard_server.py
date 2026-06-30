@@ -480,13 +480,15 @@ _KIS_STRATEGY_LABEL = {
 
 def _kis_slot_status():
     from datetime import date as _date
-    today_str = _date.today().strftime("%Y-%m-%d")
+    today_str = _date.today().strftime("%Y%m%d")   # target_exit_date 는 YYYYMMDD(대시없음) — 형식 일치(2026-06-30 수정)
     active_by_strat = {k: [] for k in _KIS_STRATEGY_SLOTS}
     if KIS_SIGNALS_CSV.exists():
         try:
             df = pd.read_csv(KIS_SIGNALS_CSV, dtype={"code": str})
             df["code"] = df["code"].str.zfill(6)
             df["target_exit_date"] = df["target_exit_date"].astype(str)
+            # 공란/NaN(→'nan') 행 제외 — 'nan' >= 날짜 가 항상 True 라 슬롯이 과대집계됐음(2026-06-30 수정)
+            df = df[df["target_exit_date"].str.match(r"^\d{8}$")]
             active = df[df["target_exit_date"] >= today_str]
             for strat in _KIS_STRATEGY_SLOTS:
                 rows = active[active["strategy"] == strat]
@@ -834,13 +836,18 @@ def get_training_stats():
 
 
 # ── AI scoring constants ────────────────────────────────────────────────────
-_AI_FEAT_ORDER = [
-    "rsi14","atr_pct","vol_ratio","tv_ratio","for_5d","ins_5d","mcap_class",
-    "score_tv","news_sent_7d","news_cnt_7d","vix","vix_chg_5d","sox_ret_5d",
-    "usdkrw_chg_5d","kospi_ret_20d","for_net5_db","ins_net5_db","rsi_db",
-    "macd_hist_db","bb_pct_db","prm_net_5d_ratio",
-    "strat_h252_40","strat_h500_20","strat_h500_40_MKT",
-]
+# 추론 폴백 순서 — feature_spec 단일 출처에서 가져온다(2026-06-29 단일화).
+#   import 실패 시에만 쓰는 하드코딩 폴백을 except 에 둔다(대시보드 기동 복원력 유지).
+try:
+    from feature_spec import FALLBACK_MODEL_ORDER as _AI_FEAT_ORDER
+except Exception:
+    _AI_FEAT_ORDER = [
+        "rsi14","atr_pct","vol_ratio","tv_ratio","for_5d","ins_5d","mcap_class",
+        "score_tv","news_sent_7d","news_cnt_7d","vix","vix_chg_5d","sox_ret_5d",
+        "usdkrw_chg_5d","kospi_ret_20d","for_net5_db","ins_net5_db","rsi_db",
+        "macd_hist_db","bb_pct_db","prm_net_5d_ratio",
+        "strat_h252_40","strat_h500_20","strat_h500_40_MKT",
+    ]
 _AI_FEAT_LABELS = {
     "vix":           ("서프라이즈안정", +1),  # VIX 낮음=좋음
     "vix_chg_5d":    ("공포지수상승",     -1),
@@ -860,6 +867,17 @@ _AI_FEAT_LABELS = {
     "bb_pct_db":     ("볼린저상단",          -1),
 }
 _ai_model_cache = [None, ""]   # [model, date_str]
+
+
+def _load_ai_feat_order():
+    """학습된 모델의 실제 피처 순서 — feature_spec 단일 출처에서 로드(없으면 폴백).
+    추론 피처셋을 학습과 일치시켜 XGBoost feature_names·차원 불일치(→ 조용히 빈
+    AI점수)를 막는다. feature_spec import 실패 시 _AI_FEAT_ORDER 로 폴백."""
+    try:
+        from feature_spec import load_model_feature_order
+        return load_model_feature_order()
+    except Exception:
+        return list(_AI_FEAT_ORDER)
 
 
 def _ai_score_signals(codes):
@@ -900,6 +918,7 @@ def _ai_score_signals(codes):
     if model is None:
         return {}
 
+    feat_order = _load_ai_feat_order()   # 학습된 실제 피처 순서(그룹탐색으로 가변)
     codes_q = ",".join(f"'{c}'" for c in codes)
 
     # ── OHLCV + 기술지표 계산 ─────────────────────────────────────────────
@@ -1013,7 +1032,7 @@ def _ai_score_signals(codes):
             "strat_h500_20":   0,
             "strat_h500_40_MKT": 1,
         }
-        feat_vecs.append([fv.get(f, np.nan) for f in _AI_FEAT_ORDER])
+        feat_vecs.append([fv.get(f, np.nan) for f in feat_order])
         code_list.append((code, fv))
 
     if not feat_vecs:
@@ -1022,7 +1041,7 @@ def _ai_score_signals(codes):
     try:
         arr = np.array(feat_vecs, dtype=float)
         if _use_xgb:
-            probs = model.predict(xgb.DMatrix(arr, feature_names=_AI_FEAT_ORDER))
+            probs = model.predict(xgb.DMatrix(arr, feature_names=feat_order))
         else:
             probs = model.predict_proba(arr)[:, 1]
     except Exception:
@@ -1357,16 +1376,17 @@ _RUN_TASKS = {
     "ai_train":      [_VENV_PYTHON, str(BASE / "ai_trainer_v4.py")],                 # meta_model_v4 재학습
     "ai_pipeline":   ["cmd", "/c", str(BASE / "run_ai_pipeline.bat"), "auto"],       # 주1회 경량 AI 갱신(수집→데이터셋→학습, 게이팅)
     "strategy_lab":  [_VENV_PYTHON, str(BASE / "strategy_lab.py")],                  # 전략 랩 forward 집계
-    "stop_cf":       [_VENV_PYTHON, str(BASE / "build_stop_counterfactual.py")],     # 장중손절 반사실 라벨 누적
     "preview":       [_VENV_PYTHON, str(BASE / "intraday_preview.py")],              # 장중 잠정 예비후보
     "market_grid":   [_VENV_PYTHON, str(BASE / "market_grid.py")],                   # 장중시황 2x6 그리드(키움)
     "daily_summary": [_VENV_PYTHON, str(BASE / "daily_summary.py")],                  # 텔레그램 하루요약 수동 전송
+    "watchdog":      [_VENV_PYTHON, str(BASE / "watchdog.py")],                       # 조용한 실패 감지 → 텔레그램(수동 점검)
     "kis_stopcheck": [_VENV_PYTHON, str(BASE / "kis_trader.py"), "stopcheck"],        # KIS 장중 손절 모니터
     # ── 개별 데이터 수집기 (정체분만 콕 집어 수동수집 — Stock_AI venv/cwd) ──
     "supply_demand": [_STOCK_AI_PY, "-m", "src.collector.supply_demand"],            # 외국인/기관 수급(KIS)
     "macro":         [_STOCK_AI_PY, "-m", "src.collector.macro"],                    # 거시지표(NASDAQ/VIX/환율)
     "credit":        [_STOCK_AI_PY, "-m", "src.collector.kiwoom_extra",
                       "--backfill", "--since", _CREDIT_SINCE],                       # 신용/대차(키움 주간)
+    "after_market":  [_VENV_PYTHON, str(BASE / "after_market.py")],                  # 시간외 등락률 → stock.db 누적
 }
 
 # 작업별 cwd (미지정 시 outputs). Stock_AI 수집기는 프로젝트 루트에서 실행해야 -m 임포트가 됨.
@@ -1780,6 +1800,7 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
         <button class="runbtn" data-fresh="supply_demand" onclick="runTask('supply_demand','수급 수집')">수급</button>
         <button class="runbtn" data-fresh="macro_indicators" onclick="runTask('macro','거시지표 수집')">거시지표</button>
         <button class="runbtn" data-fresh="credit_balance" onclick="runTask('credit','신용/대차 수집')">신용/대차</button>
+        <button class="runbtn" onclick="runTask('after_market','시간외 등락률 수집')">시간외</button>
         <button class="runbtn" onclick="runTask('recheck','데이터 재검증')">재검증</button>
       </div>
       <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
@@ -1799,11 +1820,11 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
         <button class="runbtn" onclick="runTask('ai_dataset','AI 학습 데이터셋')">AI 데이터셋</button>
         <button class="runbtn" onclick="runTask('ai_train','AI 모델 학습')">AI 학습</button>
         <button class="runbtn" onclick="runTask('strategy_lab','전략 랩')">전략 랩</button>
-        <button class="runbtn" onclick="runTask('stop_cf','손절 반사실 누적')">손절반사실</button>
         <button class="runbtn" onclick="runTask('paper_tracker','페이퍼 추적')">페이퍼 추적</button>
         <button class="runbtn" onclick="runTask('preview','장중 예비후보')">장중예비</button>
         <button class="runbtn" onclick="runTask('market_grid','장중시황 그리드')">시황그리드</button>
         <button class="runbtn" onclick="runTask('daily_summary','텔레그램 하루요약')">텔레그램요약</button>
+        <button class="runbtn" onclick="runTask('watchdog','시스템 점검(워치독)')">시스템 점검</button>
         <button class="runbtn danger" onclick="runTask('scheduler_restart','스케줄러 재시작')">스케줄러 재시작</button>
       </div>
     </div>
@@ -2000,7 +2021,7 @@ function fillMock(mock, kis){
   if(mock&&!mock.error){
     fillBal('mock-bal', mock.snapshot);
     fillOrders('mock-orders','mock-ord-cnt', mock.orders, mock.order_total);
-    fillSlots('mock-slots', mock.slots||[]);
+    fillSlots('mock-slots', mock.slot_status||[]);  // 백엔드 키는 slot_status (2026-06-30 수정)
     const pos=mock.positions||[];
     setHtml('mock-pos', pos.length?pos.map(r=>{
       const ev=(r.evlt_amt!=null&&r.evlt_amt!=='')?r.evlt_amt:(Number(r.qty)||0)*(Number(r.cur_price||r.current_price)||0);
@@ -2018,7 +2039,7 @@ function fillMock(mock, kis){
     fillBal('kis-bal', kis.snapshot);
     fillStopMonitor('kis-stop-rows','kis-stop-ts', kis.stop_monitor);
     fillOrders('kis-orders','kis-ord-cnt', kis.orders, kis.order_total);
-    fillSlots('kis-slots', kis.slots||[]);
+    fillSlots('kis-slots', kis.slot_status||[]);  // 백엔드 키는 slot_status (2026-06-30 수정)
     const pos=kis.positions||[];
     setHtml('kis-pos', pos.length?pos.map(r=>{
       const ev=(r.evlt_amt!=null&&r.evlt_amt!=='')?r.evlt_amt:(Number(r.qty)||0)*(Number(r.cur_price||r.current_price)||0);

@@ -125,7 +125,9 @@ class High52wCreditDecreaseStrategy(BaseStrategy):
                       on=["code", "date"], how="left")
 
         # 신용잔고율 감소: 오늘 < N일 전
-        df["credit_Nd_ago"] = grp["credit_ratio"].shift(self.credit_lookback)
+        # merge 후 df 를 다시 그룹핑 — 옛 grp(108줄, 병합 전)엔 credit_ratio 가 없어
+        # 'Column not found: credit_ratio' 예외로 전략이 통째 실패했음(2026-06-30 수정).
+        df["credit_Nd_ago"] = df.groupby("code")["credit_ratio"].shift(self.credit_lookback)
         credit_decrease = (
             df["credit_ratio"].notna() &
             df["credit_Nd_ago"].notna() &

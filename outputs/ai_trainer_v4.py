@@ -37,39 +37,11 @@ TRADES_PATH = "./trades_history_v3.csv"
 BIG_WIN_PCT = 10.0
 EMBARGO_BDAYS = 40
 
-FEATURES = [
-    # 종목 (pykrx CSV)
-    "rsi14", "atr_pct", "vol_ratio", "tv_ratio", "for_5d", "ins_5d", "mcap_class",
-    # 신호 강도/유동성
-    "score_tv",
-    # 뉴스 (stock.db news)
-    "news_sent_7d", "news_cnt_7d",
-    # 매크로 레짐 (stock.db macro_indicators + indicators.csv)
-    "vix", "vix_chg_5d", "sox_ret_5d", "usdkrw_chg_5d", "kospi_ret_20d",
-    # 신용잔고 (stock.db credit_balance 2022~ / kiwoom_backfill 우선)
-    "crd_remn_rt", "crd_remn_chg_5d",
-    # 수급 DB (stock.db supply_demand 2015~) — pykrx for_5d/ins_5d 보완
-    "for_net5_db", "ins_net5_db",
-    # 기술지표 DB (stock.db korea_indicators — 사전 계산)
-    "rsi_db", "macd_hist_db", "bb_pct_db",
-    # 키움 프로그램매매 (kiwoom_backfill merge 후 존재 — 없으면 자동 제외)
-    "prm_net_5d_ratio",
-]
+# 피처 계약(전체 목록·코어·그룹)은 feature_spec 단일 출처에서 가져온다 (2026-06-29 단일화).
+#   지표 조합 탐색: 개별 피처를 2^N 켜끄면 과적합 → '의미 그룹'(FEATURE_GROUPS) 단위 토글.
+#   CORE 는 항상 포함, strat_* one-hot 도 항상 포함. purged-CV 사이징 스프레드 + 간결성 페널티.
+from feature_spec import ALL_FEATURES as FEATURES, CORE_FEATURES, FEATURE_GROUPS
 CAT = {"strategy"}  # one-hot
-
-# [개선] 지표 조합 탐색 — 개별 22피처를 2^22 로 켜고끄면 과적합 → '의미 그룹' 단위 토글.
-#   CORE 는 항상 포함(기본 가격·기술·유동성), 나머지 그룹만 Optuna 가 on/off.
-#   strat_* one-hot 도 항상 포함. purged-CV 사이징 스프레드로 평가 + 간결성 페널티로 과적합 억제.
-CORE_FEATURES = ["rsi14", "atr_pct", "vol_ratio", "tv_ratio", "score_tv", "mcap_class"]
-FEATURE_GROUPS = {
-    "supply_pykrx": ["for_5d", "ins_5d"],
-    "news":         ["news_sent_7d", "news_cnt_7d"],
-    "macro":        ["vix", "vix_chg_5d", "sox_ret_5d", "usdkrw_chg_5d", "kospi_ret_20d"],
-    "credit":       ["crd_remn_rt", "crd_remn_chg_5d"],
-    "supply_db":    ["for_net5_db", "ins_net5_db"],
-    "tech_db":      ["rsi_db", "macd_hist_db", "bb_pct_db"],
-    "program":      ["prm_net_5d_ratio"],
-}
 
 
 def main():

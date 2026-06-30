@@ -73,14 +73,13 @@ IC_FEATURES = [
     "news_sent_7d", "crd_remn_rt", "prm_net_5d_ratio",
 ]
 
-# XGBoost 모델 feature 순서 (meta_model_v4.features.csv 기준)
-MODEL_FEATURE_ORDER = [
-    "rsi14", "atr_pct", "vol_ratio", "tv_ratio", "for_5d", "ins_5d", "mcap_class",
-    "score_tv", "news_sent_7d", "news_cnt_7d", "vix", "vix_chg_5d", "sox_ret_5d",
-    "usdkrw_chg_5d", "kospi_ret_20d", "for_net5_db", "ins_net5_db", "rsi_db",
-    "macd_hist_db", "bb_pct_db", "prm_net_5d_ratio",
-    "strat_h252_40", "strat_h500_20", "strat_h500_40_MKT",
-]
+# 피처 계약(목록·순서·로더)은 feature_spec 단일 출처에서 가져온다 (2026-06-29 단일화 —
+# 과거 이 24리스트가 factor_scorer·dashboard·ai_trainer 3곳에 하드코딩되어 어긋나며
+# 'ai_prob 조용한 None'(11피처 모델에 24피처 입력) 버그를 유발했음).
+from feature_spec import (
+    FALLBACK_MODEL_ORDER as MODEL_FEATURE_ORDER,   # 폴백 24피처(하위호환 별칭)
+    load_model_feature_order,                       # features.csv 의 실제 학습 순서 로더
+)
 
 
 class FactorScorer:
@@ -101,6 +100,8 @@ class FactorScorer:
         self._model = None              # XGBoost model (lazy load)
         self._explainer = None          # SHAP explainer (lazy load)
         self._model_json = model_json
+        # 학습된 실제 피처 순서(그룹탐색으로 가변) — 추론 벡터를 학습과 일치시킨다.
+        self.model_feature_order = load_model_feature_order(features_csv)
 
         self._load_ic_weights(trades_csv)
 
@@ -522,13 +523,14 @@ class FactorScorer:
             except Exception:
                 return None
         try:
+            order = self.model_feature_order
             vec = []
-            for f in MODEL_FEATURE_ORDER:
+            for f in order:
                 v = feats.get(f)
                 if v is None or (isinstance(v, float) and np.isnan(v)):
                     v = 0.0
                 vec.append(float(v))
-            X = pd.DataFrame([vec], columns=MODEL_FEATURE_ORDER)
+            X = pd.DataFrame([vec], columns=order)
             return round(float(m.predict_proba(X)[0][1]), 4)
         except Exception:
             return None
@@ -549,16 +551,17 @@ class FactorScorer:
         try:
             import pandas as pd
 
-            # 모델 입력 벡터 구성
+            # 모델 입력 벡터 구성 — 학습된 실제 피처 순서 사용
+            order = self.model_feature_order
             vec = []
-            for f in MODEL_FEATURE_ORDER:
+            for f in order:
                 v = feats.get(f)
                 if v is None or (isinstance(v, float) and np.isnan(v)):
                     # 평균값 대체 (학습 시 사용한 중앙값이 없으므로 0 대체)
                     v = 0.0
                 vec.append(float(v))
 
-            X = pd.DataFrame([vec], columns=MODEL_FEATURE_ORDER)
+            X = pd.DataFrame([vec], columns=order)
             shap_vals = self._explainer.shap_values(X)
 
             # XGBClassifier 이진분류: shap_values 는 [n_samples, n_features] or list
@@ -567,7 +570,7 @@ class FactorScorer:
             else:
                 sv = shap_vals[0]
 
-            feat_shap = list(zip(MODEL_FEATURE_ORDER, sv.tolist()))
+            feat_shap = list(zip(order, sv.tolist()))
             feat_shap.sort(key=lambda x: x[1], reverse=True)
 
             def _label(f):
