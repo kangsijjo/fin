@@ -550,10 +550,13 @@ def get_kiwoom_mock(date_from="", date_to=""):
             combined = _attach_realized_pnl(combined)   # 매도행 실현손익(금액·%) 부여
             out["order_total"] = int(len(combined))
             out["orders"] = combined.tail(500).to_dict("records")
+    out["slot_status"] = _kiwoom_slot_status()   # 키움 모의투자 슬롯(진입/청산 조건 포함)
     return out
 
 
 # ── 4b. KIS mock account (안D 포트폴리오) ─────────────────────────────────────
+# ── 모의투자 슬롯 정의(전략별 슬롯수 + 진입/청산 조건) — 슬롯 클릭 드롭다운용 ──
+# KIS 안D (손절 있음)
 _KIS_STRATEGY_SLOTS = {"h52w_for3d_mkt": 4, "for_high20_mkt": 4, "gc_for3d": 2}
 _KIS_STRATEGY_STOP  = {"h52w_for3d_mkt": -15, "for_high20_mkt": -10, "gc_for3d": -26}
 _KIS_STRATEGY_LABEL = {
@@ -561,36 +564,70 @@ _KIS_STRATEGY_LABEL = {
     "for_high20_mkt": "20일신고가+외국인",
     "gc_for3d":       "골든크로스+외국인",
 }
+_KIS_STRATEGY_HOLD = {"h52w_for3d_mkt": 20, "for_high20_mkt": 20, "gc_for3d": 15}
+_KIS_ENTRY = {
+    "h52w_for3d_mkt": "52주 신고가 돌파 + 외국인 3일 연속 순매수 + 시장강세 게이트(전종목 평균등락 60일MA>0) + 거래대금 ≥ 30억",
+    "for_high20_mkt": "20일 신고가(종가 ≥ 직전20일 최고) + 외국인 3일 연속 순매수 + 시장강세 게이트 + 거래대금 ≥ 30억",
+    "gc_for3d":       "골든크로스(MA20이 MA60 상향돌파) + 외국인 3일 연속 순매수 + 거래대금 ≥ 30억 (시장게이트 없음)",
+}
+_KIS_EXIT = {
+    "h52w_for3d_mkt": "진입 20영업일째 종가 또는 -15% 손절(전일 종가 기준)",
+    "for_high20_mkt": "진입 20영업일째 종가 또는 -10% 손절",
+    "gc_for3d":       "진입 15영업일째 종가 또는 -26% 손절",
+}
+# 키움 안C (손절 없음 = 시간청산)
+_KW_STRATEGY_SLOTS = {"high_52w_filt": 4, "rsi_reversal": 4, "rsi_vol": 2}
+_KW_STRATEGY_LABEL = {
+    "high_52w_filt": "52주 신고가+거래량",
+    "rsi_reversal":  "RSI 과매도 반전",
+    "rsi_vol":       "RSI 과매도+거래량급증",
+}
+_KW_STRATEGY_HOLD = {"high_52w_filt": 20, "rsi_reversal": 5, "rsi_vol": 7}
+_KW_ENTRY = {
+    "high_52w_filt": "종가 > 직전 252영업일 신고가(52주 돌파) + 시장강세 게이트(전종목 평균등락 60일MA>0) + 당일 거래대금 ≥ 30일평균 ×1.5 + 거래대금 ≥ 30억",
+    "rsi_reversal":  "RSI(14) < 30 (과매도) + 거래대금 ≥ 10억",
+    "rsi_vol":       "RSI(14) < 30 + 당일 거래대금 > 20일평균 ×2.0(거래량 급증) + 거래대금 ≥ 10억",
+}
+_KW_EXIT = {
+    "high_52w_filt": "진입 20영업일째 종가 (손절 없음·시간청산)",
+    "rsi_reversal":  "진입 5영업일째 종가 (손절 없음)",
+    "rsi_vol":       "진입 7영업일째 종가 (손절 없음)",
+}
+
+
+def _slot_status(signals_csv, slots, labels, holds, entries, exits, stops):
+    """전략별 슬롯 현황(used/max) + 진입·청산 조건을 묶어 반환(슬롯 클릭 드롭다운용).
+    active = target_exit_date(YYYYMMDD) ≥ 오늘 인 신호 수. 공란/NaN 행 제외."""
+    from datetime import date as _date
+    today_str = _date.today().strftime("%Y%m%d")
+    active = {k: [] for k in slots}
+    try:
+        if signals_csv.exists():
+            df = pd.read_csv(signals_csv, dtype={"code": str})
+            df["code"] = df["code"].astype(str).str.zfill(6)
+            df["target_exit_date"] = df["target_exit_date"].astype(str)
+            df = df[df["target_exit_date"].str.match(r"^\d{8}$")]
+            cur = df[df["target_exit_date"] >= today_str]
+            for strat in slots:
+                active[strat] = cur[cur["strategy"] == strat]["code"].tolist()
+    except Exception:
+        pass
+    return [{
+        "strategy": strat, "label": labels.get(strat, strat),
+        "used": len(active.get(strat, [])), "max": slots[strat],
+        "holding": holds.get(strat, ""), "stop_pct": stops.get(strat, ""),
+        "entry": entries.get(strat, ""), "exit": exits.get(strat, ""),
+    } for strat in slots]
+
 
 def _kis_slot_status():
-    from datetime import date as _date
-    today_str = _date.today().strftime("%Y%m%d")   # target_exit_date 는 YYYYMMDD(대시없음) — 형식 일치(2026-06-30 수정)
-    active_by_strat = {k: [] for k in _KIS_STRATEGY_SLOTS}
-    if KIS_SIGNALS_CSV.exists():
-        try:
-            df = pd.read_csv(KIS_SIGNALS_CSV, dtype={"code": str})
-            df["code"] = df["code"].str.zfill(6)
-            df["target_exit_date"] = df["target_exit_date"].astype(str)
-            # 공란/NaN(→'nan') 행 제외 — 'nan' >= 날짜 가 항상 True 라 슬롯이 과대집계됐음(2026-06-30 수정)
-            df = df[df["target_exit_date"].str.match(r"^\d{8}$")]
-            active = df[df["target_exit_date"] >= today_str]
-            for strat in _KIS_STRATEGY_SLOTS:
-                rows = active[active["strategy"] == strat]
-                active_by_strat[strat] = rows["code"].tolist()
-        except Exception:
-            pass
-    slots = []
-    for strat in ["h52w_for3d_mkt", "for_high20_mkt", "gc_for3d"]:
-        mx = _KIS_STRATEGY_SLOTS[strat]
-        codes = active_by_strat.get(strat, [])
-        slots.append({
-            "strategy": strat,
-            "label": _KIS_STRATEGY_LABEL[strat],
-            "used": len(codes),
-            "max": mx,
-            "stop_pct": _KIS_STRATEGY_STOP[strat],
-        })
-    return slots
+    return _slot_status(KIS_SIGNALS_CSV, _KIS_STRATEGY_SLOTS, _KIS_STRATEGY_LABEL,
+                        _KIS_STRATEGY_HOLD, _KIS_ENTRY, _KIS_EXIT, _KIS_STRATEGY_STOP)
+
+
+def _kiwoom_slot_status():
+    return _slot_status(PAPER_CSV, _KW_STRATEGY_SLOTS, _KW_STRATEGY_LABEL,
+                        _KW_STRATEGY_HOLD, _KW_ENTRY, _KW_EXIT, {})
 
 def get_kis_mock(date_from="", date_to=""):
     out = {
@@ -1585,8 +1622,23 @@ button#btn-refresh:hover{background:#30363d}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th{text-align:left;color:#8b949e;font-weight:500;padding:6px 8px;border-bottom:1px solid #21262d;font-size:12px}
 td{padding:6px 8px;border-bottom:1px solid #161b22}
-tr:hover td{background:#161b22}
+/* 행 hover 하이라이트 — 가로 전체 박스 + 파란 밑줄 (모든 탭 표 공통) */
+tbody tr:hover td{background:#1c2330;box-shadow:inset 0 -2px 0 0 #388bfd}
 .r{text-align:right}
+/* 모의투자 슬롯 아코디언 (클릭 시 진입/청산 조건 펼침) */
+.slotitem{width:100%;background:#0d1117;border:1px solid #21262d;border-radius:6px;margin-bottom:6px;overflow:hidden}
+.slothead{display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;user-select:none}
+.slothead:hover{background:#161b22}
+.slotname{flex:1;font-weight:600}
+.caret{color:#8b949e;font-size:12px}
+.slotbody{display:none;padding:0 12px 12px;font-size:12px;color:#c9d1d9;line-height:1.65;border-top:1px solid #21262d}
+.slotbody.open{display:block;padding-top:10px}
+/* 로그 드롭다운(details/summary) */
+details.logdrop>summary{cursor:pointer;font-size:13px;font-weight:600;color:#8b949e;text-transform:uppercase;
+  letter-spacing:.5px;list-style:none;padding:2px 0}
+details.logdrop>summary::-webkit-details-marker{display:none}
+details.logdrop>summary::before{content:"\25B8  ";color:#58a6ff}
+details.logdrop[open]>summary::before{content:"\25BE  ";color:#58a6ff}
 /* log pre */
 pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;
            font-size:11px;font-family:monospace;line-height:1.6;white-space:pre-wrap;
@@ -1916,12 +1968,16 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
     <div id="run-status" style="margin-top:10px;color:#8b949e;font-size:13px">&#xBC84;&#xD2BC;&#xC744; &#xB204;&#xB974;&#xBA74; &#xD574;&#xB2F9; &#xC791;&#xC5C5;&#xC774; &#xBC31;&#xADF8;&#xB77C;&#xC6B4;&#xB4DC;&#xB85C; &#xC2E4;&#xD589;&#xB429;&#xB2C8;&#xB2E4; (&#xB85C;&#xADF8;: logs/ &#xD3F4;&#xB354;).</div>
   </div>
   <div class="section">
-    <h2>&#xC218;&#xC9D1; &#xB85C;&#xADF8; (collect_*.log)</h2>
-    <pre class="logbox" id="log-sch">&#xB85C;&#xB529;&#xC911;...</pre>
+    <details class="logdrop">
+      <summary>수집 로그 (collect_*.log)</summary>
+      <pre class="logbox" id="log-sch" style="margin-top:10px">로딩중...</pre>
+    </details>
   </div>
   <div class="section">
-    <h2>&#xD398;&#xC774;&#xD37C; &#xB85C;&#xADF8; (paper_*.log)</h2>
-    <pre class="logbox" id="log-live">&#xB85C;&#xB529;&#xC911;...</pre>
+    <details class="logdrop">
+      <summary>페이퍼 로그 (paper_*.log)</summary>
+      <pre class="logbox" id="log-live" style="margin-top:10px">로딩중...</pre>
+    </details>
   </div>
   <div class="section">
     <h2>전체 로그 보기
@@ -2032,10 +2088,20 @@ function fillSlots(elId, slots){
   const el=document.getElementById(elId);if(!el)return;
   if(!slots||!slots.length){el.innerHTML='<div style="color:#8b949e;font-size:13px">슬롯 없음</div>';return;}
   el.innerHTML=slots.map(s=>{
-    const used=s.used||s.filled||s.code;
-    return `<div class="stat" style="min-width:90px">
-      <div class="v ${used?'pos':'neu'}" style="font-size:14px">${s.code||s.slot_label||s.label||'빈슬롯'}</div>
-      <div class="l">${s.strategy||s.strat||''} ${used?'●':'○'}</div>
+    const used=s.used||0, mx=s.max||0;
+    const dots='●'.repeat(Math.min(used,mx))+'○'.repeat(Math.max(0,mx-used));
+    const stop=(s.stop_pct!==''&&s.stop_pct!=null)?`손절 ${s.stop_pct}%`:'손절 없음';
+    return `<div class="slotitem">
+      <div class="slothead" onclick="var b=this.parentNode.querySelector('.slotbody');b.classList.toggle('open');this.querySelector('.caret').textContent=b.classList.contains('open')?'▾':'▸'">
+        <span class="slotname">${s.label||s.strategy||''} <span style="color:#8b949e;font-size:11px">${s.strategy||''}</span></span>
+        <span style="font-size:13px"><b class="${used?'pos':'neu'}">${used}/${mx}</b> <span style="color:#8b949e;letter-spacing:1px">${dots}</span></span>
+        <span class="caret">▸</span>
+      </div>
+      <div class="slotbody">
+        <div><b style="color:#3fb950">진입</b> &nbsp;${s.entry||'-'}</div>
+        <div style="margin-top:5px"><b style="color:#f85149">청산</b> &nbsp;${s.exit||'-'}</div>
+        <div style="margin-top:6px;color:#8b949e">보유 ${s.holding||'?'}영업일 · ${stop} · 진입가=신호일 종가 / 실제 매수=다음 영업일 09시대</div>
+      </div>
     </div>`;
   }).join('');
 }
