@@ -348,12 +348,35 @@ def main():
 
     out = pd.DataFrame(rows).sort_values("date")
 
+    # score_tv 를 라이브(factor_scorer.prepare_price_features:233-235)와 '정확히 동일하게'
+    # 신호일 '전체 유니버스' 거래대금 순위(1=최대)로 맞춘다. df(load_macro_daily, 전 종목·전일자)에서
+    # 날짜별 순위를 구해 (signal_date=out.date, code)로 매핑.
+    #   ※ t.score(거래대금 원시값 ~1e9~1e12)도, 매매종목 '내부' 순위(out.groupby)도 라이브의
+    #     '유니버스' 순위와 분모가 달라 train/live 스케일이 어긋났음 — 2026-06-30 수정, 재학습 필요.
+    _rk = df[["date", "code", "trading_value"]].copy()
+    _rk["date"] = _rk["date"].astype(str)
+    _rk["code"] = _rk["code"].astype(str).str.zfill(6)
+    _rk["tv_rank"] = _rk.groupby("date")["trading_value"].rank(ascending=False, method="min")
+    _rk = _rk.drop_duplicates(["date", "code"])[["date", "code", "tv_rank"]]
+    out["date"] = out["date"].astype(str)
+    out["code"] = out["code"].astype(str).str.zfill(6)
+    out = out.merge(_rk, on=["date", "code"], how="left")
+    out["score_tv"] = out["tv_rank"]
+    out = out.drop(columns=["tv_rank"])
+
     # 키움 백필 피처 (신용잔고·프로그램매매) — kiwoom_backfill.py merge 산출물
     KW_FEAT = "./ai_data/kiwoom_hist_features.csv"
     if os.path.exists(KW_FEAT):
         kw = pd.read_csv(KW_FEAT, dtype={"code": str, "date": str})
         kw["code"] = kw["code"].str.zfill(6)
-        out = out.merge(kw, on=["code", "date"], how="left")
+        # crd_remn_rt/crd_remn_chg_5d 가 out·kw 양쪽에 있어 단순 merge 하면 _x/_y 로 갈려
+        # ai_trainer_v4 가 평문 컬럼명을 못 찾아 credit 그룹이 학습에서 영구 누락됐음.
+        # coalesce 로 평문 컬럼 유지(2026-06-30 수정 — 재학습 필요).
+        out = out.merge(kw, on=["code", "date"], how="left", suffixes=("", "_kw"))
+        for _c in ["crd_remn_rt", "crd_remn_chg_5d"]:
+            if _c + "_kw" in out.columns:
+                out[_c] = out[_c].fillna(out[_c + "_kw"])
+                out = out.drop(columns=[_c + "_kw"])
         cov = out.get("crd_remn_rt")
         if cov is not None:
             print(f"[kiwoom_feat] 병합 — 신용 커버리지 {cov.notna().mean()*100:.0f}%")
