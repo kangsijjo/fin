@@ -424,6 +424,89 @@ def get_strategy_lab():
     return out
 
 # ── 4. kiwoom mock account ─────────────────────────────────────────────────────
+_DAILY_CLOSE_CACHE = {}
+
+
+def _daily_close_map(date_str):
+    """macro_data/daily/{date}.csv → {code: close}. 날짜별 메모리 캐시(종가는 마감 후 불변)."""
+    date_str = str(date_str)
+    if not date_str:
+        return {}
+    if date_str in _DAILY_CLOSE_CACHE:
+        return _DAILY_CLOSE_CACHE[date_str]
+    m = {}
+    try:
+        p = BASE / "macro_data" / "daily" / f"{date_str}.csv"
+        if p.exists():
+            d = pd.read_csv(p, dtype={"code": str}, encoding="utf-8-sig")
+            d["code"] = d["code"].astype(str).str.zfill(6)
+            col = next((c for c in ("close", "종가") if c in d.columns), None)
+            if col:
+                m = {k: v for k, v in zip(d["code"], pd.to_numeric(d[col], errors="coerce"))}
+    except Exception:
+        pass
+    _DAILY_CLOSE_CACHE[date_str] = m
+    return m
+
+
+def _attach_realized_pnl(combined):
+    """매도 행에 실현손익(pnl 금액·pnl_pct %)을 FIFO 매칭으로 계산해 붙인다.
+
+    주문로그엔 매입가가 없어 같은 code 의 직전 매수 가격과 시간순 FIFO 로 매칭한다.
+    매도 price 는 청산(15:21) 시점 당일 종가 미수집이면 0 으로 기록되므로, 0 이면
+    macro_data/daily 의 매도일 종가로 보정해 손익을 계산하고 표시 price 도 갱신한다.
+    실패(ok=False) 행은 체결 안 됐으므로 제외. 매수행·미매칭 매도는 pnl 공란.
+    (대시보드 표시 전용 — 매매 로직과 무관)
+    """
+    try:
+        df = combined.copy()
+        df["pnl"] = ""
+        df["pnl_pct"] = ""
+        s = df.assign(_d=df["date"].astype(str), _t=df.get("time", "").astype(str)) \
+              .sort_values(["_d", "_t"])
+        lots = {}        # code -> [[price, qty_remaining], ...]
+        upd = {}         # original_index -> (pnl_amt, pnl_pct, eff_sell_price)
+        for idx, r in s.iterrows():
+            ok = str(r.get("ok", "")).strip().lower() not in ("false", "0", "")
+            side = str(r.get("side", "")).strip().lower()
+            code = str(r.get("code", "")).zfill(6)
+            try:
+                qty = int(float(r.get("qty", 0) or 0))
+                price = float(r.get("price", 0) or 0)
+            except Exception:
+                continue
+            if not ok or qty <= 0:
+                continue
+            if side == "buy":
+                if price > 0:
+                    lots.setdefault(code, []).append([price, qty])
+            elif side == "sell":
+                eff = price if price > 0 else float(_daily_close_map(r.get("date", "")).get(code, 0) or 0)
+                rem, cost, matched = qty, 0.0, 0
+                q = lots.get(code, [])
+                while rem > 0 and q:
+                    lot = q[0]
+                    take = min(rem, lot[1])
+                    cost += take * lot[0]
+                    matched += take
+                    lot[1] -= take
+                    rem -= take
+                    if lot[1] <= 0:
+                        q.pop(0)
+                if matched > 0 and eff > 0:
+                    avg = cost / matched
+                    upd[idx] = (int(round((eff - avg) * matched)),
+                                round((eff / avg - 1) * 100, 2) if avg > 0 else 0,
+                                int(round(eff)))
+        for idx, (a, p, ep) in upd.items():
+            df.at[idx, "pnl"] = a
+            df.at[idx, "pnl_pct"] = p
+            df.at[idx, "price"] = ep   # 0 으로 기록됐던 매도 표시가도 실제 종가로 보정
+        return df
+    except Exception:
+        return combined
+
+
 def get_kiwoom_mock(date_from="", date_to=""):
     out = {"snapshot": {}, "equity": [], "orders": [], "order_total": 0, "positions": []}
     snap_path = KIWOOM_DIR / "snapshot.json"
@@ -464,6 +547,7 @@ def get_kiwoom_mock(date_from="", date_to=""):
                 pass
         if frames:
             combined = pd.concat(frames, ignore_index=True).fillna("")
+            combined = _attach_realized_pnl(combined)   # 매도행 실현손익(금액·%) 부여
             out["order_total"] = int(len(combined))
             out["orders"] = combined.tail(500).to_dict("records")
     return out
@@ -574,6 +658,7 @@ def get_kis_mock(date_from="", date_to=""):
                 pass
         if frames:
             combined = pd.concat(frames, ignore_index=True).fillna("")
+            combined = _attach_realized_pnl(combined)   # 매도행 실현손익(금액·%) 부여
             out["order_total"] = int(len(combined))
             out["orders"] = combined.tail(500).to_dict("records")
     # 슬롯 현황 + 신호 수
@@ -1627,9 +1712,9 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
     <h2>키움 매매내역 <span id="mock-ord-cnt" style="color:#8b949e;font-size:11px;font-weight:400"></span></h2>
     <table><thead><tr>
       <th class="r">시각</th><th>구분</th><th>종목</th><th>전략</th>
-      <th class="r">수량</th><th class="r">가격</th><th>사유</th>
+      <th class="r">수량</th><th class="r">가격</th><th class="r">손익(원)</th><th class="r">손익률</th><th>사유</th>
     </tr></thead>
-    <tbody id="mock-orders"><tr><td colspan="7" style="color:#8b949e;text-align:center">매매내역 없음</td></tr></tbody>
+    <tbody id="mock-orders"><tr><td colspan="9" style="color:#8b949e;text-align:center">매매내역 없음</td></tr></tbody>
     </table>
   </div>
   <!-- KIS -->
@@ -1662,9 +1747,9 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
     <h2>KIS 매매내역 <span id="kis-ord-cnt" style="color:#8b949e;font-size:11px;font-weight:400"></span></h2>
     <table><thead><tr>
       <th class="r">시각</th><th>구분</th><th>종목</th><th>전략</th>
-      <th class="r">수량</th><th class="r">가격</th><th>사유</th>
+      <th class="r">수량</th><th class="r">가격</th><th class="r">손익(원)</th><th class="r">손익률</th><th>사유</th>
     </tr></thead>
-    <tbody id="kis-orders"><tr><td colspan="7" style="color:#8b949e;text-align:center">매매내역 없음</td></tr></tbody>
+    <tbody id="kis-orders"><tr><td colspan="9" style="color:#8b949e;text-align:center">매매내역 없음</td></tr></tbody>
     </table>
   </div>
 </div>
@@ -1982,6 +2067,9 @@ function fillOrders(elId, cntId, orders, total){
     const d=String(o.date||'');
     const dstr=d.length>=8 ? d.slice(4,6)+'/'+d.slice(6,8)+' ' : '';
     const fail=(o.ok===false || o.ok==='False');
+    const hasPnl = sell && !fail && o.pnl!=='' && o.pnl!=null;
+    const pnlAmt = hasPnl ? `<span class="${clr(o.pnl)}">${fmt(o.pnl)}원</span>` : '';
+    const pnlPct = hasPnl ? `<span class="${clr(o.pnl_pct)}">${pct(o.pnl_pct)}</span>` : '';
     return `<tr>
       <td class="r" style="font-size:11px">${dstr}${o.time||''}</td>
       <td class="${sell?'neg':'pos'}">${sell?'매도':'매수'}</td>
@@ -1989,8 +2077,10 @@ function fillOrders(elId, cntId, orders, total){
       <td style="color:#8b949e;font-size:11px">${o.strategy||''}</td>
       <td class="r">${fmt(o.qty)}</td>
       <td class="r">${fmt(o.price)}</td>
+      <td class="r">${pnlAmt}</td>
+      <td class="r">${pnlPct}</td>
       <td style="font-size:11px;color:#8b949e">${o.reason||''}${fail?' ✕실패':''}</td></tr>`;
-  }).join('') : '<tr><td colspan="7" style="color:#8b949e;text-align:center">매매내역 없음</td></tr>';
+  }).join('') : '<tr><td colspan="9" style="color:#8b949e;text-align:center">매매내역 없음</td></tr>';
 }
 
 function fillStopMonitor(elId, tsId, mon){
