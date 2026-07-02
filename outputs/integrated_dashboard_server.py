@@ -550,6 +550,23 @@ def get_kiwoom_mock(date_from="", date_to=""):
             combined = _attach_realized_pnl(combined)   # 매도행 실현손익(금액·%) 부여
             out["order_total"] = int(len(combined))
             out["orders"] = combined.tail(500).to_dict("records")
+            # 보유 포지션에 전략·진입일 병합 — 스냅샷(kt00018)엔 없음 → 주문로그의
+            # 해당 종목 '마지막 성공 매수'(ok=True)에서 가져온다(2026-07-02, 빈칸 수정).
+            try:
+                b = combined[combined["side"].astype(str).str.lower() == "buy"]
+                b = b[b["ok"].astype(str).str.lower().isin(("true", "1"))]
+                buy_map = {}
+                for _, r in b.iterrows():   # 시간순 순회 → 뒤(최신)가 덮어씀
+                    buy_map[str(r.get("code", "")).zfill(6)] = (
+                        str(r.get("strategy", "") or ""), str(r.get("date", "") or ""))
+                for p in out["positions"]:
+                    st, dt = buy_map.get(str(p.get("code", "")).zfill(6), ("", ""))
+                    if not p.get("strategy"):
+                        p["strategy"] = st
+                    if not p.get("entry_date"):
+                        p["entry_date"] = dt
+            except Exception:
+                pass
     out["slot_status"] = _kiwoom_slot_status()   # 키움 모의투자 슬롯(진입/청산 조건 포함)
     return out
 
@@ -584,9 +601,9 @@ _KW_STRATEGY_LABEL = {
 }
 _KW_STRATEGY_HOLD = {"high_52w_filt": 20, "rsi_reversal": 5, "rsi_vol": 7}
 _KW_ENTRY = {
-    "high_52w_filt": "종가 > 직전 252영업일 신고가(52주 돌파) + 시장강세 게이트(전종목 평균등락 60일MA>0) + 당일 거래대금 ≥ 30일평균 ×1.5 + 거래대금 ≥ 30억",
-    "rsi_reversal":  "RSI(14) < 30 (과매도) + 거래대금 ≥ 10억",
-    "rsi_vol":       "RSI(14) < 30 + 당일 거래대금 > 20일평균 ×2.0(거래량 급증) + 거래대금 ≥ 10억",
+    "high_52w_filt": "종가 > 직전 252영업일 신고가(52주 돌파) + 시장강세 게이트(전종목 평균등락 60일MA>0) + 당일 거래대금 ≥ 30일평균 ×1.5 + 거래대금 ≥ 30억 + 강도(score_ic) ≥ 6",
+    "rsi_reversal":  "RSI(14) < 30 (과매도) + 거래대금 ≥ 10억 + 강도(score_ic) ≥ 6",
+    "rsi_vol":       "RSI(14) < 30 + 당일 거래대금 > 20일평균 ×2.0(거래량 급증) + 거래대금 ≥ 10억 + 강도(score_ic) ≥ 6",
 }
 _KW_EXIT = {
     "high_52w_filt": "진입 20영업일째 종가 (손절 없음·시간청산)",
@@ -758,6 +775,37 @@ def get_strength(limit=300):
             ]
         except Exception:
             pass
+    # ── 강도 가상매매 검증 — 실현수익(paper_audit_result.csv, done만)과 (signal_date,code)
+    #    조인해 '이 강도 구간이면 실제 이렇게 됐다'를 집계. 실거래 아님(사후검증, 2026-07-02).
+    try:
+        pa_path = BASE / "paper_audit_result.csv"
+        if pa_path.exists() and "score_ic" in df.columns:
+            pa = pd.read_csv(pa_path, dtype={"code": str}, encoding="utf-8-sig")
+            pa = pa[pa["status"].astype(str) == "done"]
+            pa["code"] = pa["code"].astype(str).str.zfill(6)
+            pa["signal_date"] = pa["signal_date"].astype(str).str.replace("-", "")
+            pa["net_pct"] = pd.to_numeric(pa["net_pct"], errors="coerce")
+            sl = df[df["score_ic"].notna()].copy()
+            sl["signal_date"] = sl["signal_date"].astype(str).str.replace("-", "")
+            j = sl.merge(pa[["signal_date", "code", "net_pct"]],
+                         on=["signal_date", "code"], how="inner").dropna(subset=["net_pct"])
+            if len(j):
+                buckets = []
+                for label, lo, hi in [("6 이상", 6.0, None), ("5~6", 5.0, 6.0), ("5 미만", None, 5.0)]:
+                    m = j["score_ic"] >= lo if lo is not None else j["score_ic"].notna()
+                    if hi is not None:
+                        m &= j["score_ic"] < hi
+                    g = j[m]
+                    if len(g):
+                        buckets.append({
+                            "label": label, "n": int(len(g)),
+                            "avg_net": round(float(g["net_pct"].mean()), 2),
+                            "win": round(float((g["net_pct"] > 0).mean() * 100), 1),
+                        })
+                out["virtual"] = {"done_total": int(len(j)), "buckets": buckets}
+    except Exception:
+        pass
+
     # 최근 기록 (신호일 내림차순 → 같은 날은 계좌/전략/강도순위 오름차순)
     sort_cols = [c for c in ("signal_date", "account", "strategy", "slot_rank")
                  if c in df.columns]
@@ -1639,6 +1687,9 @@ details.logdrop>summary{cursor:pointer;font-size:13px;font-weight:600;color:#8b9
 details.logdrop>summary::-webkit-details-marker{display:none}
 details.logdrop>summary::before{content:"\25B8  ";color:#58a6ff}
 details.logdrop[open]>summary::before{content:"\25BE  ";color:#58a6ff}
+/* 정렬 가능한 표 헤더 */
+th.sortable{cursor:pointer;user-select:none}
+th.sortable:hover{color:#58a6ff;text-decoration:underline}
 /* log pre */
 pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;
            font-size:11px;font-family:monospace;line-height:1.6;white-space:pre-wrap;
@@ -1821,11 +1872,15 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
     </table>
   </div>
   <div class="section">
-    <h2>강도 기록 (최근 300건)</h2>
+    <h2>강도 가상매매 검증 <span style="color:#8b949e;font-size:12px;font-weight:400">&mdash; 강도 구간별 '실현된' 성과(paper 실측과 조인, 완료 매매만). 실거래 아님 &middot; 키움 매수는 2026-07-02부터 강도 6 미만 스킵</span></h2>
+    <div class="stats-row" id="st-virtual"><div style="color:#8b949e;font-size:13px">로딩중...</div></div>
+  </div>
+  <div class="section">
+    <h2>강도 기록 (최근 300건) <span style="color:#8b949e;font-size:11px;font-weight:400">&mdash; 열 제목 클릭 = 정렬(다시 클릭 = 반대방향)</span></h2>
     <div style="color:#8b949e;font-size:12px;margin-bottom:8px">강도(IC)=IC가중 통합 팩터점수(0~10, 높을수록 강함) · 거래대금순위=당일 전체순위(1=최대) · 슬롯순위=같은 전략 내 강도 우선순위(1=최강)</div>
-    <table><thead><tr>
-      <th class="r">신호일</th><th>계좌</th><th>전략</th><th>종목</th>
-      <th class="r">진입가</th><th class="r">강도(IC)</th><th class="r">AI확률</th><th class="r">거래대금순위</th><th class="r">슬롯순위</th><th>시장</th>
+    <table><thead><tr id="st-head">
+      <th class="r sortable" onclick="sortSt('signal_date')">신호일</th><th class="sortable" onclick="sortSt('account')">계좌</th><th class="sortable" onclick="sortSt('strategy')">전략</th><th class="sortable" onclick="sortSt('name')">종목</th>
+      <th class="r sortable" onclick="sortSt('entry_close')">진입가</th><th class="r sortable" onclick="sortSt('score_ic')">강도(IC)</th><th class="r sortable" onclick="sortSt('ai_prob')">AI확률</th><th class="r sortable" onclick="sortSt('score_tv')">거래대금순위</th><th class="r sortable" onclick="sortSt('slot_rank')">슬롯순위</th><th class="sortable" onclick="sortSt('market_strong')">시장</th>
     </tr></thead>
     <tbody id="st-rows"><tr><td colspan="10" style="color:#8b949e;text-align:center">강도 기록 없음 &mdash; 다음 신호생성(18:30) 때 첫 데이터 누적</td></tr></tbody>
     </table>
@@ -2239,23 +2294,66 @@ function fillStrength(st){
     `<tr><td>${r.strategy||''}</td><td class="r">${fmt(r.n)}</td>
      <td class="r">${safe(r.avg_ic,'-')}</td><td class="r">${safe(r.avg_tv,'-')}</td></tr>`
   ).join(''):'<tr><td colspan="4" style="color:#8b949e;text-align:center">데이터 없음</td></tr>');
-  const rows=st.rows||[];
+  // 강도 가상매매 검증 패널 — 강도구간별 실현 성과(완료 매매만, 실거래 아님)
+  const vt=st.virtual;
+  setHtml('st-virtual', (vt&&vt.buckets&&vt.buckets.length)?
+    vt.buckets.map(b=>`
+      <div class="stat" style="min-width:150px">
+        <div class="v ${clr(b.avg_net)}" style="font-size:18px">${pct(b.avg_net)}</div>
+        <div class="l">강도 ${b.label} — ${fmt(b.n)}건 평균 · 승률 ${b.win}%</div>
+      </div>`).join('')
+    +`<div class="stat"><div class="v" style="font-size:14px">${fmt(vt.done_total)}건</div><div class="l">완료 매매(조인 표본)</div></div>`
+    :'<div style="color:#8b949e;font-size:13px">아직 실현 표본 없음 — 신호가 보유기간을 마치고 paper_audit(일 09:00)이 돌면 누적됩니다.</div>');
+  // 강도 기록 표 — 전역 보관 후 정렬 가능 렌더
+  window._stRows = st.rows||[];
+  window._stSort = window._stSort || {key:null, asc:false};
+  renderStRows();
+}
+
+function renderStRows(){
+  const rows=(window._stRows||[]).slice();
+  const s=window._stSort||{};
+  if(s.key){
+    const numeric=['entry_close','score_ic','ai_prob','score_tv','slot_rank','signal_date'].includes(s.key);
+    rows.sort((a,b)=>{
+      let x=a[s.key], y=b[s.key];
+      if(numeric){ x=Number(x)||(x===0?0:-Infinity); y=Number(y)||(y===0?0:-Infinity); }
+      else { x=String(x||''); y=String(y||''); }
+      return (x<y?-1:x>y?1:0)*(s.asc?1:-1);
+    });
+  }
+  // 헤더 방향 화살표 표시
+  document.querySelectorAll('#st-head th.sortable').forEach(th=>{
+    th.textContent=th.textContent.replace(/ [▲▼]$/,'');
+    const m=th.getAttribute('onclick')||'';
+    if(s.key && m.includes(`'${s.key}'`)) th.textContent+=(s.asc?' ▲':' ▼');
+  });
   setHtml('st-rows', rows.length?rows.map(r=>{
     const msv=String(r.market_strong);
     const ms=(msv==='True'||msv==='true')?'<span style="color:#3fb950">강세</span>'
             :(msv==='False'||msv==='false')?'<span style="color:#8b949e">약세</span>':'';
+    const ic=Number(r.score_ic);
+    const icCls=(!isNaN(ic)&&ic>=6)?'pos':'';
     return `<tr>
       <td class="r" style="font-size:11px">${String(r.signal_date||'')}</td>
       <td style="font-size:11px">${r.account||''}</td>
       <td style="color:#8b949e;font-size:11px">${r.strategy||''}</td>
       <td>${r.code||''} ${r.name||''}</td>
       <td class="r">${fmt(r.entry_close)}</td>
-      <td class="r" style="font-weight:bold">${safe(r.score_ic,'-')}</td>
+      <td class="r ${icCls}" style="font-weight:bold">${safe(r.score_ic,'-')}</td>
       <td class="r">${(r.ai_prob!=null&&r.ai_prob!=='')?(Number(r.ai_prob)*100).toFixed(1)+'%':'-'}</td>
       <td class="r">${safe(r.score_tv,'-')}</td>
       <td class="r">${safe(r.slot_rank,'-')}</td>
       <td>${ms}</td></tr>`;
   }).join(''):'<tr><td colspan="10" style="color:#8b949e;text-align:center">강도 기록 없음</td></tr>');
+}
+
+function sortSt(key){
+  const s=window._stSort||{key:null,asc:false};
+  if(s.key===key) s.asc=!s.asc;         // 같은 열 재클릭 = 방향 토글
+  else { s.key=key; s.asc=false; }      // 새 열 = 내림차순부터
+  window._stSort=s;
+  renderStRows();
 }
 
 function fillBacktest(bt, sc){

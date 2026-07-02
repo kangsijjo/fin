@@ -119,6 +119,12 @@ ORDER_TYPE_BUY = "3"     # 시장가 (모의서버는 지정가/시장가만 지
 ORDER_TYPE_SELL = "3"    # 시장가 — 15:21 주문 시 마감 동시호가 참여 ≈ 종가 체결
 MIN_ORDER_AMOUNT = 100_000   # 슬롯당 이보다 작으면 주문 생략
 
+# 강도 필터(사용자 결정 2026-07-02): score_ic(0~10, 높을수록 강함)가 이 값 미만인 신호는
+# 매수 스킵. 기록 719건 기준 ≥6.0 = 상위 24.5%(신호 과다 완화). 신호 '기록'은 전량 유지
+# (strength_logger 는 계속 모든 신호 채점 — 사후검증 데이터 보존), '집행'만 거른다.
+# 강도 기록이 없는 신호는 통과(fail-open — 로거 장애가 매수 전면 중단으로 번지지 않게).
+MIN_STRENGTH_SCORE = 6.0
+
 
 # ------------------------------------------------------------
 # 공용
@@ -387,6 +393,33 @@ def latest_macro_date():
     return os.path.basename(files[-1])[:-4] if files else None
 
 
+def _strength_map(sigs):
+    """db/signal_strength_log.csv → {(code, strategy): score_ic} (해당 신호일·키움 계좌만).
+
+    강도 필터(MIN_STRENGTH_SCORE)용. 파일 없음/파싱 실패 시 빈 dict(=필터 미적용, fail-open).
+    """
+    path = "./db/signal_strength_log.csv"
+    if not os.path.exists(path) or not sigs:
+        return {}
+    try:
+        dates = {str(s.get("signal_date", "")).replace("-", "") for s in sigs}
+        df = pd.read_csv(path, dtype={"code": str}, encoding="utf-8-sig")
+        df["signal_date"] = df["signal_date"].astype(str).str.replace("-", "")
+        df = df[df["signal_date"].isin(dates)]
+        if "account" in df.columns:   # 키움 계좌 기록만 (KIS 기록과 혼동 방지)
+            df = df[df["account"].astype(str).str.lower().str.startswith("kiwoom")]
+        df["code"] = df["code"].astype(str).str.zfill(6)
+        df["score_ic"] = pd.to_numeric(df["score_ic"], errors="coerce")
+        out = {}
+        for _, r in df.iterrows():
+            if pd.notna(r["score_ic"]):
+                out[(str(r["code"]), str(r.get("strategy", "")))] = float(r["score_ic"])
+        return out
+    except Exception as e:
+        print(f"[warn] 강도 로그 로드 실패(필터 미적용): {e}")
+        return {}
+
+
 def todays_signals():
     """원본 모드: '직전 영업일 신호'를 다음날 아침 매수 — 최신 macro 일자의 신호.
 
@@ -443,6 +476,14 @@ def cmd_buy():
 
     already = today_ordered_codes("buy")
     dep = get_deposit(api)
+    strength = _strength_map(sigs)   # {(code,strategy): score_ic} — 강도 필터용
+    if strength:
+        n_weak = sum(1 for s in sigs
+                     if strength.get((str(s.get("code", "")).zfill(6),
+                                      str(s.get("strategy", ""))), 99) < MIN_STRENGTH_SCORE)
+        print(f"[buy] 강도 필터: score_ic < {MIN_STRENGTH_SCORE} 스킵 예정 {n_weak}건 / 기록 {len(strength)}건")
+    else:
+        print("[buy] 강도 기록 없음 — 강도 필터 미적용(fail-open)")
 
     # ── 전략별 슬롯 현황 ──────────────────────────────────────────────────────
     strategy_map = get_signal_strategy_map()
@@ -509,6 +550,12 @@ def cmd_buy():
                 print(f"    [skip] {code} {name} — 이미 보유/주문됨")
                 continue
             if close <= 0:
+                continue
+
+            # 강도 필터 — score_ic < 6.0 이면 스킵(기록 없으면 통과, 2026-07-02)
+            _sc = strength.get((code, strat))
+            if _sc is not None and _sc < MIN_STRENGTH_SCORE:
+                print(f"    [skip] {code} {name} — 강도 {_sc:.2f} < {MIN_STRENGTH_SCORE:.0f}")
                 continue
 
             # 잔여 빈 슬롯 수로 예산 균등 분배 (각 전략의 실제 배정 수 반영)

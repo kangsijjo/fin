@@ -58,11 +58,20 @@ def _next_trading_close(date_str: str, code_str: str, max_days: int = 5) -> Tupl
     return None, None
 
 
+def _trading_dates():
+    """macro_data/daily 파일명 = 거래일 달력(정렬된 YYYYMMDD 리스트)."""
+    import glob
+    ds = sorted(os.path.basename(f)[:-4] for f in glob.glob(f"{CSV_DIR}/*.csv"))
+    return [d for d in ds if d.isdigit() and len(d) == 8]
+
+
 # ── 2. paper 신호 실제 결과 계산 ─────────────────────────────────────────────
 def compute_paper_returns(paper: pd.DataFrame) -> pd.DataFrame:
+    import bisect
     rows = []
     total = len(paper)
     today_str = datetime.today().strftime("%Y%m%d")
+    cal = _trading_dates()   # 만기일 자체 계산용 거래일 달력
 
     for idx, (_, r) in enumerate(paper.iterrows(), 1):
         code = str(r["code"]).zfill(6)
@@ -70,6 +79,19 @@ def compute_paper_returns(paper: pd.DataFrame) -> pd.DataFrame:
         # target_exit_date 는 NaN(만기 미산출) 가능 — int 변환 전 가드(과거 NaN 행에서 ValueError 크래시, 2026-06-30 수정)
         exit_date_str = str(int(r["target_exit_date"])) if pd.notna(r["target_exit_date"]) else ""
         signal_date   = str(int(r["signal_date"]))
+
+        # 만기일 공란이면 자체 계산 — live_signal 의 _offset_date 는 만기가 '미래'(데이터 밖)면
+        # "" 를 기록하고 이후 갱신되지 않아, 최근 신호 전부가 영구 pending 이던 버그(2026-07-02).
+        # 트레이더와 동일 규약: 진입=신호 다음 거래일, 청산=진입일 포함 holding일째.
+        if not exit_date_str:
+            try:
+                hold = int(float(r.get("holding_days", 0) or 0))
+                ei = bisect.bisect_right(cal, signal_date)      # 진입 인덱스
+                xi = ei + hold - 1
+                if hold > 0 and 0 <= xi < len(cal):
+                    exit_date_str = cal[xi]
+            except Exception:
+                pass
 
         # 만기 미도래(또는 만기일 미산출=pending)
         if (not exit_date_str) or exit_date_str > today_str:

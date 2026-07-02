@@ -236,12 +236,35 @@ class KISMockClient:
             "FNCG_AMT_AUTO_RDPT_YN": "N", "PRCS_DVSN": "01",
             "CTX_AREA_FK100": "", "CTX_AREA_NK100": "",
         }
-        r = requests.get(
-            f"{MOCK_URL}/uapi/domestic-stock/v1/trading/inquire-balance",
-            headers=self._hdrs("VTTC8434R"),
-            params=params, timeout=15,
-        )
-        r.raise_for_status()
+        # 5xx/네트워크 오류는 3회 지수백오프 재시도 — 07-01 KIS 모의서버 일시 500 으로
+        # cmd_buy 가 통째 중단(신호 2건 미매수)된 재발 방지. 4xx 는 즉시 raise(2026-07-02).
+        r = None
+        last_err = None
+        for _attempt in range(3):
+            try:
+                r = requests.get(
+                    f"{MOCK_URL}/uapi/domestic-stock/v1/trading/inquire-balance",
+                    headers=self._hdrs("VTTC8434R"),
+                    params=params, timeout=15,
+                )
+                if r.status_code >= 500:
+                    raise requests.exceptions.HTTPError(
+                        f"{r.status_code} Server Error (잔고조회)", response=r)
+                r.raise_for_status()
+                break
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout,
+                    requests.exceptions.HTTPError) as e:
+                _st = getattr(getattr(e, "response", None), "status_code", None)
+                if _st is not None and 400 <= _st < 500:
+                    raise                       # 4xx = 요청 문제, 재시도 무의미
+                last_err = e
+                if _attempt < 2:
+                    wait_s = 2 * (_attempt + 1)
+                    print(f"[warn] 잔고조회 실패({e}) — {wait_s}초 후 재시도 {_attempt + 2}/3")
+                    time.sleep(wait_s)
+        else:
+            raise last_err
         data = r.json()
         if data.get("rt_cd") != "0":
             raise RuntimeError(f"잔고조회 오류: {data.get('msg1','')}")
