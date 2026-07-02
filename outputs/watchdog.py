@@ -113,10 +113,24 @@ def check_scheduler():
                     pass
     except Exception as e:
         return ("scheduler", "스케줄러 데몬", False, f"로그 읽기 실패: {e}")
+    # 보조 생존신호: scheduler.log 가 최근에 쓰이고 있으면 데몬 활동 중.
+    # (scheduler.py 는 단일스레드라 daily_data 같은 긴 수집(06:30~09시 전후) 동안
+    #  ♥ 잡이 실행되지 못하고, 뉴스 수집이 수백 줄을 쏟아내 ♥ 가 tail 300줄 밖으로
+    #  밀림 → 07:45 점검이 '하트비트 없음' 오탐. 로그 mtime 으로 보완 — 2026-07-02)
+    try:
+        mtime_min = (NOW - datetime.fromtimestamp(os.path.getmtime(path))).total_seconds() / 60.0
+    except Exception:
+        mtime_min = 1e9
     if last is None:
+        if mtime_min <= 15:
+            return ("scheduler", "스케줄러 데몬", True,
+                    f"정상(수집 작업 진행 중 — 로그 활동 {max(0, mtime_min):.0f}분 전, ♥는 작업 후 재개)")
         return ("scheduler", "스케줄러 데몬", False, "하트비트(♥) 기록 없음")
     age_min = (NOW - last).total_seconds() / 60.0
     if age_min > 15:
+        if mtime_min <= 15:
+            return ("scheduler", "스케줄러 데몬", True,
+                    f"정상(수집 작업 진행 중 — 마지막 ♥ {age_min:.0f}분 전이나 로그 활동 {max(0, mtime_min):.0f}분 전)")
         return ("scheduler", "스케줄러 데몬", False,
                 f"응답 없음 — 마지막 ♥ {age_min:.0f}분 전(데몬 죽었을 수 있음). start_scheduler.bat 확인")
     return ("scheduler", "스케줄러 데몬", True, f"정상(♥ {max(0, age_min):.0f}분 전)")

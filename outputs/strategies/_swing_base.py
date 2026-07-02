@@ -98,8 +98,11 @@ def _make_trades_for_signals(df_with_sig, holding_days, strategy_name,
 
     # 기업행위(액면분할/병합 등) 포함 매매 제외 — 가격 데이터가 무수정주가라
     # 보유 중 기업행위가 끼면 손익이 왜곡됨. (진짜 폭락/폭등은 그대로 보존)
+    # ※ sig 가 비었으면 스킵 — pandas 는 빈 df.apply(axis=1)가 object 빈 Series 를 반환해
+    #   sig[keep] 이 '컬럼 선택'으로 오동작(컬럼 전멸 → 이후 KeyError 'exit_price').
+    #   h52w_short/cred_dec 신호 0건에서 실제 발생(2026-07-02 수정).
     ca_map = find_corporate_action_dates(df)
-    if ca_map:
+    if ca_map and len(sig):
         before = len(sig)
         keep = sig.apply(lambda r: not _trade_has_corporate_action(
             ca_map, r["code"], r["entry_date_next"], r["exit_date_next"]), axis=1)
