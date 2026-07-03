@@ -36,6 +36,7 @@ import sys
 import csv
 import time
 import json
+import glob as _glob
 from contextlib import contextmanager
 from datetime import datetime
 
@@ -653,6 +654,30 @@ def _prev_close_map():
         return {}
 
 
+def _held_strategy_map():
+    """주문로그 전체에서 {code → 마지막 '성공 매수'의 strategy}.
+
+    get_signal_strategy_map 은 '최신 신호' 기준이라 보유 중 다른 전략 신호가 또 나면
+    익절 목표%가 오배정될 수 있음(예: rsi_vol +20% 보유인데 high_52w 신호 → +50% 발주).
+    실제 매수 시점의 전략이 진실원천(2026-07-03)."""
+    out = {}
+    try:
+        for f in sorted(_glob.glob(f"{ORDERS_DIR}/orders_*.csv")):
+            try:
+                df = pd.read_csv(f, dtype={"code": str})
+            except Exception:
+                continue
+            if "side" not in df.columns:
+                continue
+            b = df[(df["side"] == "buy")
+                   & df["ok"].astype(str).str.lower().isin(("true", "1"))]
+            for _, r in b.iterrows():   # 파일 오름차순 순회 → 최근 매수가 덮어씀
+                out[str(r.get("code", "")).zfill(6)] = str(r.get("strategy", "") or "")
+    except Exception:
+        pass
+    return out
+
+
 def _today_tp_orders():
     """오늘 발주한 익절 지정가 {code: order_no} (side='tp_sell', ok=True)."""
     path = f"{ORDERS_DIR}/orders_{datetime.today():%Y%m%d}.csv"
@@ -720,12 +745,13 @@ def cmd_place_targets(api=None, pos=None):
         print("[target] 보유 없음 — 종료")
         return
     strategy_map = get_signal_strategy_map()
+    held_map = _held_strategy_map()   # 매수 당시 전략 우선(신호맵은 폴백)
     placed = set(_today_tp_orders().keys()) | today_ordered_codes("tp_sell")
     prev_close = _prev_close_map()
     n = 0
     for code in sorted(pos.keys()):
         p = pos[code]
-        strat = strategy_map.get(str(code).zfill(6), "")
+        strat = held_map.get(str(code).zfill(6)) or strategy_map.get(str(code).zfill(6), "")
         tgt = PROFIT_TARGET.get(strat)
         if tgt is None or code in placed:
             continue
