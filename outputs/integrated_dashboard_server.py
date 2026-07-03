@@ -606,9 +606,9 @@ _KW_ENTRY = {
     "rsi_vol":       "RSI(14) < 30 + 당일 거래대금 > 20일평균 ×2.0(거래량 급증) + 거래대금 ≥ 10억 + 강도(score_ic) ≥ 6",
 }
 _KW_EXIT = {
-    "high_52w_filt": "진입 20영업일째 종가 (손절 없음·시간청산)",
+    "high_52w_filt": "익절 +50% 장중 지정가(매일 아침 발주) 또는 진입 20영업일째 종가 (손절 없음)",
     "rsi_reversal":  "진입 5영업일째 종가 (손절 없음)",
-    "rsi_vol":       "진입 7영업일째 종가 (손절 없음)",
+    "rsi_vol":       "익절 +20% 장중 지정가(매일 아침 발주) 또는 진입 7영업일째 종가 (손절 없음)",
 }
 
 
@@ -726,6 +726,17 @@ def get_kis_mock(date_from="", date_to=""):
 
 
 # ── 4c. 신호 강도 백데이터 (signal_strength_log.csv) ──────────────────────────
+def get_ai_paper():
+    """AI/강도 가상매매 실행 결과(ai_paper_trader.py 산출 JSON) — 표시 전용."""
+    p = BASE / "db" / "ai_paper_result.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        return {"error": str(e)[:200]}
+
+
 def get_strength(limit=300):
     """
     strength_logger.py 가 누적한 신호 강도 원천값을 요약+최근기록으로 반환.
@@ -803,6 +814,33 @@ def get_strength(limit=300):
                             "win": round(float((g["net_pct"] > 0).mean() * 100), 1),
                         })
                 out["virtual"] = {"done_total": int(len(j)), "buckets": buckets}
+
+            # AI 가상매매 검증 — ai_prob(모델 big-win 확률) 구간별 실현 성과.
+            # ai_prob 는 차원버그 수정(6/29) 후 6/30부터 기록 → 첫 완료 표본은 ~7/7 이후 누적.
+            if "ai_prob" in df.columns:
+                sa = df[pd.to_numeric(df["ai_prob"], errors="coerce").notna()].copy()
+                sa["ai_prob"] = pd.to_numeric(sa["ai_prob"], errors="coerce")
+                sa["signal_date"] = sa["signal_date"].astype(str).str.replace("-", "")
+                ja = sa.merge(pa[["signal_date", "code", "net_pct"]],
+                              on=["signal_date", "code"], how="inner").dropna(subset=["net_pct"])
+                out["virtual_ai"] = {"done_total": int(len(ja)),
+                                     "logged_total": int(len(sa)), "buckets": []}
+                if len(ja) >= 9:   # 3분위 최소 표본
+                    try:
+                        ja["q"] = pd.qcut(ja["ai_prob"], 3, labels=False, duplicates="drop")
+                        bks = []
+                        for qi, lab in [(2, "상위⅓"), (1, "중위⅓"), (0, "하위⅓")]:
+                            g = ja[ja["q"] == qi]
+                            if len(g):
+                                bks.append({
+                                    "label": f"{lab} ({g['ai_prob'].min():.2f}~{g['ai_prob'].max():.2f})",
+                                    "n": int(len(g)),
+                                    "avg_net": round(float(g["net_pct"].mean()), 2),
+                                    "win": round(float((g["net_pct"] > 0).mean() * 100), 1),
+                                })
+                        out["virtual_ai"]["buckets"] = bks
+                    except Exception:
+                        pass
     except Exception:
         pass
 
@@ -1369,6 +1407,7 @@ def api_all():
             "mock":       _safe(get_kiwoom_mock, df, dt),
             "kis":        _safe(get_kis_mock, df, dt),
             "strength":   _safe(get_strength),
+            "ai_paper":   _safe(get_ai_paper),
             "pvbt":       _safe(get_paper_vs_bt),
             "ai":         _safe(get_ai_status),
             "ai_registry": _safe(get_ai_registry),
@@ -1876,6 +1915,20 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
     <div class="stats-row" id="st-virtual"><div style="color:#8b949e;font-size:13px">로딩중...</div></div>
   </div>
   <div class="section">
+    <h2>AI 가상매매 검증 <span style="color:#8b949e;font-size:12px;font-weight:400">&mdash; AI확률(ai_prob, big-win 예측) 분위별 실현 성과. USE_AI=False(매매 미개입) &middot; 기록은 2026-06-30부터(차원버그 수정 후) &middot; 첫 완료 표본 ~07-07 예상</span></h2>
+    <div class="stats-row" id="st-virtual-ai"><div style="color:#8b949e;font-size:13px">로딩중...</div></div>
+  </div>
+  <div class="section">
+    <h2>가상매매 실행 — AI vs 강도 포트폴리오 <span id="ap-ts" style="color:#8b949e;font-size:12px;font-weight:400"></span></h2>
+    <div style="color:#8b949e;font-size:12px;margin-bottom:8px">순수 장부 시뮬(브로커 미사용) &middot; 각 10슬롯 &middot; 시작 1,000만 &middot; 06-30~ &middot; 매일 18:31 재계산 &middot; 진입=신호일 종가 / 청산=만기 종가(익절·손절 없음 — 선별 효과만 분리)</div>
+    <div class="stats-row" id="ap-stats"><div style="color:#8b949e;font-size:13px">로딩중...</div></div>
+    <table style="margin-top:10px"><thead><tr>
+      <th>포트폴리오</th><th>종목</th><th>전략</th><th class="r">진입일</th><th class="r">점수</th><th class="r">평가손익률</th>
+    </tr></thead>
+    <tbody id="ap-pos"><tr><td colspan="6" style="color:#8b949e;text-align:center">보유 없음</td></tr></tbody>
+    </table>
+  </div>
+  <div class="section">
     <h2>강도 기록 (최근 300건) <span style="color:#8b949e;font-size:11px;font-weight:400">&mdash; 열 제목 클릭 = 정렬(다시 클릭 = 반대방향)</span></h2>
     <div style="color:#8b949e;font-size:12px;margin-bottom:8px">강도(IC)=IC가중 통합 팩터점수(0~10, 높을수록 강함) · 거래대금순위=당일 전체순위(1=최대) · 슬롯순위=같은 전략 내 강도 우선순위(1=최강)</div>
     <table><thead><tr id="st-head">
@@ -2184,7 +2237,8 @@ function fillOrders(elId, cntId, orders, total){
   const cnt=document.getElementById(cntId);
   if(cnt) cnt.textContent = total ? `(전체 ${fmt(total)}건 중 최근 ${rows.length})` : '';
   tb.innerHTML = rows.length ? rows.map(o=>{
-    const sell=String(o.side||'').toLowerCase()==='sell';
+    const sell=String(o.side||'').toLowerCase().includes('sell');   // 'sell' + 'tp_sell'(익절 지정가)
+    const tp=String(o.side||'').toLowerCase()==='tp_sell';
     const d=String(o.date||'');
     const dstr=d.length>=8 ? d.slice(4,6)+'/'+d.slice(6,8)+' ' : '';
     const fail=(o.ok===false || o.ok==='False');
@@ -2193,7 +2247,7 @@ function fillOrders(elId, cntId, orders, total){
     const pnlPct = hasPnl ? `<span class="${clr(o.pnl_pct)}">${pct(o.pnl_pct)}</span>` : '';
     return `<tr>
       <td class="r" style="font-size:11px">${dstr}${o.time||''}</td>
-      <td class="${sell?'neg':'pos'}">${sell?'매도':'매수'}</td>
+      <td class="${sell?'neg':'pos'}">${tp?'익절주문':(sell?'매도':'매수')}</td>
       <td>${o.name||''} <span style="color:#8b949e;font-size:11px">${o.code||''}</span></td>
       <td style="color:#8b949e;font-size:11px">${o.strategy||''}</td>
       <td class="r">${fmt(o.qty)}</td>
@@ -2304,10 +2358,47 @@ function fillStrength(st){
       </div>`).join('')
     +`<div class="stat"><div class="v" style="font-size:14px">${fmt(vt.done_total)}건</div><div class="l">완료 매매(조인 표본)</div></div>`
     :'<div style="color:#8b949e;font-size:13px">아직 실현 표본 없음 — 신호가 보유기간을 마치고 paper_audit(일 09:00)이 돌면 누적됩니다.</div>');
+  // AI 가상매매 검증 패널 — ai_prob 분위별 실현 성과(표본 차면 자동 표시)
+  const va=st.virtual_ai;
+  setHtml('st-virtual-ai', (va&&va.buckets&&va.buckets.length)?
+    va.buckets.map(b=>`
+      <div class="stat" style="min-width:170px">
+        <div class="v ${clr(b.avg_net)}" style="font-size:18px">${pct(b.avg_net)}</div>
+        <div class="l">AI확률 ${b.label} — ${fmt(b.n)}건 · 승률 ${b.win}%</div>
+      </div>`).join('')
+    +`<div class="stat"><div class="v" style="font-size:14px">${fmt(va.done_total)}건</div><div class="l">완료 매매(조인 표본)</div></div>`
+    :`<div style="color:#8b949e;font-size:13px">${va?`AI확률 기록 ${fmt(va.logged_total)}건 누적 중 — 완료 매매 ${fmt(va.done_total)}건(9건 이상부터 분위 표시). ai_prob 는 06-30부터 기록되어 첫 만기(rsi 5일)가 ~07-07 도래.`:'AI확률 기록 없음'}</div>`);
   // 강도 기록 표 — 전역 보관 후 정렬 가능 렌더
   window._stRows = st.rows||[];
   window._stSort = window._stSort || {key:null, asc:false};
   renderStRows();
+}
+
+function fillAiPaper(ap){
+  const el=document.getElementById('ap-stats'); if(!el) return;
+  if(!ap||!ap.portfolios){ el.innerHTML='<div style="color:#8b949e;font-size:13px">첫 실행 대기 — 18:31 신호 생성 후 생성됩니다 (수동: 제어판 없이 python ai_paper_trader.py)</div>'; return; }
+  const ts=document.getElementById('ap-ts'); if(ts) ts.textContent='('+(ap.updated||'')+' 갱신)';
+  const P=ap.portfolios;
+  el.innerHTML=['ai','strength'].map(k=>{
+    const p=P[k]; if(!p) return '';
+    const nm=k==='ai'?'🤖 AI(ai_prob)':'💪 강도(score_ic)';
+    return `<div class="stat" style="min-width:210px">
+      <div class="v ${clr(p.ret_pct)}" style="font-size:19px">${fmt(p.equity)}원 <span style="font-size:13px">(${pct(p.ret_pct)})</span></div>
+      <div class="l">${nm} — 보유 ${p.n_pos} · 완료 ${p.n_trades}건${p.win_pct!=null?' · 승률 '+p.win_pct+'%':''}${p.avg_net!=null?' · 평균 '+pct(p.avg_net):''}</div>
+    </div>`;
+  }).join('');
+  const rows=[];
+  ['ai','strength'].forEach(k=>{
+    (P[k]&&P[k].positions||[]).slice(0,10).forEach(r=>rows.push({k,...r}));
+  });
+  setHtml('ap-pos', rows.length?rows.map(r=>`<tr>
+    <td>${r.k==='ai'?'🤖 AI':'💪 강도'}</td>
+    <td>${r.code||''} ${r.name||''}</td>
+    <td style="color:#8b949e;font-size:11px">${r.strategy||''}</td>
+    <td class="r" style="font-size:11px">${r.entry_date||''}</td>
+    <td class="r">${r.score!=null?r.score:''}</td>
+    <td class="r ${clr(r.pnl_pct)}">${pct(r.pnl_pct)}</td></tr>`).join('')
+    :'<tr><td colspan="6" style="color:#8b949e;text-align:center">보유 없음</td></tr>');
 }
 
 function renderStRows(){
@@ -2616,6 +2707,7 @@ async function load(){
   _r(fillCheonok, d.cheonok);
   _r(fillMock, d.mock, d.kis);
   _r(fillStrength, d.strength);
+  _r(fillAiPaper, d.ai_paper);
   _r(fillRunButtons, d);
   _r(fillBacktest, d.bt, d.sc);
   _r(fillLab, d.lab);
