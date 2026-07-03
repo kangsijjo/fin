@@ -2381,7 +2381,7 @@ function fillAiPaper(ap){
   const P=ap.portfolios;
   el.innerHTML=['ai','strength'].map(k=>{
     const p=P[k]; if(!p) return '';
-    const nm=k==='ai'?'🤖 AI(ai_prob)':'💪 강도(score_ic)';
+    const nm=k==='ai'?'🤖 AI(ai_prob·필터없음)':'💪 강도(score_ic≥6 — 라이브 룰)';
     return `<div class="stat" style="min-width:210px">
       <div class="v ${clr(p.ret_pct)}" style="font-size:19px">${fmt(p.equity)}원 <span style="font-size:13px">(${pct(p.ret_pct)})</span></div>
       <div class="l">${nm} — 보유 ${p.n_pos} · 완료 ${p.n_trades}건${p.win_pct!=null?' · 승률 '+p.win_pct+'%':''}${p.avg_net!=null?' · 평균 '+pct(p.avg_net):''}</div>

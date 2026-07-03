@@ -5,8 +5,9 @@ ai_paper_trader.py — AI/강도 '가상매매 실행' (순수 장부 시뮬 —
 매번 결정론적으로 재계산(strategy_lab 방식 — 상태파일 없음 = 드리프트/복구 걱정 없음).
 
 두 포트폴리오(각 10슬롯 · 시작 1,000만 · 2026-06-30~):
-  ai       : 당일 신호를 ai_prob(meta_model_v4 big-win 확률) 내림차순으로 슬롯 채움
-  strength : 동일 신호를 score_ic(IC 강도) 내림차순으로 채움
+  ai       : 당일 신호를 ai_prob(meta_model_v4 big-win 확률) 내림차순으로 슬롯 채움 (필터 없음)
+  strength : 동일 신호를 score_ic(IC 강도) 내림차순 + **6.0 미만 스킵**(라이브 키움 매수필터와
+             동일 — 슬롯 1순위여도 6점 미만이면 미진입, 2026-07-03 사용자 확인 반영)
 → 실제 모의계좌(균등배분·거래대금순)와 3자 비교해 'AI/강도 선별이 돈이 되는가'를 실측.
 
 규약(paper_audit 과 동일 — 검증 패널과 비교 가능):
@@ -93,8 +94,11 @@ def _px(closes, d, code):
     return float(v) if v is not None and v == v and v > 0 else None
 
 
-def simulate(sig, cal_all, cal, closes, rank_col):
-    """rank_col(ai_prob | score_ic) 내림차순 슬롯 채움 시뮬 → 결과 dict."""
+def simulate(sig, cal_all, cal, closes, rank_col, min_score=None):
+    """rank_col(ai_prob | score_ic) 내림차순 슬롯 채움 시뮬 → 결과 dict.
+
+    min_score: 이 값 미만 신호는 슬롯이 비어도 미진입(현금 보유) — 라이브 필터 재현용.
+    """
     idx = {d: i for i, d in enumerate(cal_all)}
     cash = float(CAPITAL0)
     positions = {}     # code -> {name,strategy,entry_date,entry_px,invest,exit_idx,score}
@@ -131,6 +135,8 @@ def simulate(sig, cal_all, cal, closes, rank_col):
         g = by_date.get(d)
         if g is not None:
             cand = g[g[rank_col].notna()].sort_values(rank_col, ascending=False)
+            if min_score is not None:   # 라이브 필터 재현 — 1순위여도 임계 미만이면 미진입
+                cand = cand[cand[rank_col] >= min_score]
             for _, r in cand.iterrows():
                 free = SLOTS - len(positions)
                 if free <= 0:
@@ -199,7 +205,7 @@ def main():
         "start": START, "capital0": CAPITAL0, "slots": SLOTS, "cost_pct": COST_PCT,
         "portfolios": {
             "ai":       simulate(sig, cal_all, cal, closes, "ai_prob"),
-            "strength": simulate(sig, cal_all, cal, closes, "score_ic"),
+            "strength": simulate(sig, cal_all, cal, closes, "score_ic", min_score=6.0),
         },
     }
     os.makedirs("./db", exist_ok=True)
