@@ -117,6 +117,16 @@ STRATEGY_MAX_SLOTS = {
 STRATEGY_PRIORITY = ["high_52w_filt", "rsi_reversal", "rsi_vol"]
 ORDER_TYPE_BUY = "3"     # 시장가 (모의서버는 지정가/시장가만 지원)
 ORDER_TYPE_SELL = "3"    # 시장가 — 15:21 주문 시 마감 동시호가 참여 ≈ 종가 체결
+ORDER_TYPE_LIMIT = "0"   # 지정가 (익절 목표가 매도용)
+
+# 수익실현(익절) 목표 — profit_sweep.py 장중 지정가(limit) 의미론 검증 채택(2026-07-02 사용자 결정).
+#   rsi_vol +20%: full Δ+0.392%p / fwd Δ+0.611%p (PF 1.15→1.24, +15~50% 전 구간 양수)
+#   high_52w_filt +50%: full Δ+0.318 / fwd Δ+0.347 (50~80 구간도 전부 양수 — 상향 조정 여지)
+#   KIS 3전략·rsi_reversal 은 검증 결과 효과 없음/손해라 미적용.
+# KRX 주문은 '당일 유효' + 가격제한폭(±30%) 내에서만 가능 → 한 번 걸어두기가 불가능.
+# → 매일 아침(cmd_daily) 보유종목에 당일 지정가를 재발주(자가치유). 만기일 15:21 은
+#   cmd_sell 이 미체결 지정가를 취소(kt10003) 후 시장가 청산(백스톱 유지).
+PROFIT_TARGET = {"rsi_vol": 0.20, "high_52w_filt": 0.50}
 MIN_ORDER_AMOUNT = 100_000   # 슬롯당 이보다 작으면 주문 생략
 
 # 강도 필터(사용자 결정 2026-07-02): score_ic(0~10, 높을수록 강함)가 이 값 미만인 신호는
@@ -180,6 +190,19 @@ def _to_int(v, default=0):
         return int(str(v).replace(",", "").replace("+", "").strip())
     except Exception:
         return default
+
+
+def _tick_floor(p):
+    """KRX 호가단위로 내림 — 지정가 유효가격(2023 코스피/코스닥 통합 호가체계)."""
+    p = float(p)
+    if p < 2_000:    t = 1
+    elif p < 5_000:  t = 5
+    elif p < 20_000: t = 10
+    elif p < 50_000: t = 50
+    elif p < 200_000: t = 100
+    elif p < 500_000: t = 500
+    else:            t = 1_000
+    return int(p // t * t)
 
 
 def _to_float(v, default=0.0):
@@ -611,6 +634,133 @@ def cmd_buy():
 
 
 # ------------------------------------------------------------
+# 익절(수익실현) 지정가 — PROFIT_TARGET 전략 보유분에 당일 지정가 매도
+# ------------------------------------------------------------
+def _prev_close_map():
+    """최신 macro CSV(전일)의 종가 맵 — 오늘 가격제한폭(전일종가×1.3) 판정용."""
+    d = latest_macro_date()
+    if not d:
+        return {}
+    path = f"./macro_data/daily/{d}.csv"
+    if not os.path.exists(path):
+        return {}
+    try:
+        df = pd.read_csv(path, dtype={"code": str}, encoding="utf-8-sig")
+        df["code"] = df["code"].astype(str).str.zfill(6)
+        col = next((c for c in df.columns if c in ("close", "종가")), None)
+        return dict(zip(df["code"], pd.to_numeric(df[col], errors="coerce"))) if col else {}
+    except Exception:
+        return {}
+
+
+def _today_tp_orders():
+    """오늘 발주한 익절 지정가 {code: order_no} (side='tp_sell', ok=True)."""
+    path = f"{ORDERS_DIR}/orders_{datetime.today():%Y%m%d}.csv"
+    if not os.path.exists(path):
+        return {}
+    try:
+        df = pd.read_csv(path, dtype={"code": str, "order_no": str})
+        df = df[(df["side"] == "tp_sell")
+                & df["ok"].astype(str).str.lower().isin(("true", "1"))]
+        return {str(r["code"]).zfill(6): str(r.get("order_no", "") or "")
+                for _, r in df.iterrows()}
+    except Exception:
+        return {}
+
+
+def _reconcile_tp_fills(pos):
+    """오늘 익절 지정가가 '체결된' 종목(발주됐는데 더는 미보유)을 매도 체결로 기록/알림.
+
+    지정가 체결은 브로커 쪽에서 일어나 로그가 안 남으므로, 오후 실행 시점에
+    발주기록 vs 현재 보유를 대조해 합성 sell 행을 남긴다(손익 표시·요약용)."""
+    tp = _today_tp_orders()
+    if not tp:
+        return
+    sold_logged = today_ordered_codes("sell")
+    path = f"{ORDERS_DIR}/orders_{datetime.today():%Y%m%d}.csv"
+    try:
+        od = pd.read_csv(path, dtype={"code": str})
+        od = od[od["side"] == "tp_sell"]
+    except Exception:
+        return
+    for code, _ono in tp.items():
+        if code in pos or code in sold_logged:
+            continue   # 아직 보유 = 미체결 / 이미 sell 기록 있음
+        row = od[od["code"].astype(str).str.zfill(6) == code].tail(1)
+        if row.empty:
+            continue
+        r = row.iloc[0]
+        qty, px = _to_int(r.get("qty", 0)), _to_int(r.get("price", 0))
+        name = str(r.get("name", ""))
+        print(f"  [익절체결] {code} {name} {qty}주 @ {px:,} (지정가 도달)")
+        try:
+            import notifier
+            notifier.queue_fill("sell", name, code, qty, px)
+        except Exception:
+            pass
+        log_order({"time": datetime.now().strftime("%H:%M:%S"), "side": "sell",
+                   "code": code, "name": name, "strategy": str(r.get("strategy", "")),
+                   "qty": qty, "price": px, "order_type": ORDER_TYPE_LIMIT,
+                   "ok": True, "order_no": str(r.get("order_no", "")),
+                   "msg": "profit_target 체결(잔고대조 추정)"})
+
+
+def cmd_place_targets(api=None, pos=None):
+    """PROFIT_TARGET 전략 보유종목에 '당일 유효' 익절 지정가 매도 발주.
+
+    - 목표가 = 브로커 매입평균 × (1+목표) 를 호가단위 내림.
+    - 목표가가 오늘 가격제한폭(전일종가×약1.3) 밖이면 스킵 — 오늘 도달 불가, 내일 재시도.
+    - 당일 중복 발주 방지(side='tp_sell' 기록 대조). 주문은 장마감 시 자동 만료 →
+      매일 아침 재발주로 자가치유(레지스트리 불필요).
+    """
+    guard_mock_only()
+    api = api or get_api()
+    pos = pos if pos is not None else get_positions(api)
+    if not pos:
+        print("[target] 보유 없음 — 종료")
+        return
+    strategy_map = get_signal_strategy_map()
+    placed = set(_today_tp_orders().keys()) | today_ordered_codes("tp_sell")
+    prev_close = _prev_close_map()
+    n = 0
+    for code in sorted(pos.keys()):
+        p = pos[code]
+        strat = strategy_map.get(str(code).zfill(6), "")
+        tgt = PROFIT_TARGET.get(strat)
+        if tgt is None or code in placed:
+            continue
+        entry = float(p.get("avg_price", 0) or 0)
+        qty = _to_int(p.get("qty", 0))
+        name = str(p.get("name", ""))
+        if entry <= 0 or qty <= 0:
+            print(f"  [skip] {code} {name} — 매입평균 미확인({entry}) → 발주 보류")
+            continue
+        tgt_px = _tick_floor(entry * (1 + tgt))
+        pc = float(prev_close.get(code, 0) or 0)
+        if pc > 0 and tgt_px > pc * 1.295:   # 오늘 상한가 밖 — 도달 불가
+            print(f"  [skip] {code} {name} — 목표 {tgt_px:,} > 오늘 상한가(≈{int(pc * 1.3):,})")
+            continue
+        try:
+            r = api.order.stock_sell_order_request_kt10001(
+                dmst_stex_tp="KRX", stk_cd=code, ord_qty=str(qty),
+                trde_tp=ORDER_TYPE_LIMIT, ord_uv=str(tgt_px))
+            ono = _pick(r, "ord_no", "odno", default="")
+            print(f"  [익절지정가] {code} {name} {qty}주 @ {tgt_px:,} (+{tgt * 100:.0f}%) → {ono}")
+            log_order({"time": datetime.now().strftime("%H:%M:%S"), "side": "tp_sell",
+                       "code": code, "name": name, "strategy": strat,
+                       "qty": qty, "price": tgt_px, "order_type": ORDER_TYPE_LIMIT,
+                       "ok": True, "order_no": ono, "msg": f"target+{tgt * 100:.0f}%"})
+            n += 1
+        except Exception as e:
+            print(f"  [실패] {code} {name} 익절지정가: {e}")
+            log_order({"time": datetime.now().strftime("%H:%M:%S"), "side": "tp_sell",
+                       "code": code, "name": name, "strategy": strat,
+                       "qty": qty, "price": tgt_px, "order_type": ORDER_TYPE_LIMIT,
+                       "ok": False, "order_no": "", "msg": str(e)[:200]})
+    print(f"[target] 익절 지정가 {n}건 발주")
+
+
+# ------------------------------------------------------------
 # 매도 — 40영업일 도달
 # ------------------------------------------------------------
 def codes_due_for_exit():
@@ -670,14 +820,21 @@ def _today_close_map():
 
 def cmd_sell():
     guard_mock_only()
+    api = get_api()
+    pos = get_positions(api)
+    _reconcile_tp_fills(pos)   # 오늘 익절 지정가 체결분 기록/알림 (만기 없어도 매 오후 수행)
     due = codes_due_for_exit()
     if not due:
         print("[sell] 청산 대상 없음 — 종료")
+        try:
+            import notifier
+            notifier.flush_fills("📌 키움 익절 체결")
+        except Exception:
+            pass
         return
-    api = get_api()
-    pos = get_positions(api)
     already = today_ordered_codes("sell")
     close_map = _today_close_map()
+    tp_open = _today_tp_orders()   # 만기청산 전 취소할 미체결 익절 지정가
 
     strategy_map = get_signal_strategy_map()
     targets = due & set(pos.keys()) - already
@@ -688,6 +845,16 @@ def cmd_sell():
         name = pos[code]["name"]
         strat = strategy_map.get(str(code).zfill(6), "")
         ref_px = int(close_map.get(code, 0))
+        # 미체결 익절 지정가가 물량을 잠그고 있으면 먼저 취소(잔량 전부) 후 시장가 청산
+        if code in tp_open:
+            try:
+                api.order.stock_cancel_order_request_kt10003(
+                    dmst_stex_tp="KRX", orig_ord_no=str(tp_open[code]),
+                    stk_cd=code, cncl_qty="0")
+                print(f"  [취소] {code} {name} 미체결 익절 지정가({tp_open[code]}) 취소")
+                time.sleep(0.4)
+            except Exception as e:
+                print(f"  [warn] {code} 익절 지정가 취소 실패({e}) — 시장가 매도 시도 계속")
         try:
             r = api.order.stock_sell_order_request_kt10001(
                 dmst_stex_tp="KRX", stk_cd=code, ord_qty=str(qty),
@@ -723,12 +890,15 @@ def cmd_daily():
     12시 이후: 매도 후 매수 (만기 청산 후 신규 진입).
     """
     if datetime.now().hour < 12:
-        print("[daily] 오전 모드 — 매수만")
+        print("[daily] 오전 모드 — 매수 후 익절 지정가")
         cmd_buy()
+        time.sleep(10)          # 시장가 매수 체결이 잔고에 반영될 시간
+        cmd_place_targets()     # 보유종목 당일 익절 지정가 발주(어제 발주분은 마감 시 만료됨)
     else:
         print("[daily] 오후 모드 — 매도 후 매수")
         cmd_sell()
         cmd_buy()
+        # 오후 매수분 익절 지정가는 다음날 아침 cmd_place_targets 가 재발주(당일주문 곧 만료라 생략)
     cmd_status()
 
 
@@ -745,13 +915,15 @@ if __name__ == "__main__":
             cmd_buy()
         elif cmd == "sell":
             cmd_sell()
+        elif cmd == "targets":
+            cmd_place_targets()
         elif cmd == "reconcile":
             cmd_reconcile()
         elif cmd == "daily":
             cmd_daily()
         else:
             print(f"[main] 알 수 없는 명령: {cmd}")
-            print("사용법: python kiwoom_trader.py [status|buy|sell|reconcile|daily]")
+            print("사용법: python kiwoom_trader.py [status|buy|sell|targets|reconcile|daily]")
             sys.exit(1)
 
     # 체결 묶음 알림 — 이번 실행에서 쌓인 매수/매도를 1통으로 (없으면 전송 안 함)
