@@ -262,7 +262,22 @@ schedule.every().saturday.at("07:00").do(weekend_audit_job)       # 주말 갭 �
 schedule.every().saturday.at("08:00").do(kiwoom_weekly_job)       # 키움 주간 수집 (신용/대차)
 schedule.every().sunday.at("07:00").do(weekly_job)                # 주간 재학습
 schedule.every().day.at("06:00").do(monthly_sector_update_job)    # 월간 섹터 분류 갱신 (매월 1일만 실제 실행)
-schedule.every(5).minutes.do(heartbeat_job)                       # 살아있음 + 다음 작업
+# heartbeat 는 schedule 등록 대신 '별도 데몬 스레드'로 상시 발화(아래 _heartbeat_thread).
+# schedule 등록 방식은 단일스레드라 긴 수집 자식작업(토요일 갭백필 2h+ 등) 동안 ♥ 가
+# 끊겨 워치독 오탐을 2회(07-02·07-04) 유발했음 — 원천 해결(2026-07-05).
+
+
+def _heartbeat_thread():
+    """♥ 를 5분마다 별도 스레드에서 기록 — 메인 루프가 블로킹돼도 생존신호 유지.
+
+    schedule.jobs 는 읽기만 하므로(heartbeat_job 내부) 스레드 충돌 없음.
+    log() 는 print(flush=True)라 즉시 scheduler.log 에 반영(워치독 mtime 신호도 갱신)."""
+    while True:
+        try:
+            heartbeat_job()
+        except Exception:
+            pass
+        time.sleep(300)
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == 'all':
@@ -295,6 +310,10 @@ if __name__ == "__main__":
         # 발화하지 못해 데이터 수집이 통째로 멈췄음(korea/supply/usa 6일+ 정체).
         # schedule.run_pending() 를 주기적으로 호출해야 등록된 잡이 시각에 실행됨.
         # heartbeat_job(5분) 이 scheduler.log 에 ♥ 를 찍어 생존을 확인시켜 줌.
+        # 하트비트 데몬 스레드 기동 — 수집이 몇 시간 블로킹돼도 ♥ 는 계속 찍힘(2026-07-05)
+        import threading
+        threading.Thread(target=_heartbeat_thread, daemon=True, name="heartbeat").start()
+
         log("스케줄러 상주 루프 진입 (30초 주기) — Ctrl+C 또는 창 종료로 중지")
         while True:
             try:

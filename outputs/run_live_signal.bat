@@ -20,7 +20,16 @@ if not exist .venv\Scripts\python.exe (
 )
 
 .venv\Scripts\python.exe -u live_signal.py >> %LOGFILE% 2>&1
-echo [%date% %time%] Live signal done. ExitCode=%errorlevel% >> %LOGFILE%
+set "EC=%errorlevel%"
+echo [%date% %time%] Live signal done. ExitCode=%EC% >> %LOGFILE%
+
+:: gating (2026-07-05): if live_signal failed, skip strategy_lab (same loader -> would
+:: fail/waste ~10min on bad data). daily_audit + daily_summary ALWAYS run below --
+:: they are the REPORTERS (audit scans Traceback and pushes telegram warning).
+if not "%EC%"=="0" (
+    echo [%date% %time%] live_signal FAILED - skipping strategy_lab >> %LOGFILE%
+    goto :audit
+)
 
 :: strategy lab (forward accumulation): same data, 29-strategy backtest -> forward aggregate.
 :: deterministic, so a daily re-run auto-accumulates trades completed after LAB_START.
@@ -28,6 +37,7 @@ echo [%date% %time%] strategy_lab starting >> %LOGFILE%
 .venv\Scripts\python.exe -u strategy_lab.py >> %LOGFILE% 2>&1
 echo [%date% %time%] strategy_lab done. ExitCode=%errorlevel% >> %LOGFILE%
 
+:audit
 :: daily self-audit: one-page summary of today's automation to logs\daily_audit_DATE.log
 .venv\Scripts\python.exe -u daily_audit.py >> %LOGFILE% 2>&1
 
