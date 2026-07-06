@@ -239,8 +239,11 @@ def run(backfill=False, since='2022-01-01', limit=None, force=False):
                 if client is None:
                     client = KiwoomClient()
                     if not client.get_token():
-                        logger.error("키움 토큰 발급 실패 - 중단")
-                        return
+                        logger.error("키움 토큰 발급 실패 - 중단 "
+                                     "(8050=지정단말기 인증이면 키움 홈페이지에서 이 PC 등록/해제 필요)")
+                        # exit 0 으로 끝나면 스케줄러가 '✔ 완료'로 오인(3초 조용한 실패,
+                        # 2026-07-04 실제 발생) → 비0 종료로 ERROR/failures.log 에 남긴다.
+                        sys.exit(1)
 
                 if gap_c is not None:
                     total_c += collect_credit(
