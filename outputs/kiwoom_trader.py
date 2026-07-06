@@ -337,10 +337,15 @@ def _snapshot_codes():
 
 
 def cmd_reconcile():
-    """잔고 정합성 점검 — 브로커 보유 vs 직전 스냅샷. 불일치 시 텔레그램 경고."""
+    """잔고 정합성 점검 — 브로커 보유 vs 직전 스냅샷(+진입가 원장). 불일치 시 텔레그램 경고."""
     api = get_api()
     pos = get_positions(api)
     broker = set(str(c).zfill(6) for c in pos.keys())
+    ledger = set(load_kiwoom_positions().keys())
+    if ledger:
+        lo = sorted(broker - ledger)   # 브로커엔 있는데 원장에 없음(ensure 가 자가치유)
+        ls = sorted(ledger - broker)   # 원장엔 있는데 브로커에 없음(수동매도/체결 미반영?)
+        print(f"[reconcile/원장] 브로커만: {lo or '없음'} / 원장만: {ls or '없음'}")
     snap = _snapshot_codes()
     drift_out = sorted(broker - snap)   # 브로커엔 있는데 스냅샷에 없음
     drift_in = sorted(snap - broker)    # 스냅샷엔 있는데 브로커 없음
@@ -366,6 +371,8 @@ def cmd_status():
     api = get_api()
     dep = get_deposit(api)
     pos = get_positions(api)
+    ensure_kiwoom_ledger(pos)   # 진입가 원장 자가치유(최초 시드 포함)
+    _log_slippage(pos)          # 실체결 슬리피지 누적(매입평균 vs 신호종가)
     securities = sum(p.get("evlt_amt", 0) for p in pos.values())   # 보유 평가금액 합
     eval_pnl   = sum(p.get("pnl", 0) for p in pos.values())        # 평가손익 합
     total_eval = dep + securities                                  # 총평가 = 예수금 + 보유평가
@@ -489,8 +496,8 @@ def cmd_buy():
     # get_positions 는 스키마 인식 실패/일시 글리치 시 조용히 {} 를 반환할 수 있다.
     # 브로커 0건인데 직전 스냅샷엔 보유가 있었으면 = 응답 누락 의심 → 슬롯 오판으로
     # 이미 보유한 종목에 과다 매수가 날 수 있으므로 강제 중단.
-    if not pos and _snapshot_codes():
-        print("[buy] 잔고 응답 의심(브로커 0 / 직전 스냅샷 보유 있음) — 오주문 방지 위해 매수 중단")
+    if not pos and (_snapshot_codes() or load_kiwoom_positions()):
+        print("[buy] 잔고 응답 의심(브로커 0 / 스냅샷 또는 원장엔 보유 있음) — 오주문 방지 위해 매수 중단")
         try:
             import notifier
             notifier.safe_send("⛔ [키움 buy 중단] 잔고 응답이 비어 있음(스냅샷은 보유). API 누락 의심 → 매수 스킵.")
@@ -536,7 +543,8 @@ def cmd_buy():
         if "trading_value" in md.columns:
             tv_map = dict(zip(md["code"], md["trading_value"]))
 
-    # ── 전략별로 신호 분류 + 거래대금 내림차순 정렬 ───────────────────────────
+    # ── 전략별로 신호 분류 + 강도(score_ic) 내림차순 정렬(무기록은 tv순 폴백) ──
+    #    (2026-07-06: tv 상위 우선의 역선택 확정으로 변경 — _order_candidates 주석 참조)
     sigs_by_strat = {k: [] for k in STRATEGY_PRIORITY}
     for sig in sigs:
         strat = str(sig.get("strategy", "high_52w_filt"))
@@ -544,8 +552,7 @@ def cmd_buy():
             strat = "high_52w_filt"
         sigs_by_strat[strat].append(sig)
     for strat in STRATEGY_PRIORITY:
-        sigs_by_strat[strat].sort(
-            key=lambda r: float(tv_map.get(r["code"], 0) or 0), reverse=True)
+        sigs_by_strat[strat] = _order_candidates(sigs_by_strat[strat], strength, tv_map, strat)
 
     # ── 우선순위대로 슬롯 채우기 ─────────────────────────────────────────────
     n_placed = 0
@@ -621,6 +628,12 @@ def cmd_buy():
                 placed_this_strat += 1
                 placed_per_strat[strat] += 1
                 already.add(code)
+                try:   # 진입가 원장 기록(참조가=신호 종가; 실체결 평균은 ensure 가 이후 보정)
+                    save_kiwoom_position(code, close, strat,
+                                         str(sig.get("signal_date", "")),
+                                         _to_int(sig.get("holding_days"), 20))
+                except Exception as e:
+                    print(f"    [warn] 원장 기록 실패(무시): {e}")
             except Exception as e:
                 print(f"    [실패] {code} {name}: {e}")
                 log_order({
@@ -654,12 +667,11 @@ def _prev_close_map():
         return {}
 
 
-def _held_strategy_map():
-    """주문로그 전체에서 {code → 마지막 '성공 매수'의 strategy}.
+def _held_buy_map():
+    """주문로그 전체에서 {code → 마지막 '성공 매수'의 {strategy, date, ref_px}}.
 
-    get_signal_strategy_map 은 '최신 신호' 기준이라 보유 중 다른 전략 신호가 또 나면
-    익절 목표%가 오배정될 수 있음(예: rsi_vol +20% 보유인데 high_52w 신호 → +50% 발주).
-    실제 매수 시점의 전략이 진실원천(2026-07-03)."""
+    실제 매수 시점 정보가 진실원천(최신 '신호' 기준 strategy_map 은 오배정 위험,
+    2026-07-03). ref_px = 주문 참조가(신호일 종가) — 슬리피지 측정의 기준가."""
     out = {}
     try:
         for f in sorted(_glob.glob(f"{ORDERS_DIR}/orders_*.csv")):
@@ -671,11 +683,160 @@ def _held_strategy_map():
                 continue
             b = df[(df["side"] == "buy")
                    & df["ok"].astype(str).str.lower().isin(("true", "1"))]
+            date = os.path.basename(f)[7:15]
             for _, r in b.iterrows():   # 파일 오름차순 순회 → 최근 매수가 덮어씀
-                out[str(r.get("code", "")).zfill(6)] = str(r.get("strategy", "") or "")
+                out[str(r.get("code", "")).zfill(6)] = {
+                    "strategy": str(r.get("strategy", "") or ""),
+                    "date": date,
+                    "ref_px": _to_int(r.get("price", 0)),
+                }
     except Exception:
         pass
     return out
+
+
+def _held_strategy_map():
+    """{code → 매수 당시 strategy} (하위호환 래퍼 — _held_buy_map 참조)."""
+    return {c: v["strategy"] for c, v in _held_buy_map().items()}
+
+
+# ── 키움 진입가 원장 (kiwoom_positions.csv) — KIS kis_positions.csv 와 동일 패턴 ──
+#    스냅샷 의존이던 정합성 기준을 독립 원장으로 보강(2026-07-06). 매수 시 기록,
+#    매도/익절체결 시 삭제, 브로커 보유에 있는데 원장에 없으면 자가치유 등록.
+KIWOOM_POSITIONS_CSV = f"{ORDERS_DIR}/kiwoom_positions.csv"
+
+
+def load_kiwoom_positions():
+    """kiwoom_positions.csv → {code: {entry_px, strategy, signal_date, holding_days}}."""
+    if not os.path.exists(KIWOOM_POSITIONS_CSV):
+        return {}
+    try:
+        df = pd.read_csv(KIWOOM_POSITIONS_CSV, dtype={"code": str})
+        df["code"] = df["code"].astype(str).str.zfill(6)
+        out = {}
+        for _, r in df.iterrows():
+            out[r["code"]] = {
+                "entry_px":     float(r.get("entry_px", 0) or 0),
+                "strategy":     str(r.get("strategy", "")),
+                "signal_date":  str(r.get("signal_date", "")),
+                "holding_days": _to_int(r.get("holding_days"), 20),
+            }
+        return out
+    except Exception as e:
+        print(f"[warn] kiwoom_positions 로드 실패: {e}")
+        return {}
+
+
+def _write_kiwoom_positions(pos_dict):
+    os.makedirs(ORDERS_DIR, exist_ok=True)
+    fields = ["code", "entry_px", "strategy", "signal_date", "holding_days"]
+    with open(KIWOOM_POSITIONS_CSV, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        for code, d in pos_dict.items():
+            w.writerow({"code": code, **d})
+
+
+def save_kiwoom_position(code, entry_px, strategy, signal_date, holding_days):
+    existing = load_kiwoom_positions()
+    existing[str(code).zfill(6)] = {
+        "entry_px": entry_px, "strategy": strategy,
+        "signal_date": signal_date, "holding_days": holding_days,
+    }
+    _write_kiwoom_positions(existing)
+
+
+def remove_kiwoom_position(code):
+    existing = load_kiwoom_positions()
+    if existing.pop(str(code).zfill(6), None) is not None:
+        _write_kiwoom_positions(existing)
+
+
+def ensure_kiwoom_ledger(pos):
+    """브로커 보유인데 원장에 없는 종목을 자가치유 등록 — 최초 도입 시드 + 누락 방지.
+
+    entry_px = 브로커 매입평균(실체결) 우선, 없으면 주문 참조가. 전략은 매수 당시."""
+    try:
+        led = load_kiwoom_positions()
+        buys = None
+        added = 0
+        for code, p in pos.items():
+            code = str(code).zfill(6)
+            if code in led:
+                continue
+            if buys is None:
+                buys = _held_buy_map()
+            info = buys.get(code, {})
+            entry = float(p.get("avg_price", 0) or 0) or float(info.get("ref_px", 0) or 0)
+            led[code] = {"entry_px": entry,
+                         "strategy": info.get("strategy", ""),
+                         "signal_date": info.get("date", ""),
+                         "holding_days": 20}
+            added += 1
+        if added:
+            _write_kiwoom_positions(led)
+            print(f"[ledger] 원장 자가치유 등록 {added}건 → {KIWOOM_POSITIONS_CSV}")
+    except Exception as e:
+        print(f"[warn] 원장 자가치유 실패(무시): {e}")
+
+
+# ── 실체결 슬리피지 로그 — 브로커 매입평균 vs 신호일 종가(주문 참조가) ─────────
+#    백테스트/페이퍼 가정(X2=종가×1.02, 왕복 0.33%)의 실측 근거(2026-07-06).
+#    cmd_status 마다 보유종목을 (code, buy_date) 멱등 append — 포지션이 돌수록 축적.
+#    리포트: python slippage_report.py
+SLIPPAGE_LOG = f"{ORDERS_DIR}/slippage_log.csv"
+
+
+def _log_slippage(pos):
+    try:
+        buys = _held_buy_map()
+        seen = set()
+        if os.path.exists(SLIPPAGE_LOG):
+            try:
+                old = pd.read_csv(SLIPPAGE_LOG, dtype=str)
+                seen = set(zip(old["code"], old["buy_date"]))
+            except Exception:
+                pass
+        rows = []
+        for code, p in pos.items():
+            code = str(code).zfill(6)
+            info = buys.get(code)
+            avg = float(p.get("avg_price", 0) or 0)
+            if not info or avg <= 0 or info["ref_px"] <= 0:
+                continue
+            if (code, info["date"]) in seen:
+                continue
+            rows.append({"code": code, "name": str(p.get("name", "")),
+                         "strategy": info["strategy"], "buy_date": info["date"],
+                         "signal_close": info["ref_px"], "fill_avg": int(avg),
+                         "slip_pct": round((avg / info["ref_px"] - 1) * 100, 3)})
+        if rows:
+            new = not os.path.exists(SLIPPAGE_LOG)
+            with open(SLIPPAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
+                w = csv.DictWriter(f, fieldnames=["code", "name", "strategy", "buy_date",
+                                                  "signal_close", "fill_avg", "slip_pct"])
+                if new:
+                    w.writeheader()
+                w.writerows(rows)
+            print(f"[slippage] 매수 슬리피지 {len(rows)}건 기록 → {SLIPPAGE_LOG}")
+    except Exception as e:
+        print(f"[warn] 슬리피지 기록 실패(무시): {e}")
+
+
+def _order_candidates(cands, strength, tv_map, strat):
+    """매수 후보 정렬 — 강도(score_ic) 내림차순, 강도 무기록은 뒤에서 거래대금 내림차순.
+
+    [2026-07-06 변경] '거래대금 상위 우선'은 신호 경쟁이 심한 전략에서 과열 꼭짓점만
+    골라 담는 역선택으로 확인됨(breaker_sweep 진단: 전체 신호 평균 +1.04% vs tv순
+    체결분 −2.27%, 체결당 −3.3%p). 강도는 라이브 실측 +1.90%(≥6, 승률 59.5%)로
+    유일하게 검증된 선별 기준. 강도 기록이 전혀 없으면 자연히 tv순(기존)으로 폴백.
+    """
+    def _key(r):
+        code = str(r.get("code", "")).zfill(6)
+        sc = strength.get((code, str(r.get("strategy", strat))))
+        return (sc if sc is not None else float("-inf"),
+                float(tv_map.get(r["code"], 0) or 0))
+    return sorted(cands, key=_key, reverse=True)
 
 
 def _today_tp_orders():
@@ -728,6 +889,10 @@ def _reconcile_tp_fills(pos):
                    "qty": qty, "price": px, "order_type": ORDER_TYPE_LIMIT,
                    "ok": True, "order_no": str(r.get("order_no", "")),
                    "msg": "profit_target 체결(잔고대조 추정)"})
+        try:
+            remove_kiwoom_position(code)   # 익절 체결 → 진입가 원장에서 제거
+        except Exception:
+            pass
 
 
 def cmd_place_targets(api=None, pos=None):
@@ -889,6 +1054,10 @@ def cmd_sell():
             )
             ono = _pick(r, "ord_no", "odno", default="")
             print(f"  [매도주문] {code} {name} {qty}주 ref:{ref_px:,} → {ono}")
+            try:
+                remove_kiwoom_position(code)   # 진입가 원장에서 제거
+            except Exception:
+                pass
             try:
                 import notifier
                 notifier.queue_fill("sell", name, code, qty, ref_px)

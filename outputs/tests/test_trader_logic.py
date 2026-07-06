@@ -107,6 +107,54 @@ def _srv():
     return srv
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 매수 후보 배정순서 — 강도(score_ic) 내림차순, 무기록은 tv순 폴백 (2026-07-06 역선택 수정)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_order_candidates_strength_first_tv_fallback():
+    import kiwoom_trader as kt
+    sigs = [
+        {"code": "000001", "strategy": "rsi_vol"},   # 강도 5.0
+        {"code": "000002", "strategy": "rsi_vol"},   # 강도 없음, tv 최고
+        {"code": "000003", "strategy": "rsi_vol"},   # 강도 6.5 (최강)
+    ]
+    strength = {("000001", "rsi_vol"): 5.0, ("000003", "rsi_vol"): 6.5}
+    tv = {"000001": 1e9, "000002": 9e9, "000003": 2e9}
+    out = [s["code"] for s in kt._order_candidates(sigs, strength, tv, "rsi_vol")]
+    assert out == ["000003", "000001", "000002"], out   # 강도순 → 무기록은 맨 뒤
+
+    # 강도 기록이 아예 없으면 기존 tv 내림차순으로 완전 폴백
+    out2 = [s["code"] for s in kt._order_candidates(sigs, {}, tv, "rsi_vol")]
+    assert out2 == ["000002", "000003", "000001"], out2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 키움 진입가 원장 — 저장/로드/삭제/자가치유 (2026-07-06 신설)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_kiwoom_ledger_roundtrip_and_heal(tmp_path, monkeypatch):
+    import kiwoom_trader as kt
+    monkeypatch.setattr(kt, "ORDERS_DIR", str(tmp_path))
+    monkeypatch.setattr(kt, "KIWOOM_POSITIONS_CSV", str(tmp_path / "kiwoom_positions.csv"))
+
+    kt.save_kiwoom_position("105330", 6888, "rsi_vol", "20260702", 7)
+    led = kt.load_kiwoom_positions()
+    assert led["105330"]["entry_px"] == 6888 and led["105330"]["strategy"] == "rsi_vol"
+
+    kt.remove_kiwoom_position("105330")
+    assert kt.load_kiwoom_positions() == {}
+
+    # 자가치유: 브로커 보유(매입평균 7,000)가 원장에 없으면 주문로그 전략으로 등록
+    pd.DataFrame([{"time": "09:03", "side": "buy", "code": "091590", "name": "NHT",
+                   "strategy": "high_52w_filt", "qty": 160, "price": 7230,
+                   "order_type": "3", "ok": True, "order_no": "B9", "msg": ""}]) \
+        .to_csv(tmp_path / "orders_20260706.csv", index=False, encoding="utf-8-sig")
+    kt.ensure_kiwoom_ledger({"091590": {"qty": 160, "name": "NHT", "avg_price": 7000}})
+    led = kt.load_kiwoom_positions()
+    assert led["091590"]["entry_px"] == 7000          # 브로커 매입평균 우선
+    assert led["091590"]["strategy"] == "high_52w_filt"
+
+
 def test_realized_pnl_fifo_and_close_backfill(monkeypatch):
     srv = _srv()
     # 매도일 종가 조회를 합성값으로 대체(파일 무접촉)

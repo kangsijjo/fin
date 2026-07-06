@@ -1594,7 +1594,10 @@ _RUN_TASKS = {
     "supply_demand": [_STOCK_AI_PY, "-m", "src.collector.supply_demand"],            # 외국인/기관 수급(KIS)
     "macro":         [_STOCK_AI_PY, "-m", "src.collector.macro"],                    # 거시지표(NASDAQ/VIX/환율)
     "credit":        [_STOCK_AI_PY, "-m", "src.collector.kiwoom_extra",
-                      "--backfill", "--since", _CREDIT_SINCE],                       # 신용/대차(키움 주간)
+                      "--backfill", "--since", _CREDIT_SINCE, "--force"],            # 신용/대차(키움)
+                      # --force: 수집기의 '주말 전용' 가드 우회 — 수동 버튼은 사용자가 시점을
+                      # 직접 고르는 것이므로 평일에도 동작(2026-07-06). 매매창(09:00~05·15:20~30)
+                      # 밖 실행 권장은 버튼 안내 그대로 유지.
     "after_market":  [_VENV_PYTHON, str(BASE / "after_market.py")],                  # 시간외 등락률 → stock.db 누적
 }
 
