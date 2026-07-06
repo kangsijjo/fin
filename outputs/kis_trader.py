@@ -871,9 +871,14 @@ def cmd_sell():
     client = KISMockClient()
     _, positions = client.get_balance()
     already = today_ordered_codes("sell")
+    bought_today = today_ordered_codes("buy")
     strategy_map = get_signal_strategy_map()
 
-    targets = (set(due.keys()) & set(positions.keys())) - already
+    # 옛 신호 만기와 '오늘 새 신호 매수'가 같은 코드에 겹치면 코드 전량 매도가 오늘 산
+    # 물량까지 당일 청산 → 당일 매수 코드는 만기/손절 매도 보류(2026-07-06, 키움 동일).
+    targets = (set(due.keys()) & set(positions.keys())) - already - bought_today
+    if set(due.keys()) & bought_today:
+        print(f"[sell] 당일 매수 코드 청산 보류: {sorted(set(due.keys()) & bought_today)}")
     expire_n = sum(1 for c in targets if due.get(c) == "expire")
     stop_n   = sum(1 for c in targets if due.get(c) == "stop")
     print(f"[sell] 청산 대상: 만기 {expire_n}건  stop발동 {stop_n}건  실제보유 {len(targets)}건")

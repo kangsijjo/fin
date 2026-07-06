@@ -1028,7 +1028,13 @@ def cmd_sell():
     tp_open = _today_tp_orders()   # 만기청산 전 취소할 미체결 익절 지정가
 
     strategy_map = get_signal_strategy_map()
-    targets = due & set(pos.keys()) - already
+    bought_today = today_ordered_codes("buy")
+    targets = due & set(pos.keys()) - already - bought_today
+    if due & bought_today:
+        # 옛 신호의 만기와 '오늘 새 신호 매수'가 같은 코드에 겹치면, 코드 전량 매도가
+        # 오늘 산 물량까지 당일 청산해버림(2026-07-06 CJ ENM 실사례) → 당일 매수 코드는
+        # 만기매도에서 제외(내일 이후 만기 로직이 다시 처리).
+        print(f"[sell] 당일 매수 코드 만기매도 보류: {sorted(due & bought_today)}")
     print(f"[sell] 전략별 보유일 만기: {len(due)}종목 | 실제 보유 대상: {len(targets)}종목")
     n_placed = 0
     for code in sorted(targets):

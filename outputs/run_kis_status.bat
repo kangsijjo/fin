@@ -38,6 +38,12 @@ endlocal & exit /b 1
 !PYEXE! -u kis_trader.py status >> "%LOGFILE%" 2>&1
 set "EC=!ERRORLEVEL!"
 echo [%date% %time%] KIS status done. ExitCode=!EC! >> "%LOGFILE%"
+
+REM Kiwoom snapshot refresh too (2026-07-06): the 15:21 market-close sells FILL at 15:30,
+REM but cmd_daily takes its snapshot at 15:21:1x -> positions looked still-held on the
+REM dashboard. This 15:40 refresh captures post-fill truth (+ ledger heal + slippage log).
+!PYEXE! -u kiwoom_trader.py status >> "%LOGFILE%" 2>&1
+echo [%date% %time%] Kiwoom status done. ExitCode=!ERRORLEVEL! >> "%LOGFILE%"
 Forfiles /P "C:\fin\logs" /M kis_status_*.log /D -30 /C "cmd /c del @file" 2>nul
 
 REM manual run: show the result and keep window open
