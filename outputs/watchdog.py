@@ -28,6 +28,14 @@ import glob
 import sqlite3
 from datetime import datetime, date
 
+# 콘솔/리다이렉트가 cp949 여도 죽지 않게 — PYTHONIOENCODING 미설정 경로
+# (대시보드 버튼의 Popen 등)에서 '—' 같은 문자로 UnicodeEncodeError 크래시 방지(2026-07-07).
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _LOGS = os.path.normpath(os.path.join(_HERE, "..", "logs"))
 _STATE = os.path.join(_HERE, "db", "watchdog_state.json")
@@ -50,11 +58,16 @@ def _after(hhmm: str) -> bool:
     return NOW >= NOW.replace(hour=h, minute=m, second=0, microsecond=0)
 
 
+_OUT_LOGS = os.path.join(_HERE, "logs")   # 키움 트레이더 등은 outputs\logs 에 기록
+
+
 def _ran_today(pattern: str) -> bool:
-    """logs/ 에서 pattern 에 맞는 파일 중 파일명에 오늘 날짜가 든 게 있나(=오늘 실행됨)."""
-    for f in glob.glob(os.path.join(_LOGS, pattern)):
-        if TODAY_STR in os.path.basename(f):
-            return True
+    """C:\\fin\\logs 와 outputs\\logs 에서 pattern 에 맞는 파일 중
+    파일명에 오늘 날짜가 든 게 있나(=오늘 실행됨)."""
+    for root in (_LOGS, _OUT_LOGS):
+        for f in glob.glob(os.path.join(root, pattern)):
+            if TODAY_STR in os.path.basename(f):
+                return True
     return False
 
 
@@ -197,20 +210,30 @@ def check_signals():
 
 
 def check_trading():
-    """매매 작업 — 평일 09:10 이후, 오늘 kis_trader 로그가 있나(=09:01 매매 실행됨)."""
+    """매매 작업 — 평일 09:10 이후, 오늘 kis/kiwoom 트레이더 로그가 있나.
+
+    [2026-07-07] 키움 추가 — 기존엔 KIS 만 감시해 키움 매매(09:03)가 조용히
+    죽어도 못 잡았음. 키움 로그는 outputs\\logs\\kiwoom_YYYYMMDD.log."""
     out = []
     if IS_WEEKDAY and _after("09:10"):
         out.append(("trade_kis", "KIS 매매(09:01)", _ran_today("kis_trader_*.log"),
                     "오늘 kis_trader 미실행"))
+        out.append(("trade_kiwoom", "키움 매매(09:03)", _ran_today(f"kiwoom_{TODAY_STR}.log"),
+                    "오늘 kiwoom_trader 미실행"))
     return out
 
 
 def check_snapshots():
-    """잔고 스냅샷 — 평일 15:45 이후, KIS/키움 스냅샷 날짜가 오늘인가(=status 갱신됨)."""
+    """잔고 스냅샷 — 평일 15:45 이후, KIS/키움 스냅샷 날짜가 오늘인가(=status 갱신됨).
+
+    [2026-07-07] 키움 snapshot.json 추가 — 15:40 run_kis_status.bat 가 키움 status 도
+    함께 갱신하므로 같은 시각 기준으로 점검(기존엔 KIS 만 감시)."""
     out = []
     if IS_WEEKDAY and _after("15:45"):
         out.append(("snap_kis", "KIS 잔고 스냅샷(15:40)", _snap_date("kis_snapshot.json") == TODAY_STR,
                     f"오늘 미갱신(최신 {_snap_date('kis_snapshot.json') or '없음'})"))
+        out.append(("snap_kiwoom", "키움 잔고 스냅샷(15:40)", _snap_date("snapshot.json") == TODAY_STR,
+                    f"오늘 미갱신(최신 {_snap_date('snapshot.json') or '없음'})"))
     return out
 
 

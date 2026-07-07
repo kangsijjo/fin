@@ -19,8 +19,9 @@
 
 운용 룰:
   - 매수: 신호 다음 영업일 09:01 시장가. 전략별 빈 슬롯 확인 후 배정.
-  - 매도 조건 (둘 중 먼저 발동):
-      1. 만기: 진입일 포함 holding_days 영업일째 15:21 시장가
+  - 매도 조건 (둘 중 먼저 발동, 둘 다 09:01 daily 에서 실행):
+      1. 만기: 진입일 포함 holding_days 영업일째 09:01 시장가(시가)
+         ※ 백테스트 가정은 '종가' 청산 — 15:21 sell 트리거 추가 전까지의 실동작(2026-07-07 정정)
       2. stop: 전일 종가 ≤ 진입가 × (1 + stop_pct) 이면 당일 09:01 시장가
   - 진입가 추적: db/kis/kis_positions.csv (매수 체결 시 기록)
   - 멱등: db/kiwoom/orders_*.csv 로 중복 주문 방지
@@ -85,7 +86,12 @@ def _load_dotenv(path=".env"):
                 continue
             k, _, v = line.partition("=")
             k = k.strip()
-            v = v.split("#")[0].strip().strip('"').strip("'")
+            # 인라인 주석은 '공백 뒤 #' 부터만 제거 — 값 안의 '#'(비밀키 등) 보존(2026-07-07)
+            for _i, _ch in enumerate(v):
+                if _ch == "#" and (_i == 0 or v[_i - 1] in " \t"):
+                    v = v[:_i]
+                    break
+            v = v.strip().strip('"').strip("'")
             os.environ.setdefault(k, v)
 
 
@@ -116,21 +122,48 @@ _LOCK_PATH = next(
 )
 
 
+def _lock_try_acquire(who: str):
+    """O_CREAT|O_EXCL 원자적 잠금 시도. True=획득 / False=남이 보유 / None=쓰기불가.
+
+    [2026-07-07] '존재확인 후 open(w)' 는 확인~쓰기 사이 레이스로 두 프로세스가
+    동시 획득 가능했음 — kiwoom_trader 와 동일 수정."""
+    try:
+        fd = os.open(_LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        with os.fdopen(fd, "w") as f:
+            json.dump({"who": who, "ts": time.time(),
+                       "started": datetime.now().isoformat()}, f)
+        return True
+    except FileExistsError:
+        return False
+    except Exception:
+        return None
+
+
 @contextmanager
 def kis_lock(timeout: int = 60):
     if _LOCK_PATH is None:
         yield
         return
+    who = f"kis_trader(pid={os.getpid()})"
     deadline = time.time() + timeout
-    while os.path.exists(_LOCK_PATH):
+    acquired = False
+    while True:
+        got = _lock_try_acquire(who)
+        if got is True:
+            acquired = True
+            break
+        if got is None:
+            break
         try:
             with open(_LOCK_PATH) as f:
                 info = json.load(f)
             age = time.time() - info.get("ts", 0)
             if age > 300:
                 os.remove(_LOCK_PATH)
-                break
+                continue
             print(f"[kis_lock] 대기 중 ({info.get('who','?')}, {age:.0f}s)...")
+        except FileNotFoundError:
+            continue
         except Exception:
             break
         if time.time() > deadline:
@@ -138,19 +171,13 @@ def kis_lock(timeout: int = 60):
             break
         time.sleep(5)
     try:
-        with open(_LOCK_PATH, "w") as f:
-            json.dump({"who": f"kis_trader(pid={os.getpid()})",
-                       "ts": time.time(), "started": datetime.now().isoformat()}, f)
-    except Exception:
-        pass
-    try:
         yield
     finally:
-        try:
-            if os.path.exists(_LOCK_PATH):
+        if acquired:   # 내가 획득한 잠금만 해제(타임아웃 진행 시 남의 락 오삭제 방지)
+            try:
                 os.remove(_LOCK_PATH)
-        except Exception:
-            pass
+            except Exception:
+                pass
 
 
 # ── KIS 모의투자 클라이언트 ────────────────────────────────────────────────────
@@ -493,101 +520,81 @@ def _today_close_map():
 
 
 # ── 청산 판단 ─────────────────────────────────────────────────────────────────
+def _expiry_due(ds, signal_date, holding, today):
+    """만기 도달 여부 — 진입=신호 다음 영업일, 청산=진입일 포함 holding일째.
+    판정 불가(달력에 signal_date 없음)면 None."""
+    if not ds or not signal_date or signal_date not in ds:
+        return None
+    ei = ds.index(signal_date) + 1
+    xi = ei + int(holding) - 1
+    return xi < len(ds) and ds[xi] <= today
+
+
 def codes_due_for_exit(close_map):
     """만기 도달 or stop 발동 종목 → {code: reason}.
 
     reason: 'expire' | 'stop'
     stop 판단: 전일 종가(close_map) ≤ 진입가 × (1 + stop_pct)
     만기 판단: 진입일 포함 holding_days 영업일째
+
+    [2026-07-07 변경] 판정을 원장(kis_positions.csv) 우선으로 교체 — 신호CSV 전 이력
+    스캔은 같은 코드의 '옛 신호' 만기가 지나 있으면 최근 신호로 산 보유분까지 due 로
+    오판(키움 CJ ENM 사례의 일반형). stop 도 원장의 전략/진입가 기준(최신 신호 전략으로
+    stop_pct 를 잘못 고르는 것 방지). 원장에 없는 코드만 신호CSV 만기 폴백.
+
+    ※ 실행 시점 주의: KIS 트레이더는 09:01 daily 만 스케줄되어 있어 만기 매도가
+    '만기일 09:01 시가'에 나간다(백테스트 가정은 종가 청산). 15:21 매도 트리거를
+    추가하기 전까지는 이것이 실제 동작 — 문서화 2026-07-07.
     """
     from strategies.daily_loader import load_macro_daily
-    # 대시 없는 'YYYYMMDD' — ds(load_macro_daily date)·signal_date·target_exit_date 와 동일 형식.
-    # (과거 '%Y-%m-%d' 대시형이라 ds[xi] <= today 가 위치4 '숫자 vs -' 로 항상 False →
-    #  KIS 만기청산이 영영 미발동하던 버그. 2026-06-29 수정. 과거 매수 0건 버그와 동일 클래스.)
+    # 대시 없는 'YYYYMMDD' — ds(load_macro_daily date)·signal_date 와 동일 형식.
+    # (과거 '%Y-%m-%d' 대시형이라 만기 비교가 항상 False → 만기청산 영영 미발동 버그.
+    #  2026-06-29 수정. 과거 매수 0건 버그와 동일 클래스.)
     today = datetime.today().strftime("%Y%m%d")
     due = {}
+    kis_pos = load_kis_positions()
 
-    # ── kis_positions.csv의 target_exit_date 기반 즉시 만기 ───────────────────
-    # (kis_paper_signals.csv 없거나 수동 등록 종목 대비 fallback)
-    try:
-        if os.path.exists(KIS_POSITIONS_CSV):
-            _pdf = pd.read_csv(KIS_POSITIONS_CSV, dtype={"code": str})
-            _pdf["code"] = _pdf["code"].astype(str).str.zfill(6)
-            if "target_exit_date" in _pdf.columns:
-                for _, _pr in _pdf.iterrows():
-                    _c = str(_pr["code"])
-                    _tgt = str(_pr.get("target_exit_date", ""))
-                    if _tgt and _tgt <= today:
-                        due[_c] = "expire"
-    except Exception:
-        pass
+    df = load_macro_daily()
+    code_dates = {c: sorted(g["date"].astype(str).tolist())
+                  for c, g in df.groupby("code")}
 
+    ledger_decided = set()   # 원장으로 만기 판정 끝난 코드 — 신호CSV 폴백 제외
+    for code, info in kis_pos.items():
+        # 만기 — 원장 signal_date/holding_days 기준
+        sd = str(info.get("signal_date", "")).replace("-", "")
+        verdict = _expiry_due(code_dates.get(code), sd,
+                              info.get("holding_days", HOLDING_DAYS_DEFAULT), today)
+        if verdict is not None:
+            ledger_decided.add(code)
+            if verdict:
+                due[code] = "expire"
+                continue
+        # stop — 원장 전략/진입가 기준
+        stop_pct = STRATEGY_STOP.get(str(info.get("strategy", "")))
+        entry_px = float(info.get("entry_px", 0) or 0)
+        cur_close = close_map.get(code, 0)
+        if stop_pct is None or entry_px <= 0 or cur_close <= 0:
+            continue
+        if cur_close <= entry_px * (1 + stop_pct):
+            due[code] = "stop"
+
+    # 원장에 없는 코드(원장 유실·수동매수) 만기 폴백 — 신호CSV 스캔
     if not os.path.exists(SIGNALS_CSV):
-        # stop 체크도 kis_positions 기반으로 수행
-        kis_pos = load_kis_positions()
-        for _c, pos_info in kis_pos.items():
-            if _c in due:
-                continue
-            strat = str(pos_info.get("strategy", ""))
-            stop_pct = STRATEGY_STOP.get(strat)
-            if stop_pct is None:
-                continue
-            entry_px = float(pos_info.get("entry_px", 0))
-            if entry_px <= 0:
-                continue
-            cur_close = close_map.get(_c, 0)
-            if cur_close <= 0:
-                continue
-            stop_px = entry_px * (1 + stop_pct)
-            if cur_close <= stop_px:
-                due[_c] = "stop"
         return due
-
     s = pd.read_csv(SIGNALS_CSV, dtype={"code": str})
     s["signal_date"] = s["signal_date"].astype(str)
     s["code"] = s["code"].astype(str).str.zfill(6)
     if "holding_days" not in s.columns:
         s["holding_days"] = HOLDING_DAYS_DEFAULT
     s["holding_days"] = pd.to_numeric(s["holding_days"], errors="coerce").fillna(HOLDING_DAYS_DEFAULT).astype(int)
-    if "strategy" not in s.columns:
-        s["strategy"] = "h52w_for3d_mkt"
-
-    df = load_macro_daily()
-    code_dates = {c: sorted(g["date"].astype(str).tolist())
-                  for c, g in df.groupby("code")}
-    kis_pos = load_kis_positions()
 
     for _, r in s.iterrows():
         code = r["code"]
-        ds = code_dates.get(code)
-        if not ds or r["signal_date"] not in ds:
-            continue
-
-        # 만기 체크
-        holding = int(r["holding_days"])
-        ei = ds.index(r["signal_date"]) + 1
-        xi = ei + holding - 1
-        if xi < len(ds) and ds[xi] <= today:
+        if code in ledger_decided or code in due:
+            continue   # 원장 판정 우선 — 옛 신호의 만기 오염 차단
+        if _expiry_due(code_dates.get(code), r["signal_date"],
+                       int(r["holding_days"]), today):
             due[code] = "expire"
-            continue
-
-        # stop 체크 (진입가 추적 있을 때만)
-        strat = str(r.get("strategy", "h52w_for3d_mkt"))
-        stop_pct = STRATEGY_STOP.get(strat)
-        if stop_pct is None:
-            continue
-        pos_info = kis_pos.get(code)
-        if pos_info is None:
-            continue
-        entry_px = float(pos_info.get("entry_px", 0))
-        if entry_px <= 0:
-            continue
-        cur_close = close_map.get(code, 0)
-        if cur_close <= 0:
-            continue
-        stop_px = entry_px * (1 + stop_pct)
-        if cur_close <= stop_px:
-            due[code] = "stop"
 
     return due
 
@@ -597,8 +604,11 @@ def cmd_status():
     client = KISMockClient()
     deposit, positions = client.get_balance()
     strategy_map = get_signal_strategy_map()
-    slot_used = count_slots_by_strategy(positions.keys(), strategy_map)
     kis_pos = load_kis_positions()
+    for _c, _v in kis_pos.items():   # 매수 당시 전략 우선(슬롯 표시 정확성)
+        if _v.get("strategy"):
+            strategy_map[_c] = _v["strategy"]
+    slot_used = count_slots_by_strategy(positions.keys(), strategy_map)
 
     _sm = getattr(client, "last_summary", {}) or {}
     print(f"\n[KIS 모의 — 안D] 총평가금액: {_sm.get('total_eval', 0):,} 원")
@@ -613,7 +623,7 @@ def cmd_status():
     for code, p in positions.items():
         pos_info = kis_pos.get(code, {})
         entry_px = pos_info.get("entry_px", 0)
-        strat = strategy_map.get(code, "")
+        strat = pos_info.get("strategy") or strategy_map.get(code, "")   # 원장 우선
         print(f"  {code} {p['name']}: {p['qty']:,}주"
               f"  진입가:{entry_px:,.0f}  전략:{strat}")
 
@@ -737,14 +747,24 @@ def cmd_buy():
             pass
 
     already = today_ordered_codes("buy")
+    # 원장(매수 당시 전략)으로 덮어씀 — '최신 신호' 전략맵은 보유 중 종목이 다른
+    # 전략으로 재신호되면 슬롯을 오배정(2026-07-07, 키움과 동일 수정).
     strategy_map = get_signal_strategy_map()
+    for _c, _v in load_kis_positions().items():
+        if _v.get("strategy"):
+            strategy_map[_c] = _v["strategy"]
     slot_used = count_slots_by_strategy(positions.keys(), strategy_map)
     legacy_used = slot_used.get("_legacy", 0)
     slot_avail = {k: max(0, STRATEGY_MAX_SLOTS[k] - slot_used[k])
                   for k in STRATEGY_MAX_SLOTS}
     total_avail = max(0, sum(slot_avail.values()) - legacy_used)
 
-    print(f"[buy] 오늘 신호 {len(sigs)}건  예수금 {deposit:,}원")
+    # 매수 예산 — 주문가능금액(가수도정산 포함) 우선(2026-07-07).
+    # daily 는 09:01 에 매도 후 매수하는데, 매도대금(D+2 정산대기)은 dnca_tot_amt
+    # (정산완료 예수금)에 안 잡혀 과소매수가 됨. API 가 orderable 을 안 주면 예수금 폴백.
+    _orderable = _to_int((getattr(client, "last_summary", {}) or {}).get("orderable", 0))
+    buy_budget = _orderable if _orderable > 0 else deposit
+    print(f"[buy] 오늘 신호 {len(sigs)}건  예수금 {deposit:,}원  주문가능 {buy_budget:,}원")
     print("  전략별 슬롯: "
           + " / ".join(f"{k}={slot_used[k]}/{STRATEGY_MAX_SLOTS[k]}"
                        for k in STRATEGY_PRIORITY))
@@ -775,7 +795,7 @@ def cmd_buy():
             key=lambda r: float(tv_map.get(r["code"], 0) or 0), reverse=True)
 
     n_placed = 0
-    remaining_dep = deposit
+    remaining_dep = buy_budget
     placed_per_strat = {k: 0 for k in STRATEGY_PRIORITY}
 
     for strat in STRATEGY_PRIORITY:
@@ -873,6 +893,9 @@ def cmd_sell():
     already = today_ordered_codes("sell")
     bought_today = today_ordered_codes("buy")
     strategy_map = get_signal_strategy_map()
+    for _c, _v in load_kis_positions().items():   # 매수 당시 전략 우선(로그 정확성)
+        if _v.get("strategy"):
+            strategy_map[_c] = _v["strategy"]
 
     # 옛 신호 만기와 '오늘 새 신호 매수'가 같은 코드에 겹치면 코드 전량 매도가 오늘 산
     # 물량까지 당일 청산 → 당일 매수 코드는 만기/손절 매도 보류(2026-07-06, 키움 동일).
@@ -935,7 +958,9 @@ def cmd_stop_check():
         kis_pos = load_kis_positions()
         strategy_map = get_signal_strategy_map()
         for code, p in positions.items():
-            strat = strategy_map.get(str(code).zfill(6), "")
+            # 원장(매수 당시 전략) 우선 — 재신호로 전략이 바뀌면 stop_pct 를 잘못 고름(2026-07-07)
+            strat = (kis_pos.get(str(code).zfill(6), {}).get("strategy")
+                     or strategy_map.get(str(code).zfill(6), ""))
             stop_pct = STRATEGY_STOP.get(strat)
             if stop_pct is None:
                 continue
@@ -1012,8 +1037,9 @@ if __name__ == "__main__":
         elif cmd == "reconcile":
             cmd_reconcile()
         elif cmd == "daily":
-            # stop-loss는 전일 종가 기준 → 오전/오후 구분 없이 항상 sell 먼저 실행
-            # (만기 청산은 오후에만 발동. 오전 실행 시 stop 발동 건만 매도됨)
+            # stop-loss는 전일 종가 기준 → sell 먼저 실행.
+            # ※ 만기도 여기(09:01)서 발동 — 만기일 '시가' 매도임(2026-07-07 문서 정정).
+            #   백테스트 가정(종가 청산)과 맞추려면 15:21 sell 트리거 추가 필요(후속 과제).
             print("[daily] 매도(만기/stop) 후 매수")
             cmd_sell()
             cmd_buy()

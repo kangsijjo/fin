@@ -5,11 +5,30 @@ REM  Tick collector loop. Fix history:
 REM  - bare "python" call could die instantly (MS Store alias) and
 REM    restart every 5s forever (44k log lines). Now: venv python
 REM    first, and stop after 5 consecutive instant-deaths.
+REM  - [2026-07-07] weekend guard added: task fires daily 08:59 and
+REM    on Sunday 07-05 the loop retried a refused connection all day
+REM    (696 tracebacks). Also raised fail threshold 10s -> 60s:
+REM    connect timeouts take 20-40s so they reset the counter and
+REM    the 5-strike stop never triggered.
 REM ============================================================
 set PYTHONIOENCODING=utf-8
 
 cd /d "%~dp0"
 if not exist "logs" mkdir "logs"
+
+REM -- weekend skip (task trigger is daily incl. Sat/Sun) --
+for /f %%I in ('powershell -NoProfile -Command "(Get-Date).DayOfWeek.value__"') do set "DOW=%%I"
+if "!DOW!"=="0" (
+    echo [%date% %time%] [SKIP] Sunday - no market. >> logs\tick_collector.log
+    endlocal
+    exit /b 0
+)
+if "!DOW!"=="6" (
+    echo [%date% %time%] [SKIP] Saturday - no market. >> logs\tick_collector.log
+    endlocal
+    exit /b 0
+)
+
 echo [%date% %time%] tick collector scheduler start >> logs\tick_collector.log
 
 if exist ".venv\Scripts\python.exe" (
@@ -43,14 +62,14 @@ for /f %%s in ('powershell -NoProfile -Command "[long](Get-Date -UFormat %%s)"')
 for /f %%s in ('powershell -NoProfile -Command "[long](Get-Date -UFormat %%s)"') do set "T1=%%s"
 
 set /a RUNTIME=!T1!-!T0!
-if !RUNTIME! LSS 10 (
+if !RUNTIME! LSS 60 (
     set /a FAILCOUNT+=1
-    echo [%date% %time%] [warn] instant exit detected (!RUNTIME!s, consecutive !FAILCOUNT!) >> logs\tick_collector.log
+    echo [%date% %time%] [warn] short-lived exit detected (!RUNTIME!s, consecutive !FAILCOUNT!) >> logs\tick_collector.log
     if !FAILCOUNT! GEQ 5 (
-        echo [%date% %time%] [ERROR] 5 consecutive instant exits - env problem suspected. stop. >> logs\tick_collector.log
+        echo [%date% %time%] [ERROR] 5 consecutive short-lived exits - env/network problem suspected. stop. >> logs\tick_collector.log
         goto end
     )
-    timeout /t 30 /nobreak >nul
+    timeout /t 60 /nobreak >nul
 ) else (
     set "FAILCOUNT=0"
     timeout /t 5 /nobreak >nul

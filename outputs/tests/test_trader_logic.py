@@ -155,6 +155,93 @@ def test_kiwoom_ledger_roundtrip_and_heal(tmp_path, monkeypatch):
     assert led["091590"]["strategy"] == "high_52w_filt"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 만기 판정 — 원장 우선 (2026-07-07: 옛 신호 만기가 최근 매수분을 조기청산하던
+# CJ ENM 사례의 일반형 수정. 원장에 없는 코드만 신호CSV 폴백)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _synth_macro_df(codes, dates):
+    rows = [{"code": c, "date": d} for c in codes for d in dates]
+    return pd.DataFrame(rows)
+
+
+def test_expiry_due_helper():
+    import kiwoom_trader as kt
+    ds = ["20260102", "20260103", "20260106", "20260107", "20260108"]
+    today = "20260108"
+    # 신호 20260102, 보유 3일 → 진입 0103, 청산 0107(진입일 포함 3영업일째) ≤ today
+    assert kt._expiry_due(ds, "20260102", 3, today) is True
+    # 신호 20260106, 보유 3일 → 청산 인덱스가 달력 밖 → 미도래
+    assert kt._expiry_due(ds, "20260106", 3, today) is False
+    # 달력에 없는 신호일 → 판정 불가(None)
+    assert kt._expiry_due(ds, "20251231", 3, today) is None
+    assert kt._expiry_due(None, "20260102", 3, today) is None
+
+
+def test_codes_due_ledger_priority_over_stale_signal(tmp_path, monkeypatch):
+    """원장(최근 매수)이 있으면 같은 코드의 '만기 지난 옛 신호'가 due 를 오염시키지 않는다."""
+    import kiwoom_trader as kt
+    import strategies.daily_loader as dl
+
+    dates = ["20260102", "20260103", "20260106", "20260107", "20260108",
+             "20260109", "20260112", "20260113"]
+    monkeypatch.setattr(dl, "load_macro_daily",
+                        lambda *a, **k: _synth_macro_df(["000030", "000040", "000050"], dates))
+    monkeypatch.setattr(kt, "SIGNALS_CSV", str(tmp_path / "paper_signals.csv"))
+    monkeypatch.setattr(kt, "KIWOOM_POSITIONS_CSV", str(tmp_path / "kiwoom_positions.csv"))
+    monkeypatch.setattr(kt, "ORDERS_DIR", str(tmp_path))
+
+    # 신호CSV: 세 코드 모두 '만기 한참 지난' 옛 신호 보유
+    pd.DataFrame([
+        {"signal_date": "20260102", "code": "000030", "strategy": "rsi_vol", "holding_days": 2},
+        {"signal_date": "20260102", "code": "000040", "strategy": "rsi_vol", "holding_days": 2},
+        {"signal_date": "20260102", "code": "000050", "strategy": "rsi_vol", "holding_days": 2},
+    ]).to_csv(tmp_path / "paper_signals.csv", index=False, encoding="utf-8-sig")
+
+    # 원장: 000030 은 최근 재매수(만기 미도래) / 000050 은 만기 도달 / 000040 은 원장 없음
+    kt.save_kiwoom_position("000030", 1000, "rsi_vol", "20260112", 5)   # 만기 미도래
+    kt.save_kiwoom_position("000050", 1000, "rsi_vol", "20260102", 2)   # 만기 도달
+
+    due = kt.codes_due_for_exit()
+    assert "000030" not in due   # 원장 우선 — 옛 신호가 조기청산 못 시킴 (핵심)
+    assert "000040" in due       # 원장 없음 → 신호CSV 폴백 (유실 대비 안전망)
+    assert "000050" in due       # 원장 기준 만기 도달
+
+
+def test_kis_codes_due_ledger_expiry_and_stop(tmp_path, monkeypatch):
+    """KIS: 만기·stop 모두 원장 기준. stop_pct 는 원장 전략으로 선택."""
+    os.environ.setdefault("KIS_MOCK_APP_KEY", "test")
+    os.environ.setdefault("KIS_MOCK_APP_SECRET", "test")
+    os.environ.setdefault("KIS_MOCK_ACCOUNT", "12345678-01")
+    import kis_trader as kx
+    import strategies.daily_loader as dl
+
+    dates = ["20260102", "20260103", "20260106", "20260107", "20260108",
+             "20260109", "20260112", "20260113"]
+    monkeypatch.setattr(dl, "load_macro_daily",
+                        lambda *a, **k: _synth_macro_df(["000060", "000070"], dates))
+    monkeypatch.setattr(kx, "SIGNALS_CSV", str(tmp_path / "kis_paper_signals.csv"))
+    monkeypatch.setattr(kx, "KIS_POSITIONS_CSV", str(tmp_path / "kis_positions.csv"))
+
+    # 옛 신호(만기 지남)는 000060 에만 존재 — 원장이 최근 재매수라 due 오염 금지
+    pd.DataFrame([
+        {"signal_date": "20260102", "code": "000060",
+         "strategy": "h52w_for3d_mkt", "holding_days": 2},
+    ]).to_csv(tmp_path / "kis_paper_signals.csv", index=False, encoding="utf-8-sig")
+
+    kx.save_kis_position("000060", 10000, "h52w_for3d_mkt", "20260112", 20)  # 만기 미도래
+    kx.save_kis_position("000070", 10000, "gc_for3d", "20260112", 15)        # stop 후보
+
+    # 000070: gc_for3d stop -26% → 종가 7,300(-27%) 이면 stop 발동
+    due = kx.codes_due_for_exit({"000070": 7300.0, "000060": 10500.0})
+    assert due.get("000070") == "stop"
+    assert "000060" not in due   # 옛 신호 만기 오염 차단 + stop 미달(-0%대 아님, +5%)
+
+    # 종가가 stop 위면 발동 안 함 (-26% 경계)
+    due2 = kx.codes_due_for_exit({"000070": 7500.0})
+    assert "000070" not in due2
+
+
 def test_realized_pnl_fifo_and_close_backfill(monkeypatch):
     srv = _srv()
     # 매도일 종가 조회를 합성값으로 대체(파일 무접촉)

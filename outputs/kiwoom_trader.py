@@ -55,51 +55,73 @@ _LOCK_PATH = next((p for p in _LOCK_CANDIDATES if p and os.path.dirname(p)
                    and os.path.isdir(os.path.dirname(p))), None)
 
 
+def _lock_try_acquire(who: str):
+    """O_CREAT|O_EXCL 원자적 잠금 시도. True=획득 / False=남이 보유 / None=쓰기불가(잠금 생략).
+
+    [2026-07-07] 기존 '존재확인 후 open(w)' 는 확인~쓰기 사이 레이스로 두 프로세스가
+    동시에 잠금을 '획득'할 수 있었음(09:01/09:03 트레이더 이중 기동 시 실위험).
+    """
+    try:
+        fd = os.open(_LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        with os.fdopen(fd, "w") as f:
+            json.dump({"who": who, "ts": time.time(),
+                       "started": datetime.now().isoformat()}, f)
+        return True
+    except FileExistsError:
+        return False
+    except Exception:
+        return None
+
+
 @contextmanager
 def kiwoom_lock(timeout: int = 30):
     """키움 API 파일락 컨텍스트 매니저.
 
     다른 프로세스가 이미 잠금을 보유하면 timeout 초 대기 후 경고와 함께 계속.
     (완전 차단 대신 경고 — 토큰이 다른 파일에 저장되므로 충돌 위험이 낮음)
+    [2026-07-07] 획득을 원자화(O_EXCL). 타임아웃으로 '잠금 없이 진행'한 경우
+    종료 시 남의 락을 지우지 않도록 acquired 플래그로 구분(기존엔 무조건 삭제
+    → 보유 프로세스의 잠금이 증발해 제3 프로세스가 끼어들 수 있었음).
     """
     if _LOCK_PATH is None:
         yield   # lock 경로를 못 찾으면 잠금 없이 진행
         return
 
+    who = f"kiwoom_trader(pid={os.getpid()})"
     deadline = time.time() + timeout
-    while os.path.exists(_LOCK_PATH):
-        try:
+    acquired = False
+    while True:
+        got = _lock_try_acquire(who)
+        if got is True:
+            acquired = True
+            break
+        if got is None:   # 잠금파일 생성 불가(권한 등) — 잠금 없이 진행
+            break
+        try:   # 남이 보유 중 — stale 판정/대기
             with open(_LOCK_PATH, "r") as f:
                 info = json.load(f)
             age = time.time() - info.get("ts", 0)
-            if age > 300:   # 5분 이상 된 stale lock → 강제 해제
+            if age > 300:   # 5분 이상 된 stale lock → 강제 해제 후 재시도
                 os.remove(_LOCK_PATH)
-                break
+                continue
             print(f"[kiwoom_lock] 잠금 대기 중 (보유: {info.get('who','?')}, {age:.0f}초 경과)...")
+        except FileNotFoundError:
+            continue   # 방금 해제됨 → 즉시 재시도
         except Exception:
             break   # lock 파일 손상 → 무시하고 진행
-
         if time.time() > deadline:
             print("[kiwoom_lock] 대기 시간 초과 — 잠금 무시하고 진행")
             break
         time.sleep(5)
 
-    # 잠금 획득
-    try:
-        with open(_LOCK_PATH, "w") as f:
-            json.dump({"who": f"kiwoom_trader(pid={os.getpid()})",
-                       "ts": time.time(), "started": datetime.now().isoformat()}, f)
-    except Exception:
-        pass   # lock 파일 쓰기 실패해도 동작은 계속
-
     try:
         yield
     finally:
-        try:
-            if os.path.exists(_LOCK_PATH):
+        if acquired:   # 내가 획득한 잠금만 해제(남의 락 오삭제 방지)
+            try:
                 os.remove(_LOCK_PATH)
-        except Exception:
-            pass
+            except Exception:
+                pass
 
 import config
 
@@ -517,7 +539,12 @@ def cmd_buy():
         print("[buy] 강도 기록 없음 — 강도 필터 미적용(fail-open)")
 
     # ── 전략별 슬롯 현황 ──────────────────────────────────────────────────────
+    # 원장(매수 당시 전략)으로 덮어씀 — '최신 신호' 전략맵은 보유 중 종목이 다른
+    # 전략으로 재신호되면 슬롯을 오배정(2026-07-07, 익절 오배정과 동일 클래스).
     strategy_map = get_signal_strategy_map()
+    for _c, _v in load_kiwoom_positions().items():
+        if _v.get("strategy"):
+            strategy_map[_c] = _v["strategy"]
     slot_used = count_slots_by_strategy(pos.keys(), strategy_map)
     legacy_used = slot_used.get("_legacy", 0)   # 레거시 전략(for_high20_mkt 등) 보유 수
     slot_avail = {k: max(0, STRATEGY_MAX_SLOTS[k] - slot_used[k])
@@ -954,15 +981,51 @@ def cmd_place_targets(api=None, pos=None):
 # ------------------------------------------------------------
 # 매도 — 40영업일 도달
 # ------------------------------------------------------------
+def _expiry_due(ds, signal_date, holding, today):
+    """만기 도달 여부 — 진입=신호 다음 영업일, 청산=진입일 포함 holding일째 종가."""
+    if not ds or not signal_date or signal_date not in ds:
+        return None   # 판정 불가
+    entry_i = ds.index(signal_date) + 1
+    exit_i = entry_i + int(holding) - 1
+    return exit_i < len(ds) and ds[exit_i] <= today
+
+
 def codes_due_for_exit():
-    """만기 도달 신호 종목 반환 — 전략별 holding_days 각각 적용.
+    """만기 도달 종목 반환 — 진입가 원장(kiwoom_positions.csv) 우선, 신호CSV 폴백.
+
+    [2026-07-07 변경] 판정 기준을 '신호CSV 전 이력 스캔' → '원장 우선'으로 교체.
+    신호CSV 스캔은 같은 코드에 만기 지난 '옛 신호'가 있으면 최근 신호로 산 보유분까지
+    due 로 오판(2026-07-06 CJ ENM 실사례의 일반형 — 당일 매수 보류 패치는 당일만 방어,
+    어제 이전 매수는 무방비). 원장은 '실제 매수 건'의 signal_date/holding_days 라
+    이 충돌이 원천 차단됨. 원장에 없거나 원장 날짜로 판정 불가한 코드만 기존 방식 폴백
+    (원장 유실·수동매수 종목이 만기 없이 영구 보유되는 것 방지).
 
     원본 모드: 진입일 = 신호 다음 영업일 (시가),
                청산일 = 진입일 포함 holding_days 영업일째 (종가).
     """
     from strategies.daily_loader import load_macro_daily
+    df = load_macro_daily()
+    code_dates = {c: sorted(g["date"].astype(str).tolist())
+                  for c, g in df.groupby("code")}
+    # ds(load_macro_daily date)·signal_date 와 동일한 대시 없는 'YYYYMMDD'.
+    # (과거 '%Y-%m-%d' 대시형이라 ds[exit_i] <= today 가 위치4 '숫자 vs -'로 항상 False →
+    #  키움 만기청산이 영영 미발동(보유일 초과해도 매도 안 됨). 2026-06-29 수정.)
+    today = datetime.today().strftime("%Y%m%d")
+    due = set()
+    ledger_decided = set()   # 원장으로 판정 끝난 코드 — 신호CSV 폴백에서 제외
+
+    for code, info in load_kiwoom_positions().items():
+        sd = str(info.get("signal_date", "")).replace("-", "")
+        holding = _to_int(info.get("holding_days"), 20)
+        verdict = _expiry_due(code_dates.get(code), sd, holding, today)
+        if verdict is None:
+            continue   # 원장 날짜가 달력에 없음(형식 이상 등) → 신호CSV 폴백에 맡김
+        ledger_decided.add(code)
+        if verdict:
+            due.add(code)
+
     if not os.path.exists(SIGNALS_CSV):
-        return set()
+        return due
     s = pd.read_csv(SIGNALS_CSV, dtype={"code": str})
     s["signal_date"] = s["signal_date"].astype(str)
     s["code"] = s["code"].astype(str).str.zfill(6)
@@ -972,23 +1035,11 @@ def codes_due_for_exit():
         s["holding_days"] = HOLDING_DAYS_DEFAULT
     s["holding_days"] = pd.to_numeric(s["holding_days"], errors="coerce").fillna(HOLDING_DAYS_DEFAULT).astype(int)
 
-    df = load_macro_daily()
-    code_dates = {c: sorted(g["date"].astype(str).tolist())
-                  for c, g in df.groupby("code")}
-    # ds(load_macro_daily date)·signal_date 와 동일한 대시 없는 'YYYYMMDD'.
-    # (과거 '%Y-%m-%d' 대시형이라 ds[exit_i] <= today 가 위치4 '숫자 vs -'로 항상 False →
-    #  키움 만기청산이 영영 미발동(보유일 초과해도 매도 안 됨). 2026-06-29 수정.
-    #  형제 함수 todays_signals() 는 2026-06-23 에 이미 같은 클래스 수정됨.)
-    today = datetime.today().strftime("%Y%m%d")
-    due = set()
     for _, r in s.iterrows():
-        ds = code_dates.get(r["code"])
-        if not ds or r["signal_date"] not in ds:
-            continue
-        holding = int(r["holding_days"])
-        entry_i = ds.index(r["signal_date"]) + 1   # 진입 = 신호 다음 영업일
-        exit_i  = entry_i + holding - 1             # 진입일 포함 holding일째
-        if exit_i < len(ds) and ds[exit_i] <= today:
+        if r["code"] in ledger_decided:
+            continue   # 원장 판정 우선 — 옛 신호의 만기 오염 차단
+        if _expiry_due(code_dates.get(r["code"]), r["signal_date"],
+                       int(r["holding_days"]), today):
             due.add(r["code"])
     return due
 
@@ -1028,6 +1079,9 @@ def cmd_sell():
     tp_open = _today_tp_orders()   # 만기청산 전 취소할 미체결 익절 지정가
 
     strategy_map = get_signal_strategy_map()
+    for _c, _v in load_kiwoom_positions().items():   # 매수 당시 전략 우선(로그 정확성)
+        if _v.get("strategy"):
+            strategy_map[_c] = _v["strategy"]
     bought_today = today_ordered_codes("buy")
     targets = due & set(pos.keys()) - already - bought_today
     if due & bought_today:
