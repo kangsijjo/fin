@@ -125,15 +125,45 @@ def check_scheduler():
         if mtime_min <= 15:
             return ("scheduler", "스케줄러 데몬", True,
                     f"정상(수집 작업 진행 중 — 로그 활동 {max(0, mtime_min):.0f}분 전, ♥는 작업 후 재개)")
+        if _scheduler_process_alive():
+            return ("scheduler", "스케줄러 데몬", True,
+                    "정상(로그 핸들로 생존 확인 — 긴 수집 자식작업 중, 출력은 완료 후 일괄 기록)")
         return ("scheduler", "스케줄러 데몬", False, "하트비트(♥) 기록 없음")
     age_min = (NOW - last).total_seconds() / 60.0
     if age_min > 15:
         if mtime_min <= 15:
             return ("scheduler", "스케줄러 데몬", True,
                     f"정상(수집 작업 진행 중 — 마지막 ♥ {age_min:.0f}분 전이나 로그 활동 {max(0, mtime_min):.0f}분 전)")
+        if _scheduler_process_alive():
+            return ("scheduler", "스케줄러 데몬", True,
+                    f"정상(로그 핸들로 생존 확인 — 마지막 ♥ {age_min:.0f}분 전, 긴 수집 자식작업 중)")
         return ("scheduler", "스케줄러 데몬", False,
                 f"응답 없음 — 마지막 ♥ {age_min:.0f}분 전(데몬 죽었을 수 있음). start_scheduler.bat 확인")
     return ("scheduler", "스케줄러 데몬", True, f"정상(♥ {max(0, age_min):.0f}분 전)")
+
+
+def _scheduler_process_alive():
+    """데몬 생존 3차 신호 — scheduler.log 를 배타모드로 열어보고 '잠김'이면 생존.
+
+    배경: 토요일 갭백필처럼 단일 자식작업이 2시간+ 돌면 스케줄러가 자식 출력을 완료 후
+    일괄 기록해 로그 mtime 까지 정체 → ♥/mtime 휴리스틱이 둘 다 오탐(2026-07-04 실제 발생).
+    프로세스 커맨드라인 조회는 데몬이 관리자 권한(작업스케줄러 Highest)이라 일반 권한에선
+    비어 나옴 → 대신 **데몬(start /min ... >> scheduler.log)이 로그 append 핸들을 상시
+    보유**한다는 사실을 이용: 배타 열기가 공유위반으로 실패하면 = 데몬 생존.
+    ※ 한계: (a) taillog 등 다른 프로세스가 로그를 잡고 있으면 거짓 생존(경보 억제 방향),
+      (b) '떠 있으나 교착'은 못 구분 — 둘 다 다음날 데이터 신선도 점검이 결과물 정체로 잡음."""
+    try:
+        import subprocess
+        log_path = os.path.join(_LOGS, "scheduler.log").replace("\\", "/")
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"try{{$f=[IO.File]::Open('{log_path}','Open','ReadWrite','None');"
+             f"$f.Close();'FREE'}}catch{{'LOCKED'}}"],
+            capture_output=True, text=True, timeout=20,
+            encoding="utf-8", errors="replace")
+        return "LOCKED" in (r.stdout or "")
+    except Exception:
+        return False
 
 
 def check_data():
