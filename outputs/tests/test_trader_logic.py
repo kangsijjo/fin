@@ -136,6 +136,7 @@ def test_kiwoom_ledger_roundtrip_and_heal(tmp_path, monkeypatch):
     import kiwoom_trader as kt
     monkeypatch.setattr(kt, "ORDERS_DIR", str(tmp_path))
     monkeypatch.setattr(kt, "KIWOOM_POSITIONS_CSV", str(tmp_path / "kiwoom_positions.csv"))
+    monkeypatch.setattr(kt, "SIGNALS_CSV", str(tmp_path / "paper_signals.csv"))  # 실파일 미접촉
 
     kt.save_kiwoom_position("105330", 6888, "rsi_vol", "20260702", 7)
     led = kt.load_kiwoom_positions()
@@ -153,6 +154,85 @@ def test_kiwoom_ledger_roundtrip_and_heal(tmp_path, monkeypatch):
     led = kt.load_kiwoom_positions()
     assert led["091590"]["entry_px"] == 7000          # 브로커 매입평균 우선
     assert led["091590"]["strategy"] == "high_52w_filt"
+    assert led["091590"]["holding_days"] == 20        # 전략별 보유일(_HEAL_HOLDING)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 원장 좀비행 방지 3종 (2026-07-10: 부활 금지 / prune / float 승격 차단)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_ensure_no_resurrect_sold_today_and_prune(tmp_path, monkeypatch):
+    """15:21 매도(미체결) 직후 status: ① 오늘 판 코드는 재등록 금지
+    ② 원장에만 남은 좀비 행은 prune ③ 오늘 매수분은 잔고 미반영이어도 보존."""
+    from datetime import datetime as _dt
+    import kiwoom_trader as kt
+    monkeypatch.setattr(kt, "ORDERS_DIR", str(tmp_path))
+    monkeypatch.setattr(kt, "KIWOOM_POSITIONS_CSV", str(tmp_path / "kiwoom_positions.csv"))
+    monkeypatch.setattr(kt, "SIGNALS_CSV", str(tmp_path / "paper_signals.csv"))
+
+    today = _dt.today().strftime("%Y%m%d")
+    # 오늘 주문로그: 111111 매도(만기), 222222 매수
+    pd.DataFrame([
+        {"time": "15:21", "side": "sell", "code": "111111", "name": "A",
+         "strategy": "rsi_vol", "qty": 10, "price": 1000, "order_type": "3",
+         "ok": True, "order_no": "S1", "msg": ""},
+        {"time": "09:03", "side": "buy", "code": "222222", "name": "B",
+         "strategy": "rsi_reversal", "qty": 5, "price": 2000, "order_type": "3",
+         "ok": True, "order_no": "B2", "msg": ""},
+    ]).to_csv(tmp_path / f"orders_{today}.csv", index=False, encoding="utf-8-sig")
+
+    # 원장: 222222(오늘 매수, 잔고 미반영) + 333333(좀비 — 브로커 미보유)
+    kt.save_kiwoom_position("222222", 2000, "rsi_reversal", "20260707", 5)
+    kt.save_kiwoom_position("333333", 500, "rsi_vol", "20260601", 7)
+
+    # 브로커 잔고: 111111(방금 매도주문, 15:30 체결 전이라 아직 보임) + 444444(정상 보유)
+    kt.ensure_kiwoom_ledger({
+        "111111": {"qty": 10, "name": "A", "avg_price": 990},
+        "444444": {"qty": 3, "name": "C", "avg_price": 3000},
+    })
+    led = kt.load_kiwoom_positions()
+    assert "111111" not in led          # ① 오늘 매도분 부활 금지 (105330 실사례)
+    assert "333333" not in led          # ② 좀비 행 prune
+    assert "222222" in led              # ③ 오늘 매수분은 잔고 미반영이어도 보존
+    assert "444444" in led              # 정상 보유는 자가치유 등록
+
+
+def test_ensure_heal_backtracks_signal_date_and_holding(tmp_path, monkeypatch):
+    """치유 시 signal_date 를 신호CSV에서 역추적(매수일이 아니라), holding 은 전략별."""
+    from datetime import datetime as _dt
+    import kiwoom_trader as kt
+    monkeypatch.setattr(kt, "ORDERS_DIR", str(tmp_path))
+    monkeypatch.setattr(kt, "KIWOOM_POSITIONS_CSV", str(tmp_path / "kiwoom_positions.csv"))
+    monkeypatch.setattr(kt, "SIGNALS_CSV", str(tmp_path / "paper_signals.csv"))
+
+    pd.DataFrame([
+        {"signal_date": "20260701", "code": "555555", "strategy": "rsi_vol", "holding_days": 7},
+        {"signal_date": "20260620", "code": "555555", "strategy": "rsi_vol", "holding_days": 7},
+    ]).to_csv(tmp_path / "paper_signals.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame([{"time": "09:03", "side": "buy", "code": "555555", "name": "D",
+                   "strategy": "rsi_vol", "qty": 10, "price": 5000, "order_type": "3",
+                   "ok": True, "order_no": "B5", "msg": ""}]) \
+        .to_csv(tmp_path / "orders_20260702.csv", index=False, encoding="utf-8-sig")
+
+    kt.ensure_kiwoom_ledger({"555555": {"qty": 10, "name": "D", "avg_price": 5100}})
+    led = kt.load_kiwoom_positions()
+    assert led["555555"]["signal_date"] == "20260701"   # 매수일(0702) 직전 신호일 역추적
+    assert led["555555"]["holding_days"] == 7            # rsi_vol 전략별 보유일
+
+
+def test_ledger_loader_survives_empty_signal_date(tmp_path, monkeypatch):
+    """한 행의 signal_date 가 비어도 다른 행이 'YYYYMMDD.0' 으로 오염되지 않는다
+    (pandas float 승격 → 원장 만기판정 전체 무력화 방지)."""
+    import kiwoom_trader as kt
+    p = tmp_path / "kiwoom_positions.csv"
+    monkeypatch.setattr(kt, "KIWOOM_POSITIONS_CSV", str(p))
+    p.write_text("code,entry_px,strategy,signal_date,holding_days\n"
+                 "067290,3000.0,high_52w_filt,20260623,20\n"
+                 "999999,1000.0,rsi_vol,,7\n", encoding="utf-8-sig")
+    led = kt.load_kiwoom_positions()
+    assert led["067290"]["signal_date"] == "20260623"   # '.0' 오염 없음
+    assert led["999999"]["signal_date"] == ""
+    assert led["067290"]["holding_days"] == 20 and led["999999"]["holding_days"] == 7
 
 
 # ─────────────────────────────────────────────────────────────────────────────

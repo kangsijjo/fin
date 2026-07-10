@@ -36,6 +36,7 @@ KIS 모의 TR ID:
 """
 
 import os
+import re as _re
 import sys
 import csv
 import time
@@ -159,6 +160,10 @@ def kis_lock(timeout: int = 60):
                 info = json.load(f)
             age = time.time() - info.get("ts", 0)
             if age > 300:
+                # 삭제 직전 재확인 — 다른 대기자의 '새 락' 오삭제 방지(2026-07-10, 키움 동일)
+                with open(_LOCK_PATH) as f2:
+                    if json.load(f2).get("ts") != info.get("ts"):
+                        continue
                 os.remove(_LOCK_PATH)
                 continue
             print(f"[kis_lock] 대기 중 ({info.get('who','?')}, {age:.0f}s)...")
@@ -384,20 +389,26 @@ def load_kis_positions():
     """kis_positions.csv → {code: {entry_px, strategy, signal_date, holding_days}}.
 
     매수 체결 시 기록, 매도 체결 시 삭제.
+    [2026-07-10] 전 컬럼 dtype=str — 한 행이라도 signal_date 가 비면 pandas float 승격으로
+    전 행이 'YYYYMMDD.0' 이 되어 원장 만기판정이 통째로 무력화되던 위험 차단(키움 동일).
     """
     path = KIS_POSITIONS_CSV
     if not os.path.exists(path):
         return {}
     try:
-        df = pd.read_csv(path, dtype={"code": str})
+        df = pd.read_csv(path, dtype=str).fillna("")
         df["code"] = df["code"].astype(str).str.zfill(6)
         result = {}
         for _, r in df.iterrows():
+            try:
+                holding = int(float(str(r.get("holding_days", "") or 0)))
+            except (TypeError, ValueError):
+                holding = HOLDING_DAYS_DEFAULT
             result[r["code"]] = {
-                "entry_px":    float(r.get("entry_px", 0)),
-                "strategy":    str(r.get("strategy", "")),
-                "signal_date": str(r.get("signal_date", "")),
-                "holding_days": _to_int(r.get("holding_days"), HOLDING_DAYS_DEFAULT),
+                "entry_px":    _to_float(r.get("entry_px", 0), 0.0),
+                "strategy":    str(r.get("strategy", "") or ""),
+                "signal_date": _re.sub(r"\.0$", "", str(r.get("signal_date", "") or "")),
+                "holding_days": holding if holding > 0 else HOLDING_DAYS_DEFAULT,
             }
         return result
     except Exception as e:
@@ -603,6 +614,21 @@ def codes_due_for_exit(close_map):
 def cmd_status():
     client = KISMockClient()
     deposit, positions = client.get_balance()
+
+    # 원장 prune(2026-07-10, 키움 ensure 와 동일 계열): 원장에만 있고 브로커에 없는 행은
+    # 제거 — 좀비 행이 쌓이면 전량청산 후 '잔고0 vs 원장보유' 게이트가 매수를 영구 차단.
+    # 보호: 오늘 매수분(잔고 반영 지연)은 제외, 잔고가 통째 빈 응답이면 오늘 매도분만 정리.
+    try:
+        _sold = today_ordered_codes("sell")
+        _bought = today_ordered_codes("buy")
+        for _c in [c for c in load_kis_positions()
+                   if c not in positions and c not in _bought
+                   and (positions or c in _sold)]:
+            remove_kis_position(_c)
+            print(f"[ledger] KIS 원장 정리: {_c} — 브로커 미보유")
+    except Exception as _e:
+        print(f"[warn] KIS 원장 정리 실패(무시): {_e}")
+
     strategy_map = get_signal_strategy_map()
     kis_pos = load_kis_positions()
     for _c, _v in kis_pos.items():   # 매수 당시 전략 우선(슬롯 표시 정확성)

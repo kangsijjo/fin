@@ -32,6 +32,7 @@
 """
 
 import os
+import re as _re
 import sys
 import csv
 import time
@@ -102,6 +103,11 @@ def kiwoom_lock(timeout: int = 30):
                 info = json.load(f)
             age = time.time() - info.get("ts", 0)
             if age > 300:   # 5분 이상 된 stale lock → 강제 해제 후 재시도
+                # 삭제 직전 재확인 — 판정~삭제 사이에 다른 대기자가 stale 을 지우고
+                # '새 락'을 걸었으면 건드리지 않는다(이중 진입 레이스 축소, 2026-07-10)
+                with open(_LOCK_PATH, "r") as f2:
+                    if json.load(f2).get("ts") != info.get("ts"):
+                        continue
                 os.remove(_LOCK_PATH)
                 continue
             print(f"[kiwoom_lock] 잠금 대기 중 (보유: {info.get('who','?')}, {age:.0f}초 경과)...")
@@ -734,19 +740,27 @@ KIWOOM_POSITIONS_CSV = f"{ORDERS_DIR}/kiwoom_positions.csv"
 
 
 def load_kiwoom_positions():
-    """kiwoom_positions.csv → {code: {entry_px, strategy, signal_date, holding_days}}."""
+    """kiwoom_positions.csv → {code: {entry_px, strategy, signal_date, holding_days}}.
+
+    [2026-07-10] 전 컬럼 dtype=str 로 읽음 — 한 행이라도 signal_date 가 비면 pandas 가
+    컬럼을 float 로 승격해 전 행이 '20260624.0' 이 되고, 원장 만기판정(_expiry_due 의
+    달력 매칭)이 통째로 무력화되던 위험 차단. '.0' 잔재도 방어적으로 제거."""
     if not os.path.exists(KIWOOM_POSITIONS_CSV):
         return {}
     try:
-        df = pd.read_csv(KIWOOM_POSITIONS_CSV, dtype={"code": str})
+        df = pd.read_csv(KIWOOM_POSITIONS_CSV, dtype=str).fillna("")
         df["code"] = df["code"].astype(str).str.zfill(6)
         out = {}
         for _, r in df.iterrows():
+            try:
+                holding = int(float(str(r.get("holding_days", "") or 0)))
+            except (TypeError, ValueError):
+                holding = 20
             out[r["code"]] = {
-                "entry_px":     float(r.get("entry_px", 0) or 0),
-                "strategy":     str(r.get("strategy", "")),
-                "signal_date":  str(r.get("signal_date", "")),
-                "holding_days": _to_int(r.get("holding_days"), 20),
+                "entry_px":     _to_float(r.get("entry_px", 0), 0.0),
+                "strategy":     str(r.get("strategy", "") or ""),
+                "signal_date":  _re.sub(r"\.0$", "", str(r.get("signal_date", "") or "")),
+                "holding_days": holding if holding > 0 else 20,
             }
         return out
     except Exception as e:
@@ -779,30 +793,85 @@ def remove_kiwoom_position(code):
         _write_kiwoom_positions(existing)
 
 
-def ensure_kiwoom_ledger(pos):
-    """브로커 보유인데 원장에 없는 종목을 자가치유 등록 — 최초 도입 시드 + 누락 방지.
+# 자가치유 시 전략별 보유일 (안C 라이브 파라미터와 일치 — 20 고정이던 것을 수정 2026-07-10)
+_HEAL_HOLDING = {"high_52w_filt": 20, "rsi_reversal": 5, "rsi_vol": 7}
 
-    entry_px = 브로커 매입평균(실체결) 우선, 없으면 주문 참조가. 전략은 매수 당시."""
+
+def _signal_date_lookup(code, strategy, buy_date):
+    """paper_signals.csv 에서 매수일(buy_date) 직전의 실제 신호일 역추적 — 자가치유용.
+
+    치유가 signal_date 에 '매수일'을 넣으면 _expiry_due(진입=신호 다음날) 가정과 충돌해
+    만기가 1영업일 늦어짐(2026-07-06 시드 3종에서 실측). 신호CSV 에서 찾으면 정확한
+    신호일을, 못 찾으면 ''(호출측이 매수일 폴백 — 1일 지연 허용)."""
+    try:
+        if not os.path.exists(SIGNALS_CSV) or not buy_date:
+            return ""
+        s = pd.read_csv(SIGNALS_CSV, dtype=str)
+        s["code"] = s["code"].astype(str).str.zfill(6)
+        s["signal_date"] = s["signal_date"].astype(str).str.replace("-", "", regex=False)
+        s = s[(s["code"] == str(code).zfill(6)) & (s["signal_date"] < str(buy_date))]
+        if strategy and "strategy" in s.columns:
+            st = s[s["strategy"] == strategy]
+            if not st.empty:
+                s = st
+        return str(s["signal_date"].max()) if not s.empty else ""
+    except Exception:
+        return ""
+
+
+def ensure_kiwoom_ledger(pos):
+    """원장 자가치유 — 등록(브로커에만 있음) + 정리(원장에만 있음).
+
+    [2026-07-10 재작성 — 좀비행 부활 방지(실사례 105330)]
+    ① 오늘 매도된 코드는 재등록 금지: 15:21 시장가 매도는 15:30 동시호가에 체결되는데,
+       직후 cmd_status 시점의 잔고엔 아직 보유로 보여 cmd_sell 이 지운 원장 행이
+       되살아났음(원장에 좀비 행 축적 → 전량청산 시 '잔고0 vs 원장보유' 게이트가
+       다음날 매수를 영구 차단하는 연쇄).
+    ② prune: 원장에만 있고 브로커에 없는 행 제거. 보호장치 — 오늘 매수분(잔고 반영
+       지연 가능)은 제외, 잔고가 통째로 빈 응답(글리치 의심)일 땐 오늘 매도분만 정리.
+    ③ 치유 메타데이터 정확화: holding_days 전략별(_HEAL_HOLDING), signal_date 는
+       신호CSV 역추적(_signal_date_lookup) 우선.
+    entry_px = 브로커 매입평균(실체결) 우선, 없으면 주문 참조가."""
     try:
         led = load_kiwoom_positions()
+        sold_today = today_ordered_codes("sell")
+        bought_today = today_ordered_codes("buy")
+        pos_codes = {str(c).zfill(6) for c in pos.keys()}
+        changed = False
+
+        # ── ② prune: 원장에만 있는 행 제거 ────────────────────────────────
+        for code in list(led.keys()):
+            if code in pos_codes or code in bought_today:
+                continue
+            if code in sold_today or pos_codes:
+                led.pop(code, None)
+                changed = True
+                why = "오늘 매도 체결" if code in sold_today else "브로커 미보유(수동매도/체결 잔재)"
+                print(f"[ledger] 원장 정리: {code} — {why}")
+
+        # ── ①③ heal: 브로커에만 있는 행 등록 ─────────────────────────────
         buys = None
         added = 0
         for code, p in pos.items():
             code = str(code).zfill(6)
-            if code in led:
+            if code in led or code in sold_today:   # 오늘 매도분은 부활 금지(①)
                 continue
             if buys is None:
                 buys = _held_buy_map()
             info = buys.get(code, {})
             entry = float(p.get("avg_price", 0) or 0) or float(info.get("ref_px", 0) or 0)
+            strat = info.get("strategy", "")
+            buy_date = info.get("date", "")
             led[code] = {"entry_px": entry,
-                         "strategy": info.get("strategy", ""),
-                         "signal_date": info.get("date", ""),
-                         "holding_days": 20}
+                         "strategy": strat,
+                         "signal_date": _signal_date_lookup(code, strat, buy_date) or buy_date,
+                         "holding_days": _HEAL_HOLDING.get(strat, 20)}
             added += 1
-        if added:
+            changed = True
+        if changed:
             _write_kiwoom_positions(led)
-            print(f"[ledger] 원장 자가치유 등록 {added}건 → {KIWOOM_POSITIONS_CSV}")
+            if added:
+                print(f"[ledger] 원장 자가치유 등록 {added}건 → {KIWOOM_POSITIONS_CSV}")
     except Exception as e:
         print(f"[warn] 원장 자가치유 실패(무시): {e}")
 
@@ -1152,6 +1221,9 @@ def cmd_daily():
     else:
         print("[daily] 오후 모드 — 매도 후 매수")
         cmd_sell()
+        # ※ 15:21 매도는 15:30 동시호가 체결이라 아래 매수 시점엔 슬롯·예수금이 아직
+        #   회복되지 않음 — 오후 매수는 '이미 빈 슬롯'이 있을 때만 동작하는 보조 경로이고,
+        #   만기청산으로 비워진 슬롯의 신규 진입은 다음날 09:03 매수가 담당(2026-07-10 명확화).
         cmd_buy()
         # 오후 매수분 익절 지정가는 다음날 아침 cmd_place_targets 가 재발주(당일주문 곧 만료라 생략)
     cmd_status()
