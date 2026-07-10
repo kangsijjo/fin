@@ -158,6 +158,15 @@ ORDER_TYPE_LIMIT = "0"   # 지정가 (익절 목표가 매도용)
 PROFIT_TARGET = {"rsi_vol": 0.20, "high_52w_filt": 0.50}
 MIN_ORDER_AMOUNT = 100_000   # 슬롯당 이보다 작으면 주문 생략
 
+# 재해성 손실 서킷브레이커(2026-07-10 사용자 결정) — 브로커 평가손익률(매입평균 기준)이
+# 이 값 이하이면 만기 전이라도 15:21 cmd_sell 에서 시장가 청산.
+# ※ 목적은 '평균수익 최적화'가 아니라 상폐/거래정지류 꼬리위험 보험. stop_sweep 백테스트는
+#   무손절 우위였으나 (a) 풀이 레거시(h252/h500)라 안C 미대표 (b) 액면분할 무보정으로
+#   딥레벨 가짜 발동(-40% 발동률 9~20%)이 섞여 판단 근거로 부적합 판정. 라이브 실측
+#   3주간 1건(-51% JW신약) — 발동은 드물어야 정상이며 브로커 손익률은 분할 자동보정이라
+#   가짜 발동 없음. None 으로 바꾸면 비활성.
+CIRCUIT_BREAKER_PCT = -40.0
+
 # 강도 필터(사용자 결정 2026-07-02): score_ic(0~10, 높을수록 강함)가 이 값 미만인 신호는
 # 매수 스킵. 기록 719건 기준 ≥6.0 = 상위 24.5%(신호 과다 완화). 신호 '기록'은 전량 유지
 # (strength_logger 는 계속 모든 신호 채점 — 사후검증 데이터 보존), '집행'만 거른다.
@@ -1113,6 +1122,27 @@ def codes_due_for_exit():
     return due
 
 
+def _circuit_breaker_codes(pos):
+    """평가손실이 CIRCUIT_BREAKER_PCT 이하인 보유종목 → {code: loss_pct}.
+
+    손실률 = 브로커 현재가/매입평균 기준(분할 자동보정) 우선, 둘 중 하나라도 없으면
+    브로커 pnl_pct 폴백. 브레이커 비활성(None)이면 빈 dict."""
+    if CIRCUIT_BREAKER_PCT is None:
+        return {}
+    out = {}
+    for code, p in pos.items():
+        code = str(code).zfill(6)
+        cur = float(p.get("price", 0) or 0)
+        avg = float(p.get("avg_price", 0) or 0)
+        if cur > 0 and avg > 0:
+            loss = (cur / avg - 1) * 100
+        else:
+            loss = _to_float(p.get("pnl_pct", 0), 0.0)
+        if loss <= CIRCUIT_BREAKER_PCT:
+            out[code] = round(loss, 2)
+    return out
+
+
 def _today_close_map():
     """당일 종가 맵 (시간외단일가 주문 가격 지정용). 당일 없으면 빈 dict."""
     path = f"./macro_data/daily/{datetime.today():%Y%m%d}.csv"
@@ -1135,7 +1165,8 @@ def cmd_sell():
     pos = get_positions(api)
     _reconcile_tp_fills(pos)   # 오늘 익절 지정가 체결분 기록/알림 (만기 없어도 매 오후 수행)
     due = codes_due_for_exit()
-    if not due:
+    cb = _circuit_breaker_codes(pos)   # 재해성 손실(-40%) 서킷브레이커(2026-07-10)
+    if not due and not cb:
         print("[sell] 청산 대상 없음 — 종료")
         try:
             import notifier
@@ -1152,19 +1183,29 @@ def cmd_sell():
         if _v.get("strategy"):
             strategy_map[_c] = _v["strategy"]
     bought_today = today_ordered_codes("buy")
-    targets = due & set(pos.keys()) - already - bought_today
-    if due & bought_today:
+    targets = (due | set(cb)) & set(pos.keys()) - already - bought_today
+    if (due | set(cb)) & bought_today:
         # 옛 신호의 만기와 '오늘 새 신호 매수'가 같은 코드에 겹치면, 코드 전량 매도가
         # 오늘 산 물량까지 당일 청산해버림(2026-07-06 CJ ENM 실사례) → 당일 매수 코드는
         # 만기매도에서 제외(내일 이후 만기 로직이 다시 처리).
-        print(f"[sell] 당일 매수 코드 만기매도 보류: {sorted(due & bought_today)}")
-    print(f"[sell] 전략별 보유일 만기: {len(due)}종목 | 실제 보유 대상: {len(targets)}종목")
+        print(f"[sell] 당일 매수 코드 만기매도 보류: {sorted((due | set(cb)) & bought_today)}")
+    print(f"[sell] 만기 {len(due)}종목 + 서킷브레이커 {len(cb)}종목 | 실제 보유 대상: {len(targets)}종목")
+    if cb:
+        try:
+            import notifier
+            notifier.safe_send("🚨 [키움 서킷브레이커] "
+                               + ", ".join(f"{c} {pos[c]['name']}({v:+.1f}%)"
+                                           for c, v in cb.items() if c in pos)
+                               + f" ≤ {CIRCUIT_BREAKER_PCT:.0f}% — 시장가 청산")
+        except Exception:
+            pass
     n_placed = 0
     for code in sorted(targets):
         qty = pos[code]["qty"]
         name = pos[code]["name"]
         strat = strategy_map.get(str(code).zfill(6), "")
         ref_px = int(close_map.get(code, 0))
+        reason = f"circuit_breaker({cb[code]:+.1f}%)" if code in cb else ""
         # 미체결 익절 지정가가 물량을 잠그고 있으면 먼저 취소(잔량 전부) 후 시장가 청산
         if code in tp_open:
             try:
@@ -1182,7 +1223,8 @@ def cmd_sell():
                 ord_uv="",   # 시장가
             )
             ono = _pick(r, "ord_no", "odno", default="")
-            print(f"  [매도주문] {code} {name} {qty}주 ref:{ref_px:,} → {ono}")
+            print(f"  [매도주문] {code} {name} {qty}주 ref:{ref_px:,}"
+                  + (f"  사유:{reason}" if reason else "") + f" → {ono}")
             try:
                 remove_kiwoom_position(code)   # 진입가 원장에서 제거
             except Exception:
@@ -1195,7 +1237,8 @@ def cmd_sell():
             log_order({"time": datetime.now().strftime("%H:%M:%S"), "side": "sell",
                        "code": code, "name": name, "strategy": strat,
                        "qty": qty, "price": ref_px,
-                       "order_type": ORDER_TYPE_SELL, "ok": True, "order_no": ono, "msg": ""})
+                       "order_type": ORDER_TYPE_SELL, "ok": True, "order_no": ono,
+                       "msg": reason})
             n_placed += 1
         except Exception as e:
             print(f"  [실패] {code} {name}: {e}")
@@ -1203,7 +1246,7 @@ def cmd_sell():
                        "code": code, "name": name, "strategy": strat,
                        "qty": qty, "price": ref_px,
                        "order_type": ORDER_TYPE_SELL, "ok": False, "order_no": "",
-                       "msg": str(e)[:200]})
+                       "msg": (reason + " | " if reason else "") + str(e)[:180]})
     print(f"[sell] 주문 {n_placed}건 완료")
 
 

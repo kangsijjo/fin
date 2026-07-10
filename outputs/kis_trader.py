@@ -715,6 +715,48 @@ def todays_signals():
     return s[s["signal_date"] == target].to_dict("records")
 
 
+def _strength_map(sigs):
+    """db/signal_strength_log.csv → {(code, strategy): score_ic} (해당 신호일·KIS 계좌만).
+
+    매수 후보 정렬용(키움 _strength_map 과 동일 패턴, 계좌 필터만 다름).
+    파일 없음/파싱 실패 시 빈 dict — 정렬이 거래대금순으로 자연 폴백(fail-open)."""
+    path = "./db/signal_strength_log.csv"
+    if not os.path.exists(path) or not sigs:
+        return {}
+    try:
+        dates = {str(s.get("signal_date", "")).replace("-", "") for s in sigs}
+        df = pd.read_csv(path, dtype={"code": str}, encoding="utf-8-sig")
+        df["signal_date"] = df["signal_date"].astype(str).str.replace("-", "")
+        df = df[df["signal_date"].isin(dates)]
+        if "account" in df.columns:   # KIS 계좌 기록만 (키움 기록과 혼동 방지)
+            df = df[df["account"].astype(str).str.lower().str.startswith("kis")]
+        df["code"] = df["code"].astype(str).str.zfill(6)
+        df["score_ic"] = pd.to_numeric(df["score_ic"], errors="coerce")
+        out = {}
+        for _, r in df.iterrows():
+            if pd.notna(r["score_ic"]):
+                out[(str(r["code"]), str(r.get("strategy", "")))] = float(r["score_ic"])
+        return out
+    except Exception as e:
+        print(f"[warn] 강도 로그 로드 실패(tv순 폴백): {e}")
+        return {}
+
+
+def _order_candidates(cands, strength, tv_map, strat):
+    """매수 후보 정렬 — 강도(score_ic) 내림차순, 무기록은 뒤에서 거래대금 내림차순.
+
+    [2026-07-10 도입 — 사용자 결정] 키움은 2026-07-06 tv순 역선택 진단(체결분 -3.3%p)
+    으로 강도순 전환·실측 검증됨(≥6 평균 +1.90%). KIS 는 자체 표본이 13건뿐이라 통계
+    확증은 불가하지만, 정렬은 후보>빈슬롯일 때만 작동하는 저위험 변경이라 대칭 적용.
+    ※ 키움의 MIN_STRENGTH_SCORE(6.0 미만 차단) 필터는 KIS 미도입 — KIS 표본 축적 후 결정."""
+    def _key(r):
+        code = str(r.get("code", "")).zfill(6)
+        sc = strength.get((code, str(r.get("strategy", strat))))
+        return (sc if sc is not None else float("-inf"),
+                float(tv_map.get(r["code"], 0) or 0))
+    return sorted(cands, key=_key, reverse=True)
+
+
 def _reconcile_diff(positions):
     """브로커 잔고 vs 로컬 추적(kis_positions.csv) 불일치 계산.
     반환: (orphan, stale) — orphan=브로커만 보유(추적 누락), stale=로컬만 보유(브로커 없음).
@@ -809,7 +851,12 @@ def cmd_buy():
                 tv_map = dict(zip(md["code"], md[col_cand]))
                 break
 
-    # 전략별 신호 분류 + 거래대금 내림차순
+    # 전략별 신호 분류 + 강도(score_ic) 내림차순, 무기록은 tv순 폴백(2026-07-10 전환)
+    strength = _strength_map(sigs)
+    if strength:
+        print(f"[buy] 후보 정렬: 강도(score_ic) 내림차순 — 기록 {len(strength)}건")
+    else:
+        print("[buy] 강도 기록 없음 — 거래대금순 폴백")
     sigs_by_strat = {k: [] for k in STRATEGY_PRIORITY}
     for sig in sigs:
         strat = str(sig.get("strategy", "h52w_for3d_mkt"))
@@ -817,8 +864,7 @@ def cmd_buy():
             strat = "h52w_for3d_mkt"
         sigs_by_strat[strat].append(sig)
     for strat in STRATEGY_PRIORITY:
-        sigs_by_strat[strat].sort(
-            key=lambda r: float(tv_map.get(r["code"], 0) or 0), reverse=True)
+        sigs_by_strat[strat] = _order_candidates(sigs_by_strat[strat], strength, tv_map, strat)
 
     n_placed = 0
     remaining_dep = buy_budget

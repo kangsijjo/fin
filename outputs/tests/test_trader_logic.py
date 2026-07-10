@@ -322,6 +322,53 @@ def test_kis_codes_due_ledger_expiry_and_stop(tmp_path, monkeypatch):
     assert "000070" not in due2
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 서킷브레이커(-40%) + KIS 강도순 정렬 (2026-07-10 사용자 결정 도입)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_circuit_breaker_codes_threshold_and_fallback():
+    import kiwoom_trader as kt
+    pos = {
+        "067290": {"qty": 202, "name": "JW신약", "price": 1491, "avg_price": 3030},   # -50.8%
+        "192410": {"qty": 223, "name": "오늘이엔엠", "price": 3325, "avg_price": 2920},  # +13.9%
+        "105330": {"qty": 10, "name": "KNW", "price": 6500, "avg_price": 10000},      # -35.0% (경계 위)
+        "900300": {"qty": 255, "name": "오가닉", "price": 0, "avg_price": 0,
+                   "pnl_pct": -45.0},                                                  # 가격 결손 → pnl_pct 폴백
+    }
+    cb = kt._circuit_breaker_codes(pos)
+    assert "067290" in cb and cb["067290"] <= -40
+    assert "900300" in cb                        # 폴백 경로
+    assert "105330" not in cb and "192410" not in cb
+
+    # 비활성(None) 시 빈 dict
+    orig = kt.CIRCUIT_BREAKER_PCT
+    try:
+        kt.CIRCUIT_BREAKER_PCT = None
+        assert kt._circuit_breaker_codes(pos) == {}
+    finally:
+        kt.CIRCUIT_BREAKER_PCT = orig
+
+
+def test_kis_order_candidates_strength_first_tv_fallback():
+    """KIS 후보 정렬 — 강도 내림차순, 무기록은 tv순 뒤로. 필터(6.0 차단)는 미적용이므로
+    낮은 강도도 '뒤로 밀릴 뿐' 제외되지 않는다."""
+    os.environ.setdefault("KIS_MOCK_APP_KEY", "test")
+    os.environ.setdefault("KIS_MOCK_APP_SECRET", "test")
+    os.environ.setdefault("KIS_MOCK_ACCOUNT", "12345678-01")
+    import kis_trader as kx
+    sigs = [
+        {"code": "000001", "strategy": "gc_for3d"},   # 강도 3.0 (낮지만 제외 안 됨)
+        {"code": "000002", "strategy": "gc_for3d"},   # 무기록, tv 최고
+        {"code": "000003", "strategy": "gc_for3d"},   # 강도 7.1
+    ]
+    strength = {("000001", "gc_for3d"): 3.0, ("000003", "gc_for3d"): 7.1}
+    tv = {"000001": 1e9, "000002": 9e9, "000003": 2e9}
+    out = [s["code"] for s in kx._order_candidates(sigs, strength, tv, "gc_for3d")]
+    assert out == ["000003", "000001", "000002"], out
+    out2 = [s["code"] for s in kx._order_candidates(sigs, {}, tv, "gc_for3d")]
+    assert out2 == ["000002", "000003", "000001"], out2   # 무기록 전체 → tv순 폴백
+
+
 def test_realized_pnl_fifo_and_close_backfill(monkeypatch):
     srv = _srv()
     # 매도일 종가 조회를 합성값으로 대체(파일 무접촉)
