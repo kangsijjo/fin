@@ -20,6 +20,15 @@
 import sys
 import time
 
+# cp949 콘솔(PYTHONIOENCODING 미설정 수동 실행 등)에서 게이지 문자(█░)가
+# UnicodeEncodeError 로 배치 전체를 죽이던 것 방지 — 인코딩 불가 문자는 ? 로 대체.
+# (utf-8 환경에선 영향 없음. watchdog/scheduler 와 동일 계열 하드닝, 2026-07-10)
+try:
+    sys.stdout.reconfigure(errors="replace")
+    sys.stderr.reconfigure(errors="replace")
+except Exception:
+    pass
+
 
 def _fmt_sec(sec):
     sec = int(sec)

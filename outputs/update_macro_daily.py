@@ -8,7 +8,11 @@ run_paper.bat 이 live_signal.py 직전에 호출한다.
 pykrx_collector.collect_macro_data 재사용 — 이미 수집된 날짜는 자동 스킵.
 
 주의: 15:50 실행 시 당일 OHLCV 는 확정치, 투자자 수급은 잠정치일 수 있음.
-수급(foreign_net/inst_net)은 전략 신호에 사용되지 않고 AI feature 전용이라 허용.
+[2026-07-10 정정] 과거 "수급은 전략 신호에 미사용(AI 전용)" 전제는 KIS 안D 도입으로
+무효 — h52w_for3d_mkt/for_high20_mkt/gc_for3d 가 '외국인 3일 연속 순매수'를 필수로
+쓴다. '있으면 스킵' 정책 탓에 당일 잠정치가 영구 동결되던 것을, 매 실행 시 직전
+거래일 1개를 확정치로 재수집(main 의 refresh 블록)해 보정한다. 당일치는 여전히
+잠정 — 18:30 신호는 그 시점 최선의 데이터로 판단(실거래와 동일한 정보 제약).
 
 사용법:
   python update_macro_daily.py                          # 결측 스캔 + 오늘까지 채움
@@ -65,6 +69,29 @@ def main():
     # 일반 모드: 결측 우선 정책
     files = sorted(glob.glob(f"{DATA_DIR}/*.csv"))
     today = datetime.today()
+
+    # [2026-07-10] 직전 거래일 확정치 재수집 — 15:50 당일 수집분의 수급(외국인/기관)은
+    # 잠정치인데 '있으면 스킵' 정책이라 영구 동결됐었음(KIS 3전략의 외국인 조건 입력 오염
+    # + 확정치로 백필된 과거 데이터와의 비대칭 → 백테스트 vs 라이브 조건 불일치).
+    # 직전 파일 1개만 지우고 즉시 재수집(비용 ~수초). 실패해도 아래 결측 스캔이 같은
+    # 구멍을 즉시 재시도하고, 그래도 안 되면 주말 갭백필이 메운다.
+    # ※ '오늘보다 이전' 중 최신 파일을 고른다 — run_paper.bat 은 pykrx_collector(오늘
+    #   파일 생성)를 먼저 돌리고 이 스크립트를 돌리므로 files[-1]은 항상 '오늘'이라
+    #   files[-1] 기준이면 refresh 가 영원히 미발동(2026-07-10 초기구현 결함 수정).
+    today_str = today.strftime("%Y%m%d")
+    prev_days = [os.path.basename(f).rsplit(".", 1)[0] for f in files]
+    prev_days = [d for d in prev_days if d.isdigit() and len(d) == 8 and d < today_str]
+    if prev_days:
+        last = max(prev_days)
+        last_dt = datetime.strptime(last, "%Y%m%d")
+        if (today - last_dt).days <= 7:
+            print(f"[update_macro] 직전 거래일 {last} 수급 확정치 재수집")
+            _force_delete(last)
+            collect_macro_data(last, last)
+            if not (os.path.exists(f"{DATA_DIR}/{last}.csv")
+                    or os.path.exists(f"{DATA_DIR}/{last}.csv.holiday")):
+                print(f"[update_macro][WARN] {last} 재수집 실패 — 결측 스캔에서 재시도")
+        files = sorted(glob.glob(f"{DATA_DIR}/*.csv"))
 
     # [2026-06-13] 결측 우선 정책: 마지막 파일 이후만이 아니라 보유 구간 전체를
     # 스캔해 중간 구멍부터 채움. 기존 파일/휴장 마커는 즉시 스킵이라 비용 미미.
