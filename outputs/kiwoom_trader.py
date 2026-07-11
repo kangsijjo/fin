@@ -622,7 +622,9 @@ def cmd_buy():
             if code in pos or code in already:
                 print(f"    [skip] {code} {name} — 이미 보유/주문됨")
                 continue
-            if close <= 0:
+            # NaN 방어: 'close <= 0' 은 NaN 에서 False 라 통과 후 int(NaN) 크래시로
+            # cmd_buy 전체가 죽음 — 'not (close > 0)' 은 NaN 도 걸러냄(2026-07-10)
+            if not (close > 0):
                 continue
 
             # 강도 필터 — score_ic < 6.0 이면 스킵(기록 없으면 통과, 2026-07-02)
@@ -778,13 +780,16 @@ def load_kiwoom_positions():
 
 
 def _write_kiwoom_positions(pos_dict):
+    """원자적 재작성(tmp + os.replace) — 도중 크래시 시 0바이트/부분행 방지(2026-07-10)."""
     os.makedirs(ORDERS_DIR, exist_ok=True)
     fields = ["code", "entry_px", "strategy", "signal_date", "holding_days"]
-    with open(KIWOOM_POSITIONS_CSV, "w", newline="", encoding="utf-8-sig") as f:
+    tmp = KIWOOM_POSITIONS_CSV + ".tmp"
+    with open(tmp, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         for code, d in pos_dict.items():
             w.writerow({"code": code, **d})
+    os.replace(tmp, KIWOOM_POSITIONS_CSV)
 
 
 def save_kiwoom_position(code, entry_px, strategy, signal_date, holding_days):
@@ -1060,12 +1065,20 @@ def cmd_place_targets(api=None, pos=None):
 # 매도 — 40영업일 도달
 # ------------------------------------------------------------
 def _expiry_due(ds, signal_date, holding, today):
-    """만기 도달 여부 — 진입=신호 다음 영업일, 청산=진입일 포함 holding일째 종가."""
+    """만기 도달 여부 — 진입=신호 다음 영업일, 청산=진입일 포함 holding일째 종가.
+
+    [2026-07-10 오프바이원 수정] 15:21 실행 시점의 macro 달력은 '어제'까지(당일 수집은
+    15:50)라 만기일 당일엔 exit_i==len(ds) 로 항상 False → 만기매도가 익영업일에 나가
+    보유가 실질 +1일이던 버그(백테스트는 만기일 종가 청산 가정 — 이 수정으로 15:21
+    마감 동시호가 매도가 백테스트와 정확히 일치). 달력 마지막의 다음 영업일이 만기이고
+    today 가 달력 마지막보다 뒤면 오늘=만기일로 판정(거래일에만 실행되므로 안전)."""
     if not ds or not signal_date or signal_date not in ds:
         return None   # 판정 불가
     entry_i = ds.index(signal_date) + 1
     exit_i = entry_i + int(holding) - 1
-    return exit_i < len(ds) and ds[exit_i] <= today
+    if exit_i < len(ds):
+        return ds[exit_i] <= today
+    return (exit_i - (len(ds) - 1)) == 1 and today > ds[-1]
 
 
 def codes_due_for_exit():
@@ -1093,13 +1106,15 @@ def codes_due_for_exit():
     ledger_decided = set()   # 원장으로 판정 끝난 코드 — 신호CSV 폴백에서 제외
 
     for code, info in load_kiwoom_positions().items():
+        # [2026-07-10] 원장에 있으면 판정불가여도 폴백 금지 — None 경로로 '옛 신호 만기
+        # 오염'(조기청산)이 재유입되던 구멍. 판정불가는 보류+경고(좀비화는 prune/치유가 방지).
+        ledger_decided.add(code)
         sd = str(info.get("signal_date", "")).replace("-", "")
         holding = _to_int(info.get("holding_days"), 20)
         verdict = _expiry_due(code_dates.get(code), sd, holding, today)
         if verdict is None:
-            continue   # 원장 날짜가 달력에 없음(형식 이상 등) → 신호CSV 폴백에 맡김
-        ledger_decided.add(code)
-        if verdict:
+            print(f"[sell][warn] {code} 원장 signal_date({sd}) 달력 판정불가 — 만기 보류, 원장 확인 필요")
+        elif verdict:
             due.add(code)
 
     if not os.path.exists(SIGNALS_CSV):
@@ -1204,7 +1219,8 @@ def cmd_sell():
         qty = pos[code]["qty"]
         name = pos[code]["name"]
         strat = strategy_map.get(str(code).zfill(6), "")
-        ref_px = int(close_map.get(code, 0))
+        _cp = close_map.get(code, 0)
+        ref_px = int(_cp) if (_cp and _cp == _cp) else 0   # NaN(자기비교 False) 크래시 방어
         reason = f"circuit_breaker({cb[code]:+.1f}%)" if code in cb else ""
         # 미체결 익절 지정가가 물량을 잠그고 있으면 먼저 취소(잔량 전부) 후 시장가 청산
         if code in tp_open:
@@ -1276,12 +1292,12 @@ def cmd_daily():
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
 
-    if cmd == "status":
-        cmd_status()
-        sys.exit(0)
-
+    # status 도 락 안에서 — cmd_status 의 ensure(prune/heal)가 원장 '쓰기' 작업이라
+    # 락 없이 daily 와 겹치면 load-modify-write 레이스(행 유실/부활) 가능(2026-07-10).
     with kiwoom_lock(timeout=60):
-        if cmd == "buy":
+        if cmd == "status":
+            cmd_status()
+        elif cmd == "buy":
             cmd_buy()
         elif cmd == "sell":
             cmd_sell()

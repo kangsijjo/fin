@@ -322,6 +322,70 @@ def test_kis_codes_due_ledger_expiry_and_stop(tmp_path, monkeypatch):
     assert "000070" not in due2
 
 
+def test_expiry_due_calendar_edge_off_by_one():
+    """만기 오프바이원 수정(2026-07-10) — 실행 시점 달력은 '어제'까지라 만기일 당일
+    판정이 항상 False 였음. 달력 마지막+1 영업일이 만기이고 today 가 그 뒤면 due."""
+    import kiwoom_trader as kt
+    import kis_trader as kx
+    ds = ["20260102", "20260103", "20260106", "20260107"]   # '어제'(0107)까지만 존재
+    # 신호 0102·보유 4일 → 진입 0103, 만기 4일째 = 0108(달력 밖 +1) → 오늘 0108 = 만기일
+    assert kt._expiry_due(ds, "20260102", 4, "20260108") is True
+    assert kx._expiry_due(ds, "20260102", 4, "20260108") is True
+    # 보유 5일 → 만기 0109(달력 밖 +2) → 오늘 0108엔 미도래 (데이터 정체 시 보수적 대기)
+    assert kt._expiry_due(ds, "20260102", 5, "20260108") is False
+    # 만기가 달력 안(0107)이면 기존 경로 그대로
+    assert kt._expiry_due(ds, "20260102", 3, "20260108") is True
+
+
+def test_kis_ensure_ledger_heal_and_prune(tmp_path, monkeypatch):
+    """KIS 원장 자가치유(2026-07-10 신설): 좀비 prune + 브로커 보유 heal(전략별 보유일,
+    신호일 역추적) + 오늘 매도분 부활 금지 — 키움 ensure 와 대칭."""
+    from datetime import datetime as _dt
+    os.environ.setdefault("KIS_MOCK_APP_KEY", "test")
+    os.environ.setdefault("KIS_MOCK_APP_SECRET", "test")
+    os.environ.setdefault("KIS_MOCK_ACCOUNT", "12345678-01")
+    import kis_trader as kx
+    monkeypatch.setattr(kx, "ORDERS_DIR", str(tmp_path))
+    monkeypatch.setattr(kx, "KIS_POSITIONS_CSV", str(tmp_path / "kis_positions.csv"))
+    monkeypatch.setattr(kx, "SIGNALS_CSV", str(tmp_path / "kis_paper_signals.csv"))
+
+    today = _dt.today().strftime("%Y%m%d")
+    pd.DataFrame([{"time": "09:01", "side": "buy", "code": "777777", "name": "G",
+                   "strategy": "gc_for3d", "qty": 10, "price": 5000,
+                   "order_type": "m", "reason": "signal", "ok": True, "order_no": "B7", "msg": ""}]) \
+        .to_csv(tmp_path / "kis_orders_20260702.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame([{"time": "09:01", "side": "sell", "code": "888888", "name": "H",
+                   "strategy": "h52w_for3d_mkt", "qty": 5, "price": 3000,
+                   "order_type": "m", "reason": "expire", "ok": True, "order_no": "S8", "msg": ""}]) \
+        .to_csv(tmp_path / f"kis_orders_{today}.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame([{"signal_date": "20260701", "code": "777777",
+                   "strategy": "gc_for3d", "holding_days": 15}]) \
+        .to_csv(tmp_path / "kis_paper_signals.csv", index=False, encoding="utf-8-sig")
+
+    kx.save_kis_position("888888", 3000, "h52w_for3d_mkt", "20260601", 20)   # 오늘 매도된 잔재
+    kx.save_kis_position("999999", 100, "gc_for3d", "20260601", 15)          # 좀비
+
+    # 1단계(체결 전): 브로커 잔고에 888888 아직 보임 — 행 유지(매도 거부 가능성 보호),
+    # 좀비 999999 는 prune, 777777 은 heal 등록.
+    kx.ensure_kis_ledger({
+        "777777": {"qty": 10, "name": "G", "avg_price": 5100},
+        "888888": {"qty": 5, "name": "H", "avg_price": 3000},
+    })
+    led = kx.load_kis_positions()
+    assert "888888" in led                          # 브로커가 아직 보유로 보임 → 보수적 유지
+    assert "999999" not in led                      # 좀비 prune
+    assert led["777777"]["entry_px"] == 5100        # 브로커 매입평균 우선
+    assert led["777777"]["strategy"] == "gc_for3d"
+    assert led["777777"]["holding_days"] == 15      # 전략별 보유일
+    assert led["777777"]["signal_date"] == "20260701"  # 매수일(0702) 직전 신호일 역추적
+
+    # 2단계(체결 후): 888888 이 잔고에서 사라짐 → prune + 오늘 매도분이라 부활 금지
+    kx.ensure_kis_ledger({"777777": {"qty": 10, "name": "G", "avg_price": 5100}})
+    led = kx.load_kis_positions()
+    assert "888888" not in led
+    assert "777777" in led
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 서킷브레이커(-40%) + KIS 강도순 정렬 (2026-07-10 사용자 결정 도입)
 # ─────────────────────────────────────────────────────────────────────────────
