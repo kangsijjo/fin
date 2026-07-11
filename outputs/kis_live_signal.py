@@ -63,7 +63,9 @@ def is_excluded(name, code):
         return True
     if str(name).startswith(ETF_PREFIXES):
         return True
-    if str(name).endswith(("우", "우B")) or "우선주" in str(name) or "스팩" in str(name):
+    # 우선주 = 이름 끝 우/우B/우C + 코드 끝자리 0 아님(보통주=0) — live_signal 과 동일(2026-07-11)
+    if (str(name).endswith(("우", "우B", "우C")) and not str(code).endswith("0")) \
+            or "우선주" in str(name) or "스팩" in str(name):
         return True
     if len(str(code)) == 6 and str(code).startswith("5"):
         return True
@@ -133,8 +135,10 @@ def load_existing_signals():
 
 
 def append_signals(new_rows):
-    """신호 행을 kis_paper_signals.csv에 append."""
-    file_exists = os.path.exists(SIGNALS_CSV)
+    """신호 행을 kis_paper_signals.csv에 append.
+
+    [2026-07-11] 0바이트 파일은 '없음' 취급(헤더 재생성) — live_signal 과 동일 수정."""
+    file_exists = os.path.exists(SIGNALS_CSV) and os.path.getsize(SIGNALS_CSV) > 0
     # 기존 헤더 순서대로 쓴다 — CSV_FIELDS 가 나중에 재정렬돼도 컬럼이 어긋나지 않게
     # (paper_signals.csv 컬럼 어긋남 회귀와 동일 클래스 예방).
     fields = CSV_FIELDS

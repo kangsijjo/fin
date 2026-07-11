@@ -326,12 +326,22 @@ class FactorScorer:
         # supply_demand
         try:
             _cutoff = (_dt.strptime(date_str, "%Y%m%d") - _td(days=150)).strftime("%Y%m%d")
+            # [2026-07-11 critical fix ②] DB 는 대시형('2026-07-10') 저장인데 컷오프는
+            # 무대시('20260304') — 문자열 비교('-' < 숫자)로 전 행이 걸러져 sd 가 항상
+            # 비어 있었다(아래 Series 슬라이스 버그와 겹친 이중 원인). 포맷 무관 비교로 교체.
             sd = pd.read_sql(
                 "SELECT ticker, date, foreign_net_value, institution_net_value "
-                "FROM supply_demand WHERE date >= ? ORDER BY ticker, date",
+                "FROM supply_demand WHERE replace(date,'-','') >= ? ORDER BY ticker, date",
                 con, params=[_cutoff]
             )
-            sd["date"] = sd["date"].astype(str).str.replace("-", "")[:8] if len(sd) else sd["date"]
+            # [2026-07-11 critical fix] 과거 이 자리에 `...replace("-", "")[:8]` 줄이 있었음 —
+            # `[:8]` 이 문자 슬라이스가 아니라 'Series 앞 8행' 슬라이스라 재대입 시 9행째부터
+            # date 가 NaN→"nan" 이 되어 날짜 비교에서 전부 탈락 → 수급 DB 피처
+            # (for_net5_db/ins_net5_db)가 전 종목 소실된 채 강도점수가 계산돼 왔다
+            # (실측: signal_strength_log 1,007행 전부 None vs 학습원천 trades_history_v3 는 채워짐
+            #  = IC 가중치는 수급 포함으로 학습, 라이브 채점은 수급 없이 — 캘리브레이션 불일치).
+            # 올바른 `.str[:8]` 만 남긴다. ※ 이 수정으로 score_ic 분포가 이동하므로
+            # MIN_STRENGTH_SCORE(6.0) 재검증 필요 — n_factors 컬럼으로 수정 전/후 구분 가능.
             if len(sd) > 0:
                 sd["date"] = sd["date"].astype(str).str.replace("-", "").str[:8]
             for code, g in sd.groupby("ticker"):
@@ -351,8 +361,8 @@ class FactorScorer:
         try:
             ki = pd.read_sql(
                 "SELECT ticker, date, rsi, macd_hist, bb_upper, bb_lower, Close "
-                "FROM korea_indicators WHERE date >= ? AND rsi IS NOT NULL "
-                "ORDER BY ticker, date",
+                "FROM korea_indicators WHERE replace(date,'-','') >= ? AND rsi IS NOT NULL "
+                "ORDER BY ticker, date",   # 대시형 저장 대응(2026-07-11, supply_demand 와 동일)
                 con, params=[f"{int(date_str) - 100:08d}"]
             )
             if len(ki) > 0:
@@ -377,8 +387,8 @@ class FactorScorer:
         try:
             cb = pd.read_sql(
                 "SELECT ticker, date, credit_remain_rt "
-                "FROM credit_balance WHERE date >= ? AND credit_remain_rt IS NOT NULL "
-                "ORDER BY ticker, date",
+                "FROM credit_balance WHERE replace(date,'-','') >= ? AND credit_remain_rt IS NOT NULL "
+                "ORDER BY ticker, date",   # 대시형 저장 대응(2026-07-11, supply_demand 와 동일)
                 con, params=[f"{int(date_str) - 100:08d}"]
             )
             if len(cb) > 0:

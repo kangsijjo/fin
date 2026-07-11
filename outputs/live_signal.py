@@ -88,7 +88,11 @@ def is_excluded(name, code):
         return True
     if name.startswith(ETF_PREFIXES):
         return True
-    if name.endswith(("우", "우B")) or "우선주" in name or "스팩" in name:
+    # 우선주 판정: 이름 끝 '우/우B/우C' + 코드 끝자리 0 아님(보통주=0) 결합.
+    # [2026-07-11] 이름만으로 판정하던 기존 로직은 '우'로 끝나는 보통주
+    # (에코글로우 159910·이오플로우 294090·성우 458650)를 영구 오제외했음.
+    if (name.endswith(("우", "우B", "우C")) and not str(code).endswith("0")) \
+            or "우선주" in name or "스팩" in name:
         return True
     if len(code) == 6 and code.startswith("5"):
         return True
@@ -187,8 +191,12 @@ def load_existing_signals():
 
 
 def append_signals(new_rows):
-    """신호 행을 paper_signals.csv에 append (헤더 없으면 생성)."""
-    file_exists = os.path.exists(SIGNALS_CSV)
+    """신호 행을 paper_signals.csv에 append (헤더 없으면 생성).
+
+    [2026-07-11] 0바이트 파일(직전 실행이 쓰다 죽은 잔재)은 '없음'으로 취급 — 기존엔
+    존재만 보고 헤더 없이 데이터를 append 해 트레이더 todays_signals 가 KeyError 로
+    죽는 손상 CSV 를 만들었음(strength_logger 는 이미 getsize 검사, 비대칭 해소)."""
+    file_exists = os.path.exists(SIGNALS_CSV) and os.path.getsize(SIGNALS_CSV) > 0
     if file_exists:
         _migrate_signals_csv()
     # 기존 파일이 있으면 그 헤더 순서대로 쓴다 — CSV_FIELDS 와 헤더 순서가 달라도

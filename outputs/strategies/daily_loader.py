@@ -186,7 +186,10 @@ def filter_universe(df, name_cache_path="./name_cache.csv"):
             return False  # 이름 모름 → 유지 (생존편향 방지)
         if nm.startswith(etf_prefixes):
             return True
-        if nm.endswith(("우", "우B")) or "우선주" in nm or "스팩" in nm:
+        # 우선주 = 이름 끝 우/우B/우C + 코드 끝자리 0 아님(보통주=0) —
+        # live_signal.is_excluded 와 동일 수정(2026-07-11: '우'로 끝나는 보통주 오제외 방지)
+        if (nm.endswith(("우", "우B", "우C")) and not str(code).endswith("0")) \
+                or "우선주" in nm or "스팩" in nm:
             return True
         return False
 

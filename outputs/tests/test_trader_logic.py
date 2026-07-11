@@ -322,6 +322,51 @@ def test_kis_codes_due_ledger_expiry_and_stop(tmp_path, monkeypatch):
     assert "000070" not in due2
 
 
+def test_factor_scorer_supply_dates_survive_beyond_8_rows():
+    """[critical 회귀방지] supply_demand 날짜 정규화가 Series 앞 8'행' 슬라이스로
+    9행째부터 'nan' 이 되어 수급 피처(for_net5_db)가 전 종목 소실되던 버그(2026-07-11 수정)."""
+    import sqlite3
+    from factor_scorer import FactorScorer
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE supply_demand (ticker TEXT, date TEXT, "
+                "foreign_net_value REAL, institution_net_value REAL)")
+    rows = [("000020", f"2026-06-{d:02d}", 100.0, 50.0) for d in range(1, 13)]   # 12행(>8)
+    con.executemany("INSERT INTO supply_demand VALUES (?,?,?,?)", rows)
+    con.commit()
+    feats = FactorScorer().prepare_db_features(con, "20260612")
+    got = feats.get("000020", {}).get("for_net5_db")
+    assert got == 500.0, f"마지막 5일 합 500 이어야 함(버그면 None/결손): {got}"
+
+
+def test_is_excluded_preferred_stock_needs_nonzero_code_suffix():
+    """'우'로 끝나는 보통주(이오플로우 등) 오제외 수정 — 우선주는 코드 끝자리≠0 결합 판정."""
+    import live_signal as ls
+    import kis_live_signal as kls
+    assert ls.is_excluded("삼성전자우", "005935") is True      # 진짜 우선주
+    assert ls.is_excluded("미래에셋증권2우B", "00680K") is True
+    assert ls.is_excluded("이오플로우", "294090") is False      # '우'로 끝나는 보통주
+    assert ls.is_excluded("에코글로우", "159910") is False
+    assert kls.is_excluded("성우", "458650") is False
+    assert ls.is_excluded("삼성전자", "005930") is False
+    assert ls.is_excluded("KODEX 200", "069500") is True       # ETF 는 그대로 제외
+
+
+def test_append_signals_zero_byte_recreates_header(tmp_path, monkeypatch):
+    """0바이트 신호 CSV 잔재에 헤더 없이 append 해 트레이더가 KeyError 로 죽던 것 방지."""
+    import live_signal as ls
+    p = tmp_path / "paper_signals.csv"
+    p.write_text("")   # 직전 실행이 쓰다 죽은 잔재
+    monkeypatch.setattr(ls, "SIGNALS_CSV", str(p))
+    ls.append_signals([{
+        "signal_date": "20260711", "code": "005930", "name": "삼성전자",
+        "entry_price_close": 1000.0, "target_exit_date": "20260721",
+        "lookback_high": 0.0, "market_strong": True,
+        "strategy": "rsi_vol", "holding_days": 7,
+    }])
+    df = pd.read_csv(p, encoding="utf-8-sig")
+    assert "signal_date" in df.columns and len(df) == 1
+
+
 def test_assert_order_ok_promotes_rejection():
     """키움 동기 응답의 주문 거부(HTTP 200 + return_code!=0)를 예외로 승격 —
     거부가 ok=True 로 기록되던 critical 수정(2026-07-11)."""
