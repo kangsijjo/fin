@@ -322,6 +322,42 @@ def test_kis_codes_due_ledger_expiry_and_stop(tmp_path, monkeypatch):
     assert "000070" not in due2
 
 
+def test_assert_order_ok_promotes_rejection():
+    """키움 동기 응답의 주문 거부(HTTP 200 + return_code!=0)를 예외로 승격 —
+    거부가 ok=True 로 기록되던 critical 수정(2026-07-11)."""
+    import pytest as _pt
+    import kiwoom_trader as kt
+    ok = {"return_code": 0, "ord_no": "123"}
+    assert kt._assert_order_ok(ok, "매수") is ok                    # 정상 통과
+    assert kt._assert_order_ok({"ord_no": "123"}, "매수")            # return_code 없음 → 통과
+    with _pt.raises(RuntimeError, match="8005"):
+        kt._assert_order_ok({"return_code": 8005, "return_msg": "증거금 부족"}, "매수")
+    with _pt.raises(RuntimeError):
+        kt._assert_order_ok({"return_code": "-1"}, "매도")
+
+
+def test_norm_stk_code_prefix_only():
+    """접두어 A 만 제거 — 코드 내 알파벳(0001A0 덕양에너젠, 실신호 8건)은 보존."""
+    import kiwoom_trader as kt
+    assert kt._norm_stk_code("A005930") == "005930"
+    assert kt._norm_stk_code("005930") == "005930"
+    assert kt._norm_stk_code("0001A0") == "0001A0"    # 기존 replace('A','')는 '000010'로 파괴
+    assert kt._norm_stk_code("A0001A0") == "0001A0"
+    assert kt._norm_stk_code("5930") == "005930"      # zfill 유지
+
+
+def test_offset_date_bdate_fallback():
+    """target_exit_date 영구 공란 수정 — 달력 밖 만기는 주말 건너뛴 근사일(2026-07-11)."""
+    import live_signal as ls
+    import kis_live_signal as kls
+    ds = ["20260708", "20260709", "20260710"]   # 수~금
+    assert ls._offset_date(ds, "20260708", 2) == "20260710"       # 달력 안 — 기존 경로
+    # 금요일(0710) 기준 +2 영업일 → 주말 건너뛰고 화요일(0714)
+    assert ls._offset_date(ds, "20260710", 2) == "20260714"
+    assert kls._offset_date(ds, "20260710", 2) == "20260714"
+    assert ls._offset_date(ds, "20991231", 5) == ""               # 달력에 없는 신호일
+
+
 def test_expiry_due_calendar_edge_off_by_one():
     """만기 오프바이원 수정(2026-07-10) — 실행 시점 달력은 '어제'까지라 만기일 당일
     판정이 항상 False 였음. 달력 마지막+1 영업일이 만기이고 today 가 그 뒤면 due."""

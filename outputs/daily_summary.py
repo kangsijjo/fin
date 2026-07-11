@@ -68,7 +68,14 @@ def _today_fills(prefix, label):
             for r in csv.DictReader(fh):
                 if str(r.get("ok", "")).strip().lower() in ("false", "0"):
                     continue
-                (buys if str(r.get("side", "")).lower() == "buy" else sells).append(r.get("name", r.get("code", "")))
+                side = str(r.get("side", "")).lower()
+                # [2026-07-11] tp_sell 은 익절 지정가 '발주' 행 — 체결이 아니므로 집계 제외.
+                # (체결되면 _reconcile_tp_fills 가 side='sell' 합성행을 남겨 그걸로 집계.
+                #  기존엔 미체결 발주가 매일 허위 매도로, 실체결 시엔 2건 이중 계상됐음)
+                if side == "buy":
+                    buys.append(r.get("name", r.get("code", "")))
+                elif side == "sell":
+                    sells.append(r.get("name", r.get("code", "")))
     except Exception:
         return None
     if not buys and not sells:

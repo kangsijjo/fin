@@ -215,6 +215,32 @@ def guard_mock_only():
         sys.exit(1)
 
 
+def _assert_order_ok(r, what):
+    """키움 REST '동기' 응답의 성공 검증 — 주문 거부 침묵 방지(2026-07-11, critical).
+
+    kiwoom-rest-api 의 동기 process_response 는 HTTP 200 이면 body 의 return_code 를
+    검사하지 않고 dict 를 그대로 반환한다(비동기 경로만 return_code!=0 → APIError 승격).
+    그래서 '거부된 주문'(증거금 부족 등)이 예외 없이 돌아와 ok=True 로 기록되고 —
+    유령 원장 행 + 멱등키 오염(당일 재시도 차단) + 허위 체결 알림 + 매도 거부 시
+    원장 삭제(청산 지연)로 번진다. 여기서 return_code!=0 을 예외로 승격한다."""
+    if isinstance(r, dict):
+        rc = r.get("return_code")
+        if rc is not None and str(rc) != "0":
+            raise RuntimeError(f"{what} 거부: return_code={rc} {r.get('return_msg', '')}")
+    return r
+
+
+def _norm_stk_code(v):
+    """키움 잔고 종목코드 정규화 — 접두어 'A'(A005930) 만 제거.
+
+    [2026-07-11, critical] 기존 replace('A','') 는 모든 위치의 A 를 지워 알파벳 포함
+    신형 코드를 파괴('0001A0'→'000010'): 중복매수 가드 무력화 + 만기매도 불능 +
+    원장 오염. 실데이터에 0001A0(덕양에너젠) 신호 8건 실재."""
+    s = str(v or "").strip()
+    s = _re.sub(r"^A(?=\d)", "", s)
+    return s.zfill(6)
+
+
 def _pick(d, *cands, default=None):
     """응답 dict 에서 후보 키 중 존재하는 첫 값을 반환 (스키마 방어)."""
     for k in cands:
@@ -306,11 +332,22 @@ def today_ordered_codes(side=None):
     path = f"{ORDERS_DIR}/orders_{datetime.today():%Y%m%d}.csv"
     if not os.path.exists(path):
         return set()
-    df = pd.read_csv(path, dtype={"code": str})
-    if side:
-        df = df[df["side"] == side]
-    ok = df["ok"].astype(str).str.lower().isin(("true", "1"))  # CSV 재로드 시 문자열 대응
-    return set(df[ok]["code"].astype(str).str.zfill(6))
+    try:
+        df = pd.read_csv(path, dtype={"code": str})
+        if side:
+            df = df[df["side"] == side]
+        ok = df["ok"].astype(str).str.lower().isin(("true", "1"))  # CSV 재로드 시 문자열 대응
+        return set(df[ok]["code"].astype(str).str.zfill(6))
+    except Exception as e:
+        # 0바이트/손상 주문로그 1개로 당일 매수·매도 전체가 크래시하지 않게(KIS 판과 동일).
+        # 단 멱등키가 꺼진 채 진행되므로 침묵하지 않고 텔레그램으로 알린다.
+        print(f"[warn] 주문로그 파싱 실패(멱등키 비활성 — 중복주문 주의): {e}")
+        try:
+            import notifier
+            notifier.safe_send(f"⚠ [키움] 오늘 주문로그 손상 — 중복주문 가드 비활성 상태로 진행: {str(e)[:80]}")
+        except Exception:
+            pass
+        return set()
 
 
 # ------------------------------------------------------------
@@ -345,7 +382,7 @@ def get_positions(api):
         return {}
     pos = {}
     for it in items:
-        code = str(_pick(it, "stk_cd", "stock_code", default="")).replace("A", "").zfill(6)
+        code = _norm_stk_code(_pick(it, "stk_cd", "stock_code", default=""))
         qty = _to_int(_pick(it, "rmnd_qty", "hldg_qty", "qty", default=0))
         name = _pick(it, "stk_nm", "stock_name", default="")
         if code and qty > 0:
@@ -649,11 +686,11 @@ def cmd_buy():
                 continue
 
             try:
-                r = api.order.stock_buy_order_request_kt10000(
+                r = _assert_order_ok(api.order.stock_buy_order_request_kt10000(
                     dmst_stex_tp="KRX", stk_cd=code, ord_qty=str(qty),
                     trde_tp=ORDER_TYPE_BUY,
                     ord_uv="",
-                )
+                ), "매수")
                 ono = _pick(r, "ord_no", "odno", default="")
                 print(f"    [매수주문] {code} {name} {qty}주 @ {int(close):,} → {ono}")
                 try:
@@ -863,9 +900,23 @@ def ensure_kiwoom_ledger(pos):
                 why = "오늘 매도 체결" if code in sold_today else "브로커 미보유(수동매도/체결 잔재)"
                 print(f"[ledger] 원장 정리: {code} — {why}")
 
+        # ── 실체결 보정(2026-07-11): 매수 시점 원장 entry_px 는 주문 참조가(신호종가)인데
+        #    백테스트 stop/TP 기준은 '실제 진입 체결가' — 브로커 매입평균이 잡히면 보정.
+        #    (기존 675행 주석 'ensure 가 이후 보정'은 heal 이 기존 행을 건너뛰어 허위였음)
+        for code, p in pos.items():
+            code = str(code).zfill(6)
+            row = led.get(code)
+            avg = float(p.get("avg_price", 0) or 0)
+            if row and avg > 0 and float(row.get("entry_px", 0) or 0) != avg:
+                print(f"[ledger] entry_px 실체결 보정: {code} "
+                      f"{float(row.get('entry_px', 0) or 0):,.0f} → {avg:,.0f}")
+                row["entry_px"] = avg
+                changed = True
+
         # ── ①③ heal: 브로커에만 있는 행 등록 ─────────────────────────────
         buys = None
         added = 0
+        blind = []   # 메타데이터 없이 치유된 코드 — 만기/손절 추적 불가라 텔레그램 경보
         for code, p in pos.items():
             code = str(code).zfill(6)
             if code in led or code in sold_today:   # 오늘 매도분은 부활 금지(①)
@@ -876,12 +927,22 @@ def ensure_kiwoom_ledger(pos):
             entry = float(p.get("avg_price", 0) or 0) or float(info.get("ref_px", 0) or 0)
             strat = info.get("strategy", "")
             buy_date = info.get("date", "")
+            sig_date = _signal_date_lookup(code, strat, buy_date) or buy_date
             led[code] = {"entry_px": entry,
                          "strategy": strat,
-                         "signal_date": _signal_date_lookup(code, strat, buy_date) or buy_date,
+                         "signal_date": sig_date,
                          "holding_days": _HEAL_HOLDING.get(strat, 20)}
+            if not strat or not sig_date:
+                blind.append(code)
             added += 1
             changed = True
+        if blind:   # '조용한 실패' 격상 — 빈 메타데이터 행은 만기·전략 추적이 안 됨(2026-07-11)
+            try:
+                import notifier
+                notifier.safe_send(f"⚠ [키움 원장] 매수기록 없는 보유 치유 {blind} — "
+                                   f"신호일/전략 미상, 만기 추적 불가. 원장 수동 확인 필요")
+            except Exception:
+                pass
         if changed:
             _write_kiwoom_positions(led)
             if added:
@@ -1042,9 +1103,9 @@ def cmd_place_targets(api=None, pos=None):
             print(f"  [skip] {code} {name} — 목표 {tgt_px:,} > 오늘 상한가(≈{int(pc * 1.3):,})")
             continue
         try:
-            r = api.order.stock_sell_order_request_kt10001(
+            r = _assert_order_ok(api.order.stock_sell_order_request_kt10001(
                 dmst_stex_tp="KRX", stk_cd=code, ord_qty=str(qty),
-                trde_tp=ORDER_TYPE_LIMIT, ord_uv=str(tgt_px))
+                trde_tp=ORDER_TYPE_LIMIT, ord_uv=str(tgt_px)), "익절지정가")
             ono = _pick(r, "ord_no", "odno", default="")
             print(f"  [익절지정가] {code} {name} {qty}주 @ {tgt_px:,} (+{tgt * 100:.0f}%) → {ono}")
             log_order({"time": datetime.now().strftime("%H:%M:%S"), "side": "tp_sell",
@@ -1105,6 +1166,7 @@ def codes_due_for_exit():
     due = set()
     ledger_decided = set()   # 원장으로 판정 끝난 코드 — 신호CSV 폴백에서 제외
 
+    undecidable = []   # 판정불가 코드 — '조용한 실패' 방지, 텔레그램 격상(2026-07-11)
     for code, info in load_kiwoom_positions().items():
         # [2026-07-10] 원장에 있으면 판정불가여도 폴백 금지 — None 경로로 '옛 신호 만기
         # 오염'(조기청산)이 재유입되던 구멍. 판정불가는 보류+경고(좀비화는 prune/치유가 방지).
@@ -1114,8 +1176,15 @@ def codes_due_for_exit():
         verdict = _expiry_due(code_dates.get(code), sd, holding, today)
         if verdict is None:
             print(f"[sell][warn] {code} 원장 signal_date({sd}) 달력 판정불가 — 만기 보류, 원장 확인 필요")
+            undecidable.append(code)
         elif verdict:
             due.add(code)
+    if undecidable:
+        try:
+            import notifier
+            notifier.safe_send(f"⚠ [키움 만기] 판정불가 보유 {undecidable} — 원장 signal_date 확인 필요(청산 경로 없음)")
+        except Exception:
+            pass
 
     if not os.path.exists(SIGNALS_CSV):
         return due
@@ -1225,19 +1294,19 @@ def cmd_sell():
         # 미체결 익절 지정가가 물량을 잠그고 있으면 먼저 취소(잔량 전부) 후 시장가 청산
         if code in tp_open:
             try:
-                api.order.stock_cancel_order_request_kt10003(
+                _assert_order_ok(api.order.stock_cancel_order_request_kt10003(
                     dmst_stex_tp="KRX", orig_ord_no=str(tp_open[code]),
-                    stk_cd=code, cncl_qty="0")
+                    stk_cd=code, cncl_qty="0"), "지정가취소")
                 print(f"  [취소] {code} {name} 미체결 익절 지정가({tp_open[code]}) 취소")
                 time.sleep(0.4)
             except Exception as e:
                 print(f"  [warn] {code} 익절 지정가 취소 실패({e}) — 시장가 매도 시도 계속")
         try:
-            r = api.order.stock_sell_order_request_kt10001(
+            r = _assert_order_ok(api.order.stock_sell_order_request_kt10001(
                 dmst_stex_tp="KRX", stk_cd=code, ord_qty=str(qty),
                 trde_tp=ORDER_TYPE_SELL,
                 ord_uv="",   # 시장가
-            )
+            ), "매도")
             ono = _pick(r, "ord_no", "odno", default="")
             print(f"  [매도주문] {code} {name} {qty}주 ref:{ref_px:,}"
                   + (f"  사유:{reason}" if reason else "") + f" → {ono}")

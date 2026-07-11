@@ -303,7 +303,11 @@ def get_positions(price_map: dict, name_map: dict, kis_client=None) -> list[dict
         df["code"] = df["code"].str.zfill(6)
         today_str = datetime.today().strftime("%Y%m%d")   # target_exit_date 는 YYYYMMDD(대시없음) — 형식 일치(2026-06-30 수정)
         if "target_exit_date" in df.columns:
-            active = df[df["target_exit_date"].astype(str) >= today_str]
+            # [2026-07-11] NaN → 'nan' 문자열이 'nan' >= 'YYYYMMDD' 문자열비교로 항상
+            # True 가 되어 만기 지난 전 이력(1,200건+)을 활성 오판 — 유효 날짜만 비교.
+            # ('20260731.0' float 승격 잔재도 정규화)
+            ted = df["target_exit_date"].astype(str).str.replace(r"\.0$", "", regex=True)
+            active = df[ted.str.fullmatch(r"\d{8}") & (ted >= today_str)]
         else:
             active = df
     except Exception as e:

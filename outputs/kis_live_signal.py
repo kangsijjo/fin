@@ -92,11 +92,18 @@ def _compute_mkt_strong(df, ma_days=60):
 
 
 def _offset_date(all_dates, last_date, n_days):
-    """last_date 기준 n_days 영업일 후 날짜."""
+    """last_date 기준 n_days 영업일 후 날짜.
+
+    [2026-07-11] 라이브에선 항상 ''(영구 공란)이던 것을 주말만 건너뛴 근사일로 —
+    live_signal._offset_date 와 동일 수정(대시보드/장중모니터 소비자 복구)."""
     try:
         idx = all_dates.index(str(last_date))
         tgt = idx + n_days
-        return all_dates[tgt] if tgt < len(all_dates) else ""
+        if tgt < len(all_dates):
+            return all_dates[tgt]
+        remain = tgt - (len(all_dates) - 1)
+        dr = pd.bdate_range(str(all_dates[-1]), periods=remain + 1)
+        return dr[-1].strftime("%Y%m%d")
     except (ValueError, IndexError):
         return ""
 

@@ -118,11 +118,20 @@ def _compute_mkt_strong(df, ma_days=60):
 
 
 def _offset_date(all_dates, last_date, n_days):
-    """last_date 기준 n_days 영업일 후 날짜."""
+    """last_date 기준 n_days 영업일 후 날짜.
+
+    [2026-07-11] 라이브에선 last_date=달력 마지막이라 항상 ''(target_exit_date 영구
+    공란) → 대시보드 슬롯현황 0 고정 / 장중모니터가 'nan' 문자열비교로 전 이력을
+    활성 오판하던 원인. 달력 밖이면 주말만 건너뛴 근사일 반환(공휴일 미반영 —
+    표시·근사용. 실제 만기판정은 트레이더가 원장+실제 달력 인덱스로 계산)."""
     try:
         idx = all_dates.index(str(last_date))
         tgt = idx + n_days
-        return all_dates[tgt] if tgt < len(all_dates) else ""
+        if tgt < len(all_dates):
+            return all_dates[tgt]
+        remain = tgt - (len(all_dates) - 1)
+        dr = pd.bdate_range(str(all_dates[-1]), periods=remain + 1)
+        return dr[-1].strftime("%Y%m%d")
     except (ValueError, IndexError):
         return ""
 

@@ -524,8 +524,22 @@ def ensure_kis_ledger(positions):
                 why = "오늘 매도 체결" if code in sold_today else "브로커 미보유(수동매도/체결 잔재)"
                 print(f"[ledger] KIS 원장 정리: {code} — {why}")
 
+        # 실체결 보정(2026-07-11): cmd_buy 는 entry_px 에 신호일 종가를 기록하지만
+        # 백테스트 stop 기준은 '실제 진입 체결가' — 갭 진입 시 발동선이 수 %p 어긋남.
+        # 브로커 매입평균이 잡히는 대로 보정(매수 당일 status 에서 즉시 반영).
+        for code, p in positions.items():
+            code = str(code).zfill(6)
+            row = led.get(code)
+            avg = float(p.get("avg_price", 0) or 0)
+            if row and avg > 0 and float(row.get("entry_px", 0) or 0) != avg:
+                print(f"[ledger] KIS entry_px 실체결 보정: {code} "
+                      f"{float(row.get('entry_px', 0) or 0):,.0f} → {avg:,.0f} (stop 기준가 갱신)")
+                row["entry_px"] = avg
+                changed = True
+
         buys = None
         added = 0
+        blind = []   # 메타데이터 없이 치유된 코드 — 만기·stop 추적 불가라 텔레그램 경보
         for code, p in positions.items():   # heal
             code = str(code).zfill(6)
             if code in led or code in sold_today:
@@ -536,13 +550,23 @@ def ensure_kis_ledger(positions):
             entry = float(p.get("avg_price", 0) or 0) or float(info.get("ref_px", 0) or 0)
             strat = info.get("strategy", "")
             buy_date = info.get("date", "")
+            sig_date = _kis_signal_date_lookup(code, strat, buy_date) or buy_date
             led[code] = {"entry_px": entry,
                          "strategy": strat,
-                         "signal_date": _kis_signal_date_lookup(code, strat, buy_date) or buy_date,
+                         "signal_date": sig_date,
                          "holding_days": _KIS_HEAL_HOLDING.get(strat, HOLDING_DAYS_DEFAULT)}
+            if not strat or not sig_date:
+                blind.append(code)
             added += 1
             changed = True
             print(f"[ledger] KIS 원장 자가치유 등록: {code} (전략 {strat or '?'}, 진입 {entry:,.0f})")
+        if blind:   # '조용한 실패' 격상 — 빈 메타데이터 행은 stop_pct=None·만기 판정불가(2026-07-11)
+            try:
+                import notifier
+                notifier.safe_send(f"⚠ [KIS 원장] 매수기록 없는 보유 치유 {blind} — "
+                                   f"전략/신호일 미상이라 손절·만기 추적 불가. 원장 수동 확인 필요")
+            except Exception:
+                pass
         if changed:
             _write_positions(led)
             if added:
@@ -683,6 +707,7 @@ def codes_due_for_exit(close_map):
                   for c, g in df.groupby("code")}
 
     ledger_decided = set()   # 원장에 있는 코드 — 신호CSV 폴백 제외(무조건)
+    undecidable = []          # 판정불가 코드 — '조용한 실패' 방지, 텔레그램 격상(2026-07-11)
     for code, info in kis_pos.items():
         # 만기 — 원장 signal_date/holding_days 기준.
         # [2026-07-10] 원장에 있으면 판정불가(verdict None)여도 폴백 금지 — None 경로로
@@ -693,6 +718,7 @@ def codes_due_for_exit(close_map):
                               info.get("holding_days", HOLDING_DAYS_DEFAULT), today)
         if verdict is None:
             print(f"[sell][warn] {code} 원장 signal_date({sd}) 달력 판정불가 — 만기 보류, 원장 확인 필요")
+            undecidable.append(code)
         elif verdict:
             due[code] = "expire"
             continue
@@ -704,6 +730,13 @@ def codes_due_for_exit(close_map):
             continue
         if cur_close <= entry_px * (1 + stop_pct):
             due[code] = "stop"
+
+    if undecidable:
+        try:
+            import notifier
+            notifier.safe_send(f"⚠ [KIS 만기] 판정불가 보유 {undecidable} — 원장 signal_date 확인 필요(청산 경로 없음)")
+        except Exception:
+            pass
 
     # 원장에 없는 코드(원장 유실·수동매수) 만기 폴백 — 신호CSV 스캔
     if not os.path.exists(SIGNALS_CSV):
