@@ -1,15 +1,20 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 REM ============================================================
-REM  Kiwoom mock-trading executor - 원본 모드 (시장가)
-REM  KIS_KiwoomBuy  09:01 -> buy (전일 신호, 시가 체결)
-REM  KIS_KiwoomSell 15:21 -> sell (40영업일 만기, 마감 동시호가 ≈ 종가)
-REM  'daily' 커맨드가 시계로 분기: 12시 이전=buy, 이후=sell
+REM  Kiwoom mock-trading executor (StockAI KiwoomTraderAM/PM tasks)
+REM  arg1: "auto" = no pause (scheduler). arg2: "am" | "pm" (explicit mode).
+REM  [2026-07-12] mode is now passed per-trigger (daily-am/daily-pm) instead of
+REM  clock-splitting inside python - a StartWhenAvailable delayed recovery after
+REM  noon used to run the SELL path for the 09:03 BUY trigger (silent lost buys
+REM  + midday market sells). No arg2 = legacy clock split (manual runs).
 REM ============================================================
 set PYTHONIOENCODING=utf-8
 
 cd /d "%~dp0"
 set "EXITCODE=0"
+set "CMD=daily"
+if /i "%2"=="am" set "CMD=daily-am"
+if /i "%2"=="pm" set "CMD=daily-pm"
 
 for /f %%I in ('powershell -NoProfile -Command "(Get-Date).DayOfWeek.value__"') do set "DOW=%%I"
 for /f %%I in ('powershell -NoProfile -Command "(Get-Date).ToString('yyyyMMdd')"') do set "TODAY=%%I"
@@ -48,7 +53,7 @@ set "EXITCODE=2"
 goto :report
 
 :run
-!PYEXE! kiwoom_trader.py daily >> "!LOGFILE!" 2>&1
+!PYEXE! kiwoom_trader.py !CMD! >> "!LOGFILE!" 2>&1
 set "EXITCODE=!ERRORLEVEL!"
 
 :report

@@ -12,6 +12,8 @@ set "PYEXE=.venv\Scripts\python.exe"
 if not exist "%PYEXE%" set "PYEXE=python"
 
 "%PYEXE%" -u after_market.py %* >> "%LOG%" 2>&1
-echo [%date% %time%] after_market done args=%* >> "%LOG%"
+set "EC=%errorlevel%"
+echo [%date% %time%] after_market done args=%* EC=%EC% >> "%LOG%"
 Forfiles /P "C:\fin\logs" /M after_market_*.log /D -30 /C "cmd /c del @file" 2>nul
-endlocal
+REM [2026-07-12] propagate exit code (was: Forfiles -> always 0 in scheduler history)
+endlocal & exit /b %EC%

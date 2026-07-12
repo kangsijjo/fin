@@ -43,4 +43,7 @@ echo [%date% %time%] strategy_lab done. ExitCode=%errorlevel% >> %LOGFILE%
 
 :: daily summary telegram push (signals / holdings / cash, one message)
 .venv\Scripts\python.exe -u daily_summary.py >> %LOGFILE% 2>&1
-endlocal
+:: [2026-07-12] propagate live_signal exit code - previously the bat returned the
+:: LAST command's code (daily_summary), so Task Scheduler history showed 0x0 even
+:: when signal detection crashed.
+endlocal & exit /b %EC%

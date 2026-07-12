@@ -18,5 +18,7 @@ if not exist .venv\Scripts\python.exe (
 )
 
 .venv\Scripts\python.exe -u paper_audit.py >> %LOGFILE% 2>&1
-echo [%date% %time%] Paper audit done. ExitCode=%errorlevel% >> %LOGFILE%
-endlocal
+set "EC=%errorlevel%"
+echo [%date% %time%] Paper audit done. ExitCode=%EC% >> %LOGFILE%
+:: [2026-07-12] propagate exit code (was: echo -> always 0 in scheduler history)
+endlocal & exit /b %EC%

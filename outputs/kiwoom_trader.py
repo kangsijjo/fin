@@ -1335,25 +1335,51 @@ def cmd_sell():
     print(f"[sell] 주문 {n_placed}건 완료")
 
 
-def cmd_daily():
+def cmd_daily(mode=None):
     """sell → buy 순서로 일괄 실행 (스케줄러용).
 
-    12시 이전: 매수만 (전일 신호 종목 진입).
-    12시 이후: 매도 후 매수 (만기 청산 후 신규 진입).
+    mode: 'am' | 'pm' | None(시계 분기 — 하위호환).
+    [2026-07-12] 트리거별 명시 모드 도입 — StartWhenAvailable 지연복구가 정오를 넘기면
+    시계 분기가 '매수 트리거'를 매도 경로로 실행(당일 매수 무경보 소실 + 만기·CB 매도가
+    마감 동시호가가 아닌 한낮 시장가 조기 발동)하던 문제. 지연복구로 모드와 실제 시각이
+    어긋나면 위험한 쪽(주문)을 생략하고 텔레그램으로 알린다.
     """
-    if datetime.now().hour < 12:
-        print("[daily] 오전 모드 — 매수 후 익절 지정가")
-        cmd_buy()
-        time.sleep(10)          # 시장가 매수 체결이 잔고에 반영될 시간
-        cmd_place_targets()     # 보유종목 당일 익절 지정가 발주(어제 발주분은 마감 시 만료됨)
+    hour = datetime.now().hour
+    if mode is None:
+        mode = "am" if hour < 12 else "pm"
+
+    if mode == "am":
+        if hour >= 12:   # 09:03 트리거의 오후 지연복구 — 한낮 시장가 매수는 위험, 생략
+            msg = "⚠ [키움] 09:03 매수 트리거가 정오 이후 지연복구됨 — 당일 매수 생략(가격 이동 위험). 익절 지정가만 점검"
+            print(msg)
+            try:
+                import notifier
+                notifier.safe_send(msg)
+            except Exception:
+                pass
+            cmd_place_targets()
+        else:
+            print("[daily] 오전 모드 — 매수 후 익절 지정가")
+            cmd_buy()
+            time.sleep(10)          # 시장가 매수 체결이 잔고에 반영될 시간
+            cmd_place_targets()     # 보유종목 당일 익절 지정가 발주(어제 발주분은 마감 시 만료됨)
     else:
         print("[daily] 오후 모드 — 매도 후 매수")
         cmd_sell()
-        # ※ 15:21 매도는 15:30 동시호가 체결이라 아래 매수 시점엔 슬롯·예수금이 아직
-        #   회복되지 않음 — 오후 매수는 '이미 빈 슬롯'이 있을 때만 동작하는 보조 경로이고,
-        #   만기청산으로 비워진 슬롯의 신규 진입은 다음날 09:03 매수가 담당(2026-07-10 명확화).
-        cmd_buy()
-        # 오후 매수분 익절 지정가는 다음날 아침 cmd_place_targets 가 재발주(당일주문 곧 만료라 생략)
+        if hour < 12:   # 15:21 트리거의 오전 지연복구(주말 넘김 등) — 매수는 09:03 트리거 몫
+            msg = "⚠ [키움] 15:21 매도 트리거가 오전에 지연복구됨 — 매도만 수행, 매수는 정규 09:03 경로에 위임"
+            print(msg)
+            try:
+                import notifier
+                notifier.safe_send(msg)
+            except Exception:
+                pass
+        else:
+            # ※ 15:21 매도는 15:30 동시호가 체결이라 아래 매수 시점엔 슬롯·예수금이 아직
+            #   회복되지 않음 — 오후 매수는 '이미 빈 슬롯'이 있을 때만 동작하는 보조 경로이고,
+            #   만기청산으로 비워진 슬롯의 신규 진입은 다음날 09:03 매수가 담당(2026-07-10 명확화).
+            cmd_buy()
+            # 오후 매수분 익절 지정가는 다음날 아침 cmd_place_targets 가 재발주(당일주문 곧 만료라 생략)
     cmd_status()
 
 
@@ -1376,9 +1402,13 @@ if __name__ == "__main__":
             cmd_reconcile()
         elif cmd == "daily":
             cmd_daily()
+        elif cmd == "daily-am":     # 09:03 트리거 전용(지연복구 가드 포함, 2026-07-12)
+            cmd_daily("am")
+        elif cmd == "daily-pm":     # 15:21 트리거 전용
+            cmd_daily("pm")
         else:
             print(f"[main] 알 수 없는 명령: {cmd}")
-            print("사용법: python kiwoom_trader.py [status|buy|sell|targets|reconcile|daily]")
+            print("사용법: python kiwoom_trader.py [status|buy|sell|targets|reconcile|daily|daily-am|daily-pm]")
             sys.exit(1)
 
     # 체결 묶음 알림 — 이번 실행에서 쌓인 매수/매도를 1통으로 (없으면 전송 안 함)

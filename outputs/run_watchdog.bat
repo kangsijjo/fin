@@ -13,6 +13,9 @@ set "PYEXE=.venv\Scripts\python.exe"
 if not exist "%PYEXE%" set "PYEXE=python"
 
 "%PYEXE%" -u watchdog.py %* >> "%LOG%" 2>&1
-echo [%date% %time%] watchdog done args=%* >> "%LOG%"
+set "EC=%errorlevel%"
+echo [%date% %time%] watchdog done args=%* EC=%EC% >> "%LOG%"
 Forfiles /P "C:\fin\logs" /M watchdog_*.log /D -30 /C "cmd /c del @file" 2>nul
-endlocal
+REM [2026-07-12] propagate watchdog exit code (was: last command = Forfiles -> always 0,
+REM so a crashed watchdog looked successful in Task Scheduler history)
+endlocal & exit /b %EC%

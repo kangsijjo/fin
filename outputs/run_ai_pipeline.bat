@@ -20,15 +20,30 @@ set "LOG=C:\fin\logs\ai_pipeline_%DT%.log"
 echo [%date% %time%] AI pipeline start >> "%LOG%"
 
 REM ---- single-instance guard: prevent concurrent collectors on the same DB/API ----
+REM [2026-07-12] stale-lock handling added: if a previous run was killed hard
+REM (3h ExecutionTimeLimit tree-kill, power loss), the lock survived forever and
+REM every Sunday 03:00 run skipped with exit 0 and NO alert -> model silently
+REM stale for weeks. Now: lock older than 6h = stale (delete + proceed); a real
+REM concurrent-run skip alerts via ci_gate notify-fail and exits 1 (visible).
 set "LOCK=C:\fin\logs\ai_pipeline.lock"
+set "PYEXE=%OUT%\.venv\Scripts\python.exe"
+if not exist "%PYEXE%" set "PYEXE=python"
 if exist "%LOCK%" (
-    echo [SKIP] An AI pipeline run is already in progress.
-    echo        If you are SURE none is running, delete this file and retry:
-    echo        %LOCK%
-    echo [%date% %time%] SKIP - lock exists >> "%LOG%"
-    if /i not "%1"=="auto" pause
-    endlocal
-    exit /b 0
+    set "STALE="
+    for /f "usebackq" %%S in (`powershell -NoProfile -Command "if ((New-TimeSpan -Start (Get-Item $env:LOCK).LastWriteTime -End (Get-Date)).TotalHours -gt 6) { 1 } else { 0 }"`) do set "STALE=%%S"
+    if "!STALE!"=="1" (
+        echo [WARN] stale lock ^(older than 6h^) - previous run died hard. Removing and proceeding. >> "%LOG%"
+        del "%LOCK%" 2>nul
+    ) else (
+        echo [SKIP] An AI pipeline run is already in progress.
+        echo        If you are SURE none is running, delete this file and retry:
+        echo        %LOCK%
+        echo [%date% %time%] SKIP - lock exists ^(fresh^) >> "%LOG%"
+        "%PYEXE%" "%OUT%\ci_gate.py" notify-fail "lock-skip" >> "%LOG%" 2>&1
+        if /i not "%1"=="auto" pause
+        endlocal
+        exit /b 1
+    )
 )
 echo %DT% %time% > "%LOCK%"
 

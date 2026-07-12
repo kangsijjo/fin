@@ -11,10 +11,11 @@ for /f %%I in ('powershell -NoProfile -Command "(Get-Date).DayOfWeek.value__"') 
 if "!DOW!"=="0" endlocal & exit /b 0
 if "!DOW!"=="6" endlocal & exit /b 0
 
-REM -- 장중(09:00~15:30)만 --
+REM -- market hours only. [2026-07-12 fix] '0915' fails octal parse -> string
+REM    compare bug skipped ALL 09:xx runs daily; '1' prefix forces decimal compare.
 for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format HHmm"') do set "HM=%%I"
-if !HM! LSS 900 endlocal & exit /b 0
-if !HM! GTR 1530 endlocal & exit /b 0
+if 1!HM! LSS 10900 endlocal & exit /b 0
+if 1!HM! GTR 11530 endlocal & exit /b 0
 
 if not exist "C:\fin\logs" mkdir "C:\fin\logs"
 for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd"') do set "DT=%%I"

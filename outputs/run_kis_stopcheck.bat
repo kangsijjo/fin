@@ -1,7 +1,8 @@
 @echo off
 :: run_kis_stopcheck.bat
-:: 장중 15분마다 KIS 모의계좌 손절 점검(stop-only). 만기청산은 건드리지 않음.
-:: kis_trader.py stopcheck -> 라이브 현재가로 진입가 대비 손절 발동분만 시장가 매도.
+:: Intraday stop MONITOR (every 15min). kis_trader.py stopcheck is monitor-only
+:: since 2026-06-21 (NO auto-sell; EOD cmd_sell handles actual stops).
+:: ASCII-only comments (cp949 parsing). Old comment claimed auto-sell - stale.
 setlocal EnableExtensions EnableDelayedExpansion
 set PYTHONIOENCODING=utf-8
 
@@ -12,10 +13,13 @@ for /f %%I in ('powershell -NoProfile -Command "(Get-Date).DayOfWeek.value__"') 
 if "!DOW!"=="0" echo [SKIP] Sunday & endlocal & exit /b 0
 if "!DOW!"=="6" echo [SKIP] Saturday & endlocal & exit /b 0
 
-REM -- 장중(09:00~15:30)만 실행: HHMM 정수 비교 --
+REM -- market hours only (09:00~15:30).
+REM    [2026-07-12 fix] '0905' fails cmd octal parse (digit 9) -> string compare
+REM    fallback -> '0905' < '900' TRUE -> ALL 09:xx runs skipped daily (first real
+REM    run was 10:05). Prefix '1' forces same-width decimal compare (10905 vs 10900).
 for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format HHmm"') do set "HM=%%I"
-if !HM! LSS 900 echo [SKIP] before open & endlocal & exit /b 0
-if !HM! GTR 1530 echo [SKIP] after close & endlocal & exit /b 0
+if 1!HM! LSS 10900 echo [SKIP] before open & endlocal & exit /b 0
+if 1!HM! GTR 11530 echo [SKIP] after close & endlocal & exit /b 0
 
 REM -- 로그 --
 if not exist "C:\fin\logs" mkdir "C:\fin\logs"

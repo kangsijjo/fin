@@ -99,6 +99,36 @@ def _age_days(datestr):
         return 9999
 
 
+def _age_bdays(datestr):
+    """영업일(주말 제외) 기준 나이 — 설·추석 3일 연휴에 달력일 임계(5일)가 초과되어
+    매년 정상 상황을 '데이터 정체'로 오경보하던 것 완화(2026-07-12). 공휴일 자체는
+    미반영 근사지만 주말 2일 제거만으로 3일 연휴까지 커버. numpy 없으면 달력일 폴백."""
+    if not datestr:
+        return 9999
+    try:
+        import numpy as np
+        fmt = "%Y-%m-%d" if "-" in datestr else "%Y%m%d"
+        d = datetime.strptime(datestr[:10], fmt).date()
+        return int(np.busday_count(d, TODAY))
+    except Exception:
+        return _age_days(datestr)
+
+
+def _log_contains_today(fname, needle):
+    """오늘자 로그 파일(양쪽 로그 루트)에 needle 문자열이 있는가 — 실행 '흔적' 확인용."""
+    for root in (_LOGS, _OUT_LOGS):
+        p = os.path.join(root, fname)
+        if not os.path.exists(p):
+            continue
+        try:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                if needle in f.read():
+                    return True
+        except Exception:
+            pass
+    return False
+
+
 def _snap_date(fname):
     try:
         d = json.loads(open(os.path.join(_KIWOOM_DIR, fname), encoding="utf-8").read())
@@ -185,15 +215,17 @@ def check_data():
     if con is None:
         return [("db_open", "stock.db", False, "DB 열기 실패")]
     out = []
-    specs = [("korea_stocks", "date", 5), ("supply_demand", "date", 5),
-             ("usa_stocks", "date", 6), ("macro_indicators", "date", 6),
-             ("credit_balance", "date", 10), ("news", "pubDate", 6)]
-    for tbl, col, thr in specs:
+    # (table, col, threshold, busday 기준 여부) — 일일 갱신 테이블은 영업일 기준(연휴 오탐 방지)
+    specs = [("korea_stocks", "date", 5, True), ("supply_demand", "date", 5, True),
+             ("usa_stocks", "date", 6, False), ("macro_indicators", "date", 6, False),
+             ("credit_balance", "date", 10, False), ("news", "pubDate", 6, False)]
+    for tbl, col, thr, use_bday in specs:
         latest = _max_date(con, tbl, col)
-        age = _age_days(latest)
+        age = _age_bdays(latest) if use_bday else _age_days(latest)
+        unit = "영업일" if use_bday else "일"
         ok = age <= thr
         out.append((f"data_{tbl}", f"데이터 {tbl}", ok,
-                    f"{age}일 정체(최신 {latest})" if not ok else f"최신 {latest}"))
+                    f"{age}{unit} 정체(최신 {latest})" if not ok else f"최신 {latest}"))
     con.close()
     return out
 
@@ -220,6 +252,13 @@ def check_trading():
                     "오늘 kis_trader 미실행"))
         out.append(("trade_kiwoom", "키움 매매(09:03)", _ran_today(f"kiwoom_{TODAY_STR}.log"),
                     "오늘 kiwoom_trader 미실행"))
+    if IS_WEEKDAY and _after("15:35"):
+        # [2026-07-12] 로그 '파일 존재'는 09:03 매수 실행이 이미 만족시킴 — 15:21 매도
+        # (만기+서킷브레이커, 키움의 유일한 청산 경로)가 죽어도 무경보이던 사각지대.
+        # 오후 실행이 남기는 '오후 모드' 마커로 실행 여부를 직접 확인.
+        out.append(("trade_kiwoom_pm", "키움 매도(15:21)",
+                    _log_contains_today(f"kiwoom_{TODAY_STR}.log", "오후 모드"),
+                    "오늘 15:21 매도(만기/서킷브레이커) 실행 흔적 없음"))
     return out
 
 

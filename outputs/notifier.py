@@ -78,8 +78,18 @@ def flush_fills(prefix=""):
             lines.append(f"🟢 매수 {len(buys)}건: " + ", ".join(f"{n}({q}주)" for _, n, c, q, p in buys))
         if sells:
             lines.append(f"🔴 매도 {len(sells)}건: " + ", ".join(f"{n}({q}주)" for _, n, c, q, p in sells))
-        _QUEUE.clear()
-        return send("\n".join(lines))
+        # [2026-07-12] 전송 '성공 후'에만 큐를 비운다 — 기존엔 clear 후 send 라
+        # 텔레그램 일시 장애 시 그날 체결 알림이 통째로 유실됐음. 실패 시 1회 재시도,
+        # 그래도 실패면 본문을 콘솔(=실행 로그)에 남겨 사후 확인 가능하게.
+        body = "\n".join(lines)
+        ok, why = send(body)
+        if not ok:
+            ok, why = send(body)   # 1회 재시도
+        if ok:
+            _QUEUE.clear()
+        else:
+            print(f"[notifier] 체결알림 전송 실패({why}) — 미전송 본문:\n{body}")
+        return ok, why
     except Exception as e:
         return False, str(e)[:60]
 

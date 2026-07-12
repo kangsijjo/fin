@@ -80,9 +80,12 @@ try {
     Write-Host "[6/6] Registering dashboard..."
     $a6  = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_dashboard.bat"
     $t6  = New-ScheduledTaskTrigger -AtLogOn
+    # [2026-07-12] 12h 한도 제거 — start 로 띄운 상주 서버가 잡 오브젝트에 남으면
+    # 로그온 12시간 뒤 트리 강제종료로 대시보드가 죽고 재로그온까지 미복구.
+    # 상주 데몬 패턴은 Scheduler 작업과 동일하게 무제한이 맞음.
     $s6  = New-ScheduledTaskSettingsSet `
                -MultipleInstances IgnoreNew `
-               -ExecutionTimeLimit (New-TimeSpan -Hours 12)
+               -ExecutionTimeLimit ([TimeSpan]::Zero)
     Register-ScheduledTask -TaskName "StockAI\Dashboard" `
         -Action $a6 -Trigger $t6 -Settings $s6 -Principal $principal -Force | Out-Null
     Write-Host "[OK] StockAI\Dashboard (at logon, 60s delay)" -ForegroundColor Green
@@ -117,22 +120,28 @@ try {
         -Action $a8 -Trigger $t8 -Settings $s8 -Principal $principal -Force | Out-Null
     Write-Host "[OK] StockAI\KisStopCheck (weekdays, every 15min 09:05-15:20)" -ForegroundColor Green
 
-    # 9. Kiwoom trader (안C): weekdays 09:03 매수 + 15:21 매도
-    #    ※ run_kiwoom.bat 은 'daily' 가 시계로 분기(12시 이전=buy, 이후=sell)라 두 번 실행 필요.
-    #    ※ 인자 'auto' 없으면 bat 이 pause 로 멈춤 → 반드시 -Argument "auto".
-    Write-Host "[9/9] Registering Kiwoom trader..."
-    $a9  = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_kiwoom.bat" -Argument "auto"
-    $t9a = New-ScheduledTaskTrigger -Weekly `
-               -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "09:03"
-    $t9b = New-ScheduledTaskTrigger -Weekly `
-               -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "15:21"
+    # 9. Kiwoom trader (안C): weekdays 09:03 매수 + 15:21 매도 — 트리거별 별도 작업.
+    #    [2026-07-12] 단일 작업+시계분기였을 때 StartWhenAvailable 지연복구가 정오를
+    #    넘기면 09:03 '매수' 트리거가 매도 경로로 실행되던 문제 → am/pm 인자를 명시
+    #    전달하는 2개 작업으로 분리(파이썬 쪽 지연복구 가드와 세트).
+    #    ※ 인자 'auto' 없으면 bat 이 pause 로 멈춤 → 반드시 -Argument.
+    Write-Host "[9/9] Registering Kiwoom trader (AM/PM split)..."
+    Unregister-ScheduledTask -TaskName "KiwoomTrader" -TaskPath "\StockAI\" -Confirm:$false -ErrorAction SilentlyContinue
     $s9  = New-ScheduledTaskSettingsSet `
                -MultipleInstances IgnoreNew `
                -StartWhenAvailable `
                -ExecutionTimeLimit (New-TimeSpan -Hours 2)
-    Register-ScheduledTask -TaskName "StockAI\KiwoomTrader" `
-        -Action $a9 -Trigger $t9a,$t9b -Settings $s9 -Principal $principal -Force | Out-Null
-    Write-Host "[OK] StockAI\KiwoomTrader (weekdays 09:03 buy + 15:21 sell)" -ForegroundColor Green
+    $a9a = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_kiwoom.bat" -Argument "auto am"
+    $t9a = New-ScheduledTaskTrigger -Weekly `
+               -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "09:03"
+    Register-ScheduledTask -TaskName "StockAI\KiwoomTraderAM" `
+        -Action $a9a -Trigger $t9a -Settings $s9 -Principal $principal -Force | Out-Null
+    $a9b = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_kiwoom.bat" -Argument "auto pm"
+    $t9b = New-ScheduledTaskTrigger -Weekly `
+               -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "15:21"
+    Register-ScheduledTask -TaskName "StockAI\KiwoomTraderPM" `
+        -Action $a9b -Trigger $t9b -Settings $s9 -Principal $principal -Force | Out-Null
+    Write-Host "[OK] StockAI\KiwoomTraderAM(09:03 buy) + KiwoomTraderPM(15:21 sell)" -ForegroundColor Green
 
     # 10. 장중 생산기(시황 2x6 그리드 + 잠정 예비후보): weekdays, 15분마다 09:15~15:00
     #     (15:15/15:30 런 제거 → 15:21 키움 매도와 시황(키움) 호출 충돌 차단)
