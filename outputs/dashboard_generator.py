@@ -51,11 +51,23 @@ def _load_ai_model():
     v4 는 features CSV 로 컬럼 목록 동적 로드 (ai_trainer_v4 의 실제 피처셋).
     """
     def _load_v4_cols(base_path):
-        """meta_model_v4.features.csv 에서 피처 목록 로드."""
+        """meta_model_v4.features.csv 에서 피처 목록 로드.
+
+        [2026-07-12 수정] header=None 으로 읽으면 pd.Series.to_csv 가 남긴 헤더 '0' 이
+        피처로 유입돼 20피처(모델 기대 19)가 되고, predict 가 shape mismatch 로
+        매 거래 ai_score=None(광역 except 삼킴) — AI 예측·컷오프 시뮬 전체가 무의미했음.
+        feature_spec 로더(헤더 인지, 피처계약 단일원천)로 통일."""
         feat_csv = base_path + ".features.csv"
+        try:
+            from feature_spec import load_model_feature_order
+            cols = load_model_feature_order(feat_csv)
+            if cols:
+                return cols
+        except Exception:
+            pass
         if os.path.exists(feat_csv):
             try:
-                return pd.read_csv(feat_csv, header=None)[0].tolist()
+                return pd.read_csv(feat_csv)["0"].tolist()   # 헤더 '0' 존재 형식
             except Exception:
                 pass
         return AI_ALL_COLS  # fallback

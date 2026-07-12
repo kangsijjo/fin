@@ -211,30 +211,31 @@ _STRATEGY_MAX_SLOTS = {"high_52w_filt": 4, "rsi_reversal": 4, "rsi_vol": 2}
 _STRATEGY_PRIORITY  = ["high_52w_filt", "rsi_reversal", "rsi_vol"]
 
 
-def _slot_status(paper_df):
-    """paper_signals.csv 에서 전략별 슬롯 사용 현황 계산.
+def _ledger_slot_counts(ledger_csv, slot_keys):
+    """진입가 원장(실보유) 기준 전략별 사용 슬롯 수(2026-07-12).
 
-    보유 중(target_exit_date >= today) 신호 기준으로 슬롯 카운트.
-    target_exit_date 는 int64 (20260619 형식) — 정수 비교 사용.
-    """
-    today_int = int(datetime.today().strftime("%Y%m%d"))  # 20260619 형식
-    if "strategy" not in paper_df.columns:
-        paper_df = paper_df.copy()
-        paper_df["strategy"] = "high_52w_filt"
+    [수정 배경] 종전엔 신호 CSV 의 '만기 미도래 신호 수'를 슬롯 사용으로 셌는데,
+    신호 CSV 는 매수 여부와 무관한 모든 신호의 누적이라 rsi_reversal 211/4 같은
+    무의미한 카운트가 됐음(실측). 원장은 매수 시 기록·매도 시 삭제·prune 정리라
+    실보유와 일치한다."""
+    used = {k: 0 for k in slot_keys}
+    try:
+        p = Path(ledger_csv)
+        if p.exists():
+            df = pd.read_csv(p, dtype=str).fillna("")
+            for s in df.get("strategy", pd.Series(dtype=str)):
+                if s in used:
+                    used[s] += 1
+    except Exception:
+        pass
+    return used
 
-    if "target_exit_date" in paper_df.columns:
-        active = paper_df[paper_df["target_exit_date"] >= today_int]
-    else:
-        active = paper_df
 
-    used = {k: 0 for k in _STRATEGY_MAX_SLOTS}
-    legacy_used = 0
-    for strat, grp in active.groupby("strategy"):
-        if strat in used:
-            used[strat] = int(len(grp))
-        else:
-            legacy_used += int(len(grp))  # for_high20_mkt 등 레거시 보유
+def _slot_status(paper_df=None):
+    """전략별 슬롯 사용 현황 — 키움 진입가 원장(실보유) 기준(2026-07-12 전환).
 
+    paper_df 인자는 하위호환용으로 무시(과거 신호CSV 기준 카운트는 오표시였음)."""
+    used = _ledger_slot_counts(KIWOOM_DIR / "kiwoom_positions.csv", _STRATEGY_MAX_SLOTS)
     slots = []
     for strat in _STRATEGY_PRIORITY:
         mx = _STRATEGY_MAX_SLOTS[strat]
@@ -427,34 +428,53 @@ def get_strategy_lab():
 _DAILY_CLOSE_CACHE = {}
 
 
-def _daily_close_map(date_str):
-    """macro_data/daily/{date}.csv → {code: close}. 날짜별 메모리 캐시(종가는 마감 후 불변)."""
+def _px_map_loader(date_str, cols, cache):
+    """macro_data/daily/{date}.csv → {code: 가격}. 성공 파싱만 캐시(2026-07-12).
+
+    [수정] 기존엔 '파일 없음'도 빈 dict 로 영구 캐시 — 상시 구동 서버가 15:21~15:50
+    (당일 CSV 생성 전) 사이 한 번이라도 조회하면, 파일이 생긴 뒤에도 그날 매도의
+    실현손익 종가보정이 재시작 전까지 영영 안 되던 버그."""
     date_str = str(date_str)
     if not date_str:
         return {}
-    if date_str in _DAILY_CLOSE_CACHE:
-        return _DAILY_CLOSE_CACHE[date_str]
-    m = {}
+    if date_str in cache:
+        return cache[date_str]
+    p = BASE / "macro_data" / "daily" / f"{date_str}.csv"
+    if not p.exists():
+        return {}   # 아직 미생성 — 캐시하지 않음(생기면 다음 호출에 반영)
     try:
-        p = BASE / "macro_data" / "daily" / f"{date_str}.csv"
-        if p.exists():
-            d = pd.read_csv(p, dtype={"code": str}, encoding="utf-8-sig")
-            d["code"] = d["code"].astype(str).str.zfill(6)
-            col = next((c for c in ("close", "종가") if c in d.columns), None)
-            if col:
-                m = {k: v for k, v in zip(d["code"], pd.to_numeric(d[col], errors="coerce"))}
+        d = pd.read_csv(p, dtype={"code": str}, encoding="utf-8-sig")
+        d["code"] = d["code"].astype(str).str.zfill(6)
+        col = next((c for c in cols if c in d.columns), None)
+        if col is None:
+            return {}
+        m = {k: v for k, v in zip(d["code"], pd.to_numeric(d[col], errors="coerce"))}
+        cache[date_str] = m   # 성공 파싱만 캐시
+        return m
     except Exception:
-        pass
-    _DAILY_CLOSE_CACHE[date_str] = m
-    return m
+        return {}   # 부분 쓰기 중 파싱 실패 가능 — 캐시하지 않음
 
 
-def _attach_realized_pnl(combined):
+_DAILY_OPEN_CACHE = {}
+
+
+def _daily_close_map(date_str):
+    return _px_map_loader(date_str, ("close", "종가"), _DAILY_CLOSE_CACHE)
+
+
+def _daily_open_map(date_str):
+    return _px_map_loader(date_str, ("open", "시가"), _DAILY_OPEN_CACHE)
+
+
+def _attach_realized_pnl(combined, sell_px_mode="close"):
     """매도 행에 실현손익(pnl 금액·pnl_pct %)을 FIFO 매칭으로 계산해 붙인다.
 
     주문로그엔 매입가가 없어 같은 code 의 직전 매수 가격과 시간순 FIFO 로 매칭한다.
-    매도 price 는 청산(15:21) 시점 당일 종가 미수집이면 0 으로 기록되므로, 0 이면
-    macro_data/daily 의 매도일 종가로 보정해 손익을 계산하고 표시 price 도 갱신한다.
+    sell_px_mode:
+      "close"(키움): 매도 price 가 0 이면 매도일 종가로 보정(15:21 마감 동시호가 ≈ 종가).
+      "open"(KIS, 2026-07-12): KIS 매도행의 price 는 '전일 종가'(참조가)라 그대로 쓰면
+        전일종가→당일시가 갭이 통째로 빠짐(특히 stop 매도는 갭하락 지속이 많아 손실이
+        체계적으로 과소 표시) — 실체결(09:01 시장가)에 가까운 '매도일 시가'를 우선 사용.
     실패(ok=False) 행은 체결 안 됐으므로 제외. 매수행·미매칭 매도는 pnl 공란.
     (대시보드 표시 전용 — 매매 로직과 무관)
     """
@@ -481,7 +501,13 @@ def _attach_realized_pnl(combined):
                 if price > 0:
                     lots.setdefault(code, []).append([price, qty])
             elif side == "sell":
-                eff = price if price > 0 else float(_daily_close_map(r.get("date", "")).get(code, 0) or 0)
+                if sell_px_mode == "open":
+                    d8 = r.get("date", "")
+                    _o = float(_daily_open_map(d8).get(code, 0) or 0)
+                    eff = (_o if _o == _o and _o > 0 else 0) \
+                        or float(_daily_close_map(d8).get(code, 0) or 0) or price
+                else:
+                    eff = price if price > 0 else float(_daily_close_map(r.get("date", "")).get(code, 0) or 0)
                 rem, cost, matched = qty, 0.0, 0
                 q = lots.get(code, [])
                 while rem > 0 and q:
@@ -612,39 +638,33 @@ _KW_EXIT = {
 }
 
 
-def _slot_status(signals_csv, slots, labels, holds, entries, exits, stops):
+def _slot_status_detail(ledger_csv, slots, labels, holds, entries, exits, stops):
     """전략별 슬롯 현황(used/max) + 진입·청산 조건을 묶어 반환(슬롯 클릭 드롭다운용).
-    active = target_exit_date(YYYYMMDD) ≥ 오늘 인 신호 수. 공란/NaN 행 제외."""
-    from datetime import date as _date
-    today_str = _date.today().strftime("%Y%m%d")
-    active = {k: [] for k in slots}
-    try:
-        if signals_csv.exists():
-            df = pd.read_csv(signals_csv, dtype={"code": str})
-            df["code"] = df["code"].astype(str).str.zfill(6)
-            df["target_exit_date"] = df["target_exit_date"].astype(str)
-            df = df[df["target_exit_date"].str.match(r"^\d{8}$")]
-            cur = df[df["target_exit_date"] >= today_str]
-            for strat in slots:
-                active[strat] = cur[cur["strategy"] == strat]["code"].tolist()
-    except Exception:
-        pass
+
+    [2026-07-12 이중 수정]
+    ① 함수명 변경: 종전 이름이 _slot_status(라인 214)를 섀도잉해 get_cheonok 의
+      1인자 호출이 항상 TypeError→빈 signals 로 삼켜졌음(활성신호 표 전면 소실).
+    ② used 를 신호CSV('만기 미도래 신호 수' — 매수 여부 무관 누적이라 211/4 같은
+      무의미 카운트) → 진입가 원장(실보유) 기준으로 교체."""
+    used = _ledger_slot_counts(ledger_csv, slots)
     return [{
         "strategy": strat, "label": labels.get(strat, strat),
-        "used": len(active.get(strat, [])), "max": slots[strat],
+        "used": used.get(strat, 0), "max": slots[strat],
         "holding": holds.get(strat, ""), "stop_pct": stops.get(strat, ""),
         "entry": entries.get(strat, ""), "exit": exits.get(strat, ""),
     } for strat in slots]
 
 
 def _kis_slot_status():
-    return _slot_status(KIS_SIGNALS_CSV, _KIS_STRATEGY_SLOTS, _KIS_STRATEGY_LABEL,
-                        _KIS_STRATEGY_HOLD, _KIS_ENTRY, _KIS_EXIT, _KIS_STRATEGY_STOP)
+    return _slot_status_detail(KIS_DIR / "kis_positions.csv",
+                               _KIS_STRATEGY_SLOTS, _KIS_STRATEGY_LABEL,
+                               _KIS_STRATEGY_HOLD, _KIS_ENTRY, _KIS_EXIT, _KIS_STRATEGY_STOP)
 
 
 def _kiwoom_slot_status():
-    return _slot_status(PAPER_CSV, _KW_STRATEGY_SLOTS, _KW_STRATEGY_LABEL,
-                        _KW_STRATEGY_HOLD, _KW_ENTRY, _KW_EXIT, {})
+    return _slot_status_detail(KIWOOM_DIR / "kiwoom_positions.csv",
+                               _KW_STRATEGY_SLOTS, _KW_STRATEGY_LABEL,
+                               _KW_STRATEGY_HOLD, _KW_ENTRY, _KW_EXIT, {})
 
 def get_kis_mock(date_from="", date_to=""):
     out = {
@@ -712,7 +732,8 @@ def get_kis_mock(date_from="", date_to=""):
                 pass
         if frames:
             combined = pd.concat(frames, ignore_index=True).fillna("")
-            combined = _attach_realized_pnl(combined)   # 매도행 실현손익(금액·%) 부여
+            # KIS 매도행 price 는 '전일 종가' 참조가 — 매도일 시가 기준으로 갭 반영(2026-07-12)
+            combined = _attach_realized_pnl(combined, sell_px_mode="open")
             out["order_total"] = int(len(combined))
             out["orders"] = combined.tail(500).to_dict("records")
     # 슬롯 현황 + 신호 수
@@ -2171,7 +2192,7 @@ function fillOverview(ch, ai, cand){
     `<tr><td>${r.code||''}</td><td>${r.name||''}</td><td style="color:#8b949e">${r.strategy||''}</td>
      <td class="r">${String(r.signal_date||'').slice(0,8)}</td>
      <td class="r">${fmt(r.entry_price)}</td>
-     <td class="r ${clr(r.ai_bigwin)}">${r.ai_bigwin!=null?(Number(r.ai_bigwin)*100).toFixed(0)+'%':(r.prob!=null?(Number(r.prob)*100).toFixed(1)+'%':'-')}</td></tr>`
+     <td class="r ${clr(r.ai_bigwin)}">${r.ai_bigwin!=null?Number(r.ai_bigwin).toFixed(0)+'%':(r.prob!=null?(Number(r.prob)*100).toFixed(1)+'%':'-')}</td></tr>`
   ).join(''):'<tr><td colspan="6" style="color:#8b949e;text-align:center">&#xC624;&#xB298; &#xC2E0;&#xADDC; &#xD6C4;&#xBCF4; &#xC5C6;&#xC74C;</td></tr>');
 }
 
@@ -2186,12 +2207,14 @@ function fillCheonok(ch){
   setTxt('ch-cap', cap>=1e8?(cap/1e8).toFixed(2)+'억':fmt(cap));
   setTxt('ch-active-info', `활성 신호 ${safe(ch.active_count,'0')}건`);
   const sigs=ch.signals||[];
+  // 필드명은 백엔드 행 키(code/name/entry_price_close/est_pct)와 일치해야 함 —
+  // 종전 stock_code/entry_price/return_pct 는 존재하지 않는 키라 표가 빈칸이었음(2026-07-12)
   setHtml('ch-signals', sigs.length?sigs.map(r=>
-    `<tr><td>${r.stock_code||''} ${r.stock_name||''}</td><td style="color:#8b949e;font-size:11px">${r.strategy||''}</td>
+    `<tr><td>${r.code||''} ${r.name||''}</td><td style="color:#8b949e;font-size:11px">${r.strategy||''}</td>
      <td class="r">${String(r.signal_date||'').slice(0,8)}</td>
-     <td class="r">${fmt(r.entry_price)}</td>
+     <td class="r">${fmt(r.entry_price_close)}</td>
      <td class="r">${String(r.target_exit_date||'').slice(0,8)}</td>
-     <td class="r ${clr(r.return_pct)}">${r.return_pct!=null?pct(r.return_pct):'-'}</td></tr>`
+     <td class="r ${clr(r.est_pct)}">${r.est_pct!=null?pct(r.est_pct):'-'}</td></tr>`
   ).join(''):'<tr><td colspan="6" style="color:#8b949e;text-align:center">만료된 신호만 있거나 없음</td></tr>');
 }
 
