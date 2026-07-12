@@ -48,10 +48,15 @@ def _close_price(date_str: str, code_str: str) -> Optional[float]:
 
 
 def _next_trading_close(date_str: str, code_str: str, max_days: int = 5) -> Tuple[Optional[str], Optional[float]]:
-    """date_str 이후 최초 거래일의 종가 반환 (최대 max_days 영업일 탐색)."""
-    dt = datetime.strptime(date_str, "%Y%m%d")
-    for i in range(max_days + 1):
-        d = (dt + timedelta(days=i)).strftime("%Y%m%d")
+    """date_str 이후 최초 거래일의 종가 반환 (최대 max_days '거래일' 탐색).
+
+    [2026-07-12] 기존 구현은 달력일 6일(timedelta) 순회라 주말이 끼면 실탐색이
+    3~4거래일에 그쳐 docstring('영업일')과 어긋나고 ai_paper_trader(5거래일 유예)와
+    판정이 갈렸음 — 실제 거래일 달력(_trading_dates)을 걷도록 수정."""
+    cal = _trading_dates()
+    import bisect
+    i0 = bisect.bisect_left(cal, date_str)
+    for d in cal[i0:i0 + max_days + 1]:
         px = _close_price(d, code_str)
         if px is not None and px > 0:
             return d, px
@@ -76,22 +81,27 @@ def compute_paper_returns(paper: pd.DataFrame) -> pd.DataFrame:
     for idx, (_, r) in enumerate(paper.iterrows(), 1):
         code = str(r["code"]).zfill(6)
         entry_px = float(r["entry_price_close"])
-        # target_exit_date 는 NaN(만기 미산출) 가능 — int 변환 전 가드(과거 NaN 행에서 ValueError 크래시, 2026-06-30 수정)
-        exit_date_str = str(int(r["target_exit_date"])) if pd.notna(r["target_exit_date"]) else ""
-        signal_date   = str(int(r["signal_date"]))
+        signal_date = str(int(r["signal_date"]))
 
-        # 만기일 공란이면 자체 계산 — live_signal 의 _offset_date 는 만기가 '미래'(데이터 밖)면
-        # "" 를 기록하고 이후 갱신되지 않아, 최근 신호 전부가 영구 pending 이던 버그(2026-07-02).
-        # 트레이더와 동일 규약: 진입=신호 다음 거래일, 청산=진입일 포함 holding일째.
-        if not exit_date_str:
+        # 만기일은 '항상' 실제 거래일 달력으로 자체 계산(2026-07-12 변경).
+        # CSV 의 target_exit_date 는 2026-07-11 이후 '주말만 스킵한 근사치'(공휴일 미반영,
+        # 표시용)라 그대로 쓰면 공휴일 낀 만기가 1+거래일 조기 청산으로 계산됨 —
+        # 트레이더와 동일 규약(진입=신호 다음 거래일, 청산=진입일 포함 holding일째)으로 통일.
+        # 달력으로 계산 불가(신호일이 달력 밖 등)일 때만 CSV 값 폴백.
+        exit_date_str = ""
+        try:
+            hold = int(float(r.get("holding_days", 0) or 0))
+            ei = bisect.bisect_right(cal, signal_date)      # 진입 인덱스
+            xi = ei + hold - 1
+            if hold > 0 and 0 <= xi < len(cal):
+                exit_date_str = cal[xi]
+        except Exception:
+            pass
+        if not exit_date_str and pd.notna(r["target_exit_date"]):
             try:
-                hold = int(float(r.get("holding_days", 0) or 0))
-                ei = bisect.bisect_right(cal, signal_date)      # 진입 인덱스
-                xi = ei + hold - 1
-                if hold > 0 and 0 <= xi < len(cal):
-                    exit_date_str = cal[xi]
-            except Exception:
-                pass
+                exit_date_str = str(int(float(r["target_exit_date"])))
+            except (TypeError, ValueError):
+                exit_date_str = ""
 
         # 만기 미도래(또는 만기일 미산출=pending)
         if (not exit_date_str) or exit_date_str > today_str:
@@ -114,6 +124,7 @@ def compute_paper_returns(paper: pd.DataFrame) -> pd.DataFrame:
             "signal_date":      signal_date,
             "code":             code,
             "name":             r.get("name", ""),
+            "strategy":         str(r.get("strategy", "") or ""),   # Drift 전략조인용(2026-07-12)
             "entry_price":      entry_px,
             "target_exit_date": exit_date_str,
             "actual_exit_date": actual_exit_date,
@@ -174,6 +185,18 @@ def report(paper_result: pd.DataFrame, history: pd.DataFrame):
         (history["date"].astype(str) >= p_start) &
         (history["date"].astype(str) <= p_end)
     ]
+
+    # [2026-07-12] 전략 조인 — trades_history_v3 는 레거시 풀(h252_40/h500_20/
+    # h500_40_MKT)만 담고 있어, 전략 필터 없이 비교하면 '5일 보유 rsi_reversal 실측'을
+    # '40일 보유 h252_40 기대치'와 빼는 무의미한 Drift 가 나온다. 라이브 전략이
+    # 이력에 없으면 비교를 정직하게 생략한다.
+    if "strategy" in history.columns and "strategy" in paper_result.columns:
+        _live_strats = set(paper_result["strategy"].dropna().astype(str).unique())
+        hist_sub = hist_sub[hist_sub["strategy"].astype(str).isin(_live_strats)]
+        if len(hist_sub) == 0:
+            print("  ⚠ 백테스트 이력에 라이브 전략(안C) 트레이드 없음 — Drift 비교 생략")
+            print("    (trades_history_v3 는 레거시 풀 전용. 안C 백테 이력을 만들려면")
+            print("     make_trades_history 계열에 라이브 3전략 추가 필요 — 후속 과제)")
 
     if len(hist_sub) == 0:
         print("  백테스트에 동기간 데이터 없음")
@@ -238,6 +261,14 @@ if __name__ == "__main__":
 
     paper   = pd.read_csv(PAPER_CSV)
     history = pd.read_csv(HISTORY_CSV) if os.path.exists(HISTORY_CSV) else pd.DataFrame()
+
+    # 완전중복 신호 이중집계 방지(2026-07-12) — 멱등 dedup 도입 전 잔재(20260619
+    # rsi_reversal 104행 실측)가 승률/평균에 2배 가중되던 것. 방어적 상시 dedup.
+    _n0 = len(paper)
+    if {"signal_date", "code", "strategy"} <= set(paper.columns):
+        paper = paper.drop_duplicates(["signal_date", "code", "strategy"], keep="first")
+    if len(paper) != _n0:
+        print(f"[dedup] 완전중복 신호 {_n0 - len(paper)}건 제외")
 
     print(f"paper_signals: {len(paper):,}건 로드")
     print("실제 결과 계산 중 (pykrx CSV 조회)...")

@@ -109,19 +109,22 @@ def simulate(sig, cal_all, cal, closes, rank_col, min_score=None):
 
     for d in cal:
         cur_i = idx[d]
-        # 1) 만기 청산 — 청산 예정일 도달분(청산일 종가, 없으면 이후 5거래일 내 첫 종가)
+        # 1) 만기 청산 — 청산 예정일 도달분(청산일 종가, 없으면 재개 후 첫 종가)
+        # [2026-07-12] 탐색창 exit_idx+5 고정 → 오늘까지로 확장: 6거래일 이상 거래정지
+        # 종목이 어떤 재계산에서도 같은 창만 훑어 영구 미청산(슬롯 좀비 + equity 원금
+        # 고정)되던 것. 이제 거래 재개 첫 종가에 청산된다.
         for code in list(positions):
             p = positions[code]
             if cur_i < p["exit_idx"]:
                 continue
             x = None
-            for j in range(p["exit_idx"], min(p["exit_idx"] + 6, cur_i + 1, len(cal_all))):
+            for j in range(p["exit_idx"], min(cur_i + 1, len(cal_all))):
                 x = _px(closes, cal_all[j], code)
                 if x:
                     exit_d = cal_all[j]
                     break
             if not x:
-                continue   # 종가 데이터 미도래 — 다음 재계산 때 청산됨
+                continue   # 아직 재개 종가 없음(거래정지 지속/상폐) — 재개 시 자동 청산
             net = (x / p["entry_px"] - 1) * 100 - COST_PCT
             proceeds = p["invest"] * (1 + net / 100)
             cash += proceeds
@@ -134,9 +137,16 @@ def simulate(sig, cal_all, cal, closes, rank_col, min_score=None):
         # 2) 신규 진입 — 당일 신호 rank_col 내림차순(라이브처럼 남은현금/남은빈슬롯 균등)
         g = by_date.get(d)
         if g is not None:
-            cand = g[g[rank_col].notna()].sort_values(rank_col, ascending=False)
-            if min_score is not None:   # 라이브 필터 재현 — 1순위여도 임계 미만이면 미진입
-                cand = cand[cand[rank_col] >= min_score]
+            if min_score is not None:
+                # 라이브 필터 재현(2026-07-12 수정): 키움은 '기록 없는' 신호를 통과시킨다
+                # (fail-open — 로거 장애가 매수 전면 중단으로 번지지 않게). 기존 시뮬은
+                # notna 로 무기록을 전부 제외(fail-closed)해 방향이 라이브와 반대였음.
+                # 무기록은 통과시키되 정렬 맨 뒤(NaN last) — 라이브의 tv순 폴백 근사.
+                cand = g[(g[rank_col].isna()) | (g[rank_col] >= min_score)]
+                cand = cand.sort_values(rank_col, ascending=False, na_position="last")
+            else:
+                # ai 포트는 ai_prob 자체가 비교 대상 지표라 무기록 제외(기존 유지)
+                cand = g[g[rank_col].notna()].sort_values(rank_col, ascending=False)
             for _, r in cand.iterrows():
                 free = SLOTS - len(positions)
                 if free <= 0:
@@ -150,11 +160,12 @@ def simulate(sig, cal_all, cal, closes, rank_col, min_score=None):
                     continue
                 ep = float(r["entry_price_close"])
                 ei = bisect.bisect_right(cal_all, d)             # 진입 다음 거래일 인덱스
+                _sc = float(r[rank_col]) if pd.notna(r[rank_col]) else None   # 무기록 NaN 가드
                 positions[code] = {
                     "name": str(r.get("name", "")), "strategy": str(r.get("strategy", "")),
                     "entry_date": d, "entry_px": ep, "invest": invest,
                     "exit_idx": ei + int(r["holding_days"]) - 1,
-                    "score": round(float(r[rank_col]), 4),
+                    "score": round(_sc, 4) if _sc is not None else None,
                 }
                 cash -= invest
 
@@ -184,7 +195,7 @@ def simulate(sig, cal_all, cal, closes, rank_col, min_score=None):
         "win_pct": (round(float((done["net_pct"] > 0).mean() * 100), 1) if len(done) else None),
         "avg_net": (round(float(done["net_pct"].mean()), 2) if len(done) else None),
         "skipped_full": skipped_full,
-        "positions": sorted(pos_out, key=lambda r: -r["score"]),
+        "positions": sorted(pos_out, key=lambda r: -(r["score"] if r["score"] is not None else -999)),
         "recent_trades": trades[-10:][::-1],
         "equity_curve": equity[-60:],
     }

@@ -6,14 +6,18 @@ Paper Trading 추적기 — paper_signals.csv 의 모든 신호로 가상 매매
 
 기능:
   1. paper_signals.csv 로드 (v2: strategy / holding_days 컬럼 포함)
-  2. 각 신호:
-     - entry_date = signal_date 다음 영업일
-     - entry_price = entry_date 의 시가
-     - exit_date = entry_date 의 holding_days 영업일 후 (전략별 상이)
-     - exit_price = exit_date 의 종가 (도달 시) / 아니면 미실현
-  3. max_concurrent=10 슬롯 cap  (슬롯 1-4: high_52w_filt / 5-8: rsi_reversal / 9-10: rsi_vol)  — 안C 포트폴리오
-  4. 누적 자본 곡선, CAGR, MDD 산출
-  5. 전략별 손익 분리 출력
+  2. 각 신호(X2 모드, ENTRY_AT_CLOSE=True):
+     - entry = 신호일 T 종가 × 1.02 (시간외 매수 가정)
+     - exit  = T + holding - 1 거래일 종가 (진입일 T 포함 holding일)
+  3. max_concurrent=10 전역 슬롯 cap + 자본 곡선/CAGR/MDD + 전략별 손익
+
+⚠ 해석 주의(2026-07-12 명시 — 라이브 실계좌와의 의도적/구조적 차이):
+  ① X2 모드는 T 종가 진입이라 청산일이 라이브(T+1 진입, T+holding 매도)보다
+     1거래일 이르다 — 백테스트 검증(X2 walk-forward CAGR +47%p)이 이 규약이므로
+     유지. 실계좌와 트레이드 단위 비교엔 paper_audit/실계좌 스냅샷을 쓸 것.
+  ② 전략별 슬롯(4/4/2)·강도필터 6.0·강도순 우선순위는 재현하지 않는다 —
+     전역 10슬롯 근사(= '신호 풀 전체'의 성과 추적용). 안C 실계좌 구조 재현이
+     필요하면 별도 작업(후속 과제).
 """
 
 import os
@@ -65,6 +69,12 @@ def main():
     signals = pd.read_csv(SIGNALS_CSV, dtype={"code": str})
     signals["signal_date"] = signals["signal_date"].astype(str)
     signals["code"] = signals["code"].astype(str).str.zfill(6)
+    # 완전중복 이중집계 방지(2026-07-12) — 20260619 잔재 104행이 승률·MDD 를 2배 가중하던 것
+    _n0 = len(signals)
+    if "strategy" in signals.columns:
+        signals = signals.drop_duplicates(["signal_date", "code", "strategy"], keep="first")
+    if len(signals) != _n0:
+        print(f"[dedup] 완전중복 신호 {_n0 - len(signals)}건 제외")
 
     # v2 schema 호환: strategy / holding_days 컬럼 없으면 기본값 채움
     if "strategy" not in signals.columns:
