@@ -170,16 +170,19 @@ def collect_macro_data(start_date_str, end_date_str, market="KOSDAQ"):
 
                 df_ohlcv = stock.get_market_ohlcv(date_str, market)
 
-                if df_ohlcv is None or df_ohlcv.empty:
+                if (df_ohlcv is None or df_ohlcv.empty
+                        or (df_ohlcv["종가"] == 0).all()):
+                    # 빈/전종목0 응답 = 진짜 휴장일 수도, KRX 스로틀 오응답일 수도 있다.
+                    # [2026-07-12] 첫 응답에 즉시 휴장 마커를 쓰면 스로틀 1회로 실제
+                    # 거래일이 '가짜 휴장'으로 영구 스킵됨(모든 백필 경로가 마커 존중)
+                    # → 마지막 시도에서만 마커를 기록한다.
+                    if attempt < max_retries - 1:
+                        print_event(f"  [{date_str}] 빈 응답 — 휴장 판정 유보, 재시도 {attempt + 2}/{max_retries}")
+                        time.sleep(10)
+                        continue
                     if date_str < today_str:
                         open(save_path + ".holiday", "w").close()
-                    print_event(f"  [{date_str}] 휴장일 — 마커 기록")
-                    break
-
-                if (df_ohlcv["종가"] == 0).all():
-                    if date_str < today_str:
-                        open(save_path + ".holiday", "w").close()
-                    print_event(f"  [{date_str}] 휴장일(전종목 0원) — 마커 기록")
+                    print_event(f"  [{date_str}] 휴장일 판정({max_retries}회 연속 빈 응답) — 마커 기록")
                     break
 
                 df_ohlcv = df_ohlcv.reset_index()
@@ -211,7 +214,11 @@ def collect_macro_data(start_date_str, end_date_str, market="KOSDAQ"):
                 df_merged = pd.merge(df_merged, df_inst, on='code', how='left')
                 df_merged['date'] = date_str
 
-                df_merged.to_csv(save_path, index=False, encoding="utf-8-sig")
+                # 원자적 쓰기(2026-07-12): 쓰다 죽은 부분 CSV 가 '존재=수집완료' 스킵에
+                # 걸려 영구 잔존하던 것 방지(잘린 날짜는 지표·백테스트를 조용히 왜곡).
+                _tmp_path = save_path + ".tmp"
+                df_merged.to_csv(_tmp_path, index=False, encoding="utf-8-sig")
+                os.replace(_tmp_path, save_path)
                 _n_fetched += 1
 
                 # stock.db 동기

@@ -49,7 +49,11 @@ def _month_dir(base_dir, date_str):
 def _is_excluded(name, code):
     """우선주/ETF/관리종목 등 필터링 (간단한 휴리스틱)"""
     if config.EXCLUDE_PREFERRED:
-        if name and (name.endswith("우") or name.endswith("우B") or "우선주" in name):
+        # 우선주 = 이름 끝 우/우B/우C + 코드 끝자리≠0(보통주=0) 결합 —
+        # live_signal/daily_loader 와 동일 수정(2026-07-12). 이름만으로 판정하면
+        # '우'로 끝나는 보통주(이오플로우 등)가 랭킹→분봉→AI 피처 전 구간에서 오제외됨.
+        if name and ((name.endswith(("우", "우B", "우C")) and not str(code).endswith("0"))
+                     or "우선주" in name):
             return True
     if config.EXCLUDE_ETF:
         etf_prefixes = ("KODEX", "TIGER", "KBSTAR", "KOSEF", "ARIRANG", "HANARO",

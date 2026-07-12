@@ -43,6 +43,62 @@ def _force_delete(date_str):
         print(f"[update_macro][force] {date_str} — 기존 파일 없음 (신규 수집)")
 
 
+def _refresh_last_trading_day(last):
+    """직전 거래일 확정치 재수집 — 임시폴더 수집 → 검증 → 원자 교체(2026-07-12 재설계).
+
+    [기존 구현의 critical 결함] 원본 CSV 를 os.remove 한 뒤 재수집하던 초기 버전은
+    ① KRX 스로틀이 빈 응답을 1회만 줘도 pykrx_collector 가 .holiday 마커를 써서
+      '실제 거래일'이 가짜 휴장으로 영구 스킵되고(모든 백필 경로가 마커를 존중),
+    ② 삭제~재작성 사이 크래시/재부팅이면 그날 18:30 신호가 직전 거래일이 통째로
+      빠진 데이터로 생성됐다(외국인 3일 연속·RSI·신고가 전부 하루 시프트).
+    이제 원본은 '검증된 새 파일'로 교체되기 전까지 절대 삭제되지 않는다:
+    임시폴더에 수집 → 행수 검증(기존의 90% 이상) → os.replace 원자 교체.
+    실패 시 기존(잠정) 파일 유지 + 텔레그램 경고 — 다음날 재시도가 자연 커버."""
+    import pykrx_collector as _pkc
+    real_csv = f"{DATA_DIR}/{last}.csv"
+    if not os.path.exists(real_csv):
+        return
+    try:
+        with open(real_csv, encoding="utf-8-sig") as f:
+            n_old = max(0, sum(1 for _ in f) - 1)
+    except Exception:
+        n_old = 0
+    tmp_dir = os.path.join(DATA_DIR, "_refresh_tmp")
+    try:
+        os.makedirs(tmp_dir, exist_ok=True)
+        for f in glob.glob(os.path.join(tmp_dir, "*")):
+            os.remove(f)
+        print(f"[update_macro] 직전 거래일 {last} 수급 확정치 재수집(임시폴더 검증 후 교체)")
+        _orig = _pkc.DATA_DIR
+        try:
+            _pkc.DATA_DIR = tmp_dir       # collect 가 임시폴더에 쓰도록 전환
+            collect_macro_data(last, last)
+        finally:
+            _pkc.DATA_DIR = _orig
+        tmp_csv = os.path.join(tmp_dir, f"{last}.csv")
+        if not os.path.exists(tmp_csv):
+            raise RuntimeError("재수집 결과 없음(빈 응답/스로틀 의심) — 기존 확정 파일 유지")
+        with open(tmp_csv, encoding="utf-8-sig") as f:
+            n_new = max(0, sum(1 for _ in f) - 1)
+        if n_old > 0 and n_new < n_old * 0.9:
+            raise RuntimeError(f"재수집 행수 급감({n_old}→{n_new}) — 기존 파일 유지")
+        os.replace(tmp_csv, real_csv)
+        print(f"[update_macro] {last} 확정치 교체 완료({n_old}→{n_new}행)")
+    except Exception as e:
+        print(f"[update_macro][WARN] {last} 확정치 재수집 보류: {e}")
+        try:
+            import notifier
+            notifier.safe_send(f"⚠ [update_macro] {last} 확정치 재수집 실패 — 기존(잠정) 파일 유지: {str(e)[:80]}")
+        except Exception:
+            pass
+    finally:
+        for f in glob.glob(os.path.join(tmp_dir, "*")):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+
+
 def main():
     args = sys.argv[1:]
 
@@ -85,12 +141,7 @@ def main():
         last = max(prev_days)
         last_dt = datetime.strptime(last, "%Y%m%d")
         if (today - last_dt).days <= 7:
-            print(f"[update_macro] 직전 거래일 {last} 수급 확정치 재수집")
-            _force_delete(last)
-            collect_macro_data(last, last)
-            if not (os.path.exists(f"{DATA_DIR}/{last}.csv")
-                    or os.path.exists(f"{DATA_DIR}/{last}.csv.holiday")):
-                print(f"[update_macro][WARN] {last} 재수집 실패 — 결측 스캔에서 재시도")
+            _refresh_last_trading_day(last)
         files = sorted(glob.glob(f"{DATA_DIR}/*.csv"))
 
     # [2026-06-13] 결측 우선 정책: 마지막 파일 이후만이 아니라 보유 구간 전체를

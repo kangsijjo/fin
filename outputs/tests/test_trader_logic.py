@@ -322,6 +322,38 @@ def test_kis_codes_due_ledger_expiry_and_stop(tmp_path, monkeypatch):
     assert "000070" not in due2
 
 
+def test_after_market_signed_price_and_snapshot_replace(tmp_path, monkeypatch):
+    """① 키움 signed 가격(cur_prc '-3050')이 음수로 DB 누적되던 것 → abs 정규화
+    ② 재실행 시 순위권 이탈 종목의 스테일 행 잔존 → (date,market,side) 통째 교체."""
+    import sqlite3
+    import after_market as am
+    rows = [{"stk_cd": "005930", "stk_nm": "삼성전자", "cur_prc": "-3050",
+             "flu_rt": "-4.2", "acc_trde_qty": "1000", "tdy_close_pric_flu_rt": "1.1"}]
+    recs = am._parse_rows(rows, "KOSPI", "down")
+    assert recs[0]["ovt_price"] == 3050          # 가격 부호 제거
+    assert recs[0]["ovt_chg_rt"] == -4.2         # 등락률 부호는 유지
+
+    db = tmp_path / "stock.db"
+    monkeypatch.setattr(am, "_db_path", lambda: str(db))
+    r1 = [{"date": "20260712", "market": "KOSPI", "side": "up", "rank": 1,
+           "code": "000001", "name": "A", "ovt_price": 100, "ovt_chg_rt": 1.0,
+           "ovt_volume": 10, "reg_close_chg_rt": 0.5}]
+    am._save_db(r1)
+    am._save_db([dict(r1[0], code="000002", name="B")])   # 2차 실행: A 이탈, B 진입
+    con = sqlite3.connect(str(db))
+    codes = [r[0] for r in con.execute("SELECT code FROM after_market WHERE side='up'")]
+    con.close()
+    assert codes == ["000002"]                    # 스테일 A 행이 남지 않음
+
+
+def test_data_collector_preferred_filter_code_suffix():
+    """data_collector 우선주 판정도 신호엔진과 동일하게 코드 끝자리 결합(유니버스 정합)."""
+    import data_collector as dc
+    assert dc._is_excluded("삼성전자우", "005935") is True
+    assert dc._is_excluded("이오플로우", "294090") is False   # '우'로 끝나는 보통주
+    assert dc._is_excluded("KODEX 200", "069500") is True
+
+
 def test_factor_scorer_supply_dates_survive_beyond_8_rows():
     """[critical 회귀방지] supply_demand 날짜 정규화가 Series 앞 8'행' 슬라이스로
     9행째부터 'nan' 이 되어 수급 피처(for_net5_db)가 전 종목 소실되던 버그(2026-07-11 수정)."""

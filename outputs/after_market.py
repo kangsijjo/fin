@@ -73,7 +73,9 @@ def _parse_rows(rows, market, side):
             "code": code,
             "name": _pick(x, "stk_nm", "hts_kor_isnm"),
             # ka10098 실측 필드(2026-06-28 probe 확정): cur_prc/flu_rt/acc_trde_qty
-            "ovt_price": _to_int(_pick(x, "cur_prc", "ovt_sigpric_cur_prc", "stck_prpr")),
+            # abs: 키움은 등락 방향을 가격 부호로 표기(-3050 = 하락 3050원) —
+            # kiwoom_trader.get_positions 와 동일 정규화(2026-07-12, 하락측 전 행 음수 방지)
+            "ovt_price": abs(_to_int(_pick(x, "cur_prc", "ovt_sigpric_cur_prc", "stck_prpr"))),
             "ovt_chg_rt": _to_float(_pick(x, "flu_rt", "ovt_sigpric_flu_rt", "prdy_ctrt")),
             "ovt_volume": _to_int(_pick(x, "acc_trde_qty", "ovt_sigpric_trde_qty",
                                         "trde_qty", "acml_vol")),
@@ -108,6 +110,11 @@ def _save_db(records):
                 reg_close_chg_rt REAL,
                 PRIMARY KEY (date, market, side, code)
             )""")
+        # [2026-07-12] 같은 (date,market,side) 스냅샷은 통째로 교체 — INSERT OR REPLACE 만으론
+        # 재실행 시 순위권 이탈 종목의 옛 행(스테일 rank/가격)이 새 스냅샷과 혼재됨.
+        for _d, _m, _s in {(r["date"], r["market"], r["side"]) for r in records}:
+            con.execute("DELETE FROM after_market WHERE date=? AND market=? AND side=?",
+                        (_d, _m, _s))
         con.executemany("""
             INSERT OR REPLACE INTO after_market
               (date, market, side, rank, code, name, ovt_price, ovt_chg_rt, ovt_volume, reg_close_chg_rt)
@@ -166,7 +173,7 @@ def main():
                 recs.append({
                     "date": TODAY, "market": mlabel, "side": "vol", "rank": len(recs) + 1,
                     "code": str(r.get("code", "")).zfill(6), "name": r.get("name", ""),
-                    "ovt_price": _to_int(r.get("close", 0)),
+                    "ovt_price": abs(_to_int(r.get("close", 0))),   # signed 가격 정규화(2026-07-12)
                     "ovt_chg_rt": _to_float(r.get("change_pct", 0.0)),
                     "ovt_volume": _to_int(r.get("value", 0)),
                     "reg_close_chg_rt": "",   # ka10030 미제공
