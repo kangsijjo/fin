@@ -533,6 +533,67 @@ def _attach_realized_pnl(combined, sell_px_mode="close"):
         return combined
 
 
+def _strategy_perf(combined, positions):
+    """전략별 성과(2026-07-13) — 실현(청산 매도행 pnl) + 미실현(현 보유 pnl) 분리 집계.
+
+    combined: _attach_realized_pnl 적용된 주문 DataFrame(strategy·side·pnl·pnl_pct 보유)
+    positions: 보유 포지션 리스트(strategy·pnl·pnl_pct 병합됨)
+    반환: [{strategy, closed_n, win_pct, avg_pct, realized_pnl, open_n, unreal_pnl}] pnl 내림차순.
+    ※ 실현손익은 FIFO 추정치(브로커 정산 정확값 아님) — 표시용.
+    """
+    perf = {}
+
+    def _row(s):
+        return perf.setdefault(str(s or "기타"), {
+            "strategy": str(s or "기타"), "closed_n": 0, "wins": 0,
+            "sum_pct": 0.0, "realized_pnl": 0, "open_n": 0, "unreal_pnl": 0})
+
+    try:
+        if combined is not None and len(combined):
+            sells = combined[combined["side"].astype(str).str.lower().isin(("sell", "tp_sell"))]
+            for _, r in sells.iterrows():
+                pnl = r.get("pnl", "")
+                if pnl == "" or pnl is None:      # 미체결/미매칭 매도는 실현손익 없음
+                    continue
+                try:
+                    pnl = int(float(pnl)); pct = float(r.get("pnl_pct", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                d = _row(r.get("strategy", ""))
+                d["closed_n"] += 1
+                d["wins"] += 1 if pnl > 0 else 0
+                d["sum_pct"] += pct
+                d["realized_pnl"] += pnl
+    except Exception:
+        pass
+
+    try:
+        for p in (positions or []):
+            d = _row(p.get("strategy", ""))
+            d["open_n"] += 1
+            try:
+                d["unreal_pnl"] += int(float(p.get("pnl", 0) or 0))
+            except (TypeError, ValueError):
+                pass
+    except Exception:
+        pass
+
+    out = []
+    for d in perf.values():
+        n = d["closed_n"]
+        out.append({
+            "strategy": d["strategy"],
+            "closed_n": n,
+            "win_pct": round(d["wins"] / n * 100, 1) if n else None,
+            "avg_pct": round(d["sum_pct"] / n, 2) if n else None,
+            "realized_pnl": d["realized_pnl"],
+            "open_n": d["open_n"],
+            "unreal_pnl": d["unreal_pnl"],
+        })
+    out.sort(key=lambda r: -(r["realized_pnl"] + r["unreal_pnl"]))
+    return out
+
+
 def get_kiwoom_mock(date_from="", date_to=""):
     out = {"snapshot": {}, "equity": [], "orders": [], "order_total": 0, "positions": []}
     snap_path = KIWOOM_DIR / "snapshot.json"
@@ -593,6 +654,7 @@ def get_kiwoom_mock(date_from="", date_to=""):
                         p["entry_date"] = dt
             except Exception:
                 pass
+            out["strategy_perf"] = _strategy_perf(combined, out["positions"])   # 전략별 실현+미실현
     out["slot_status"] = _kiwoom_slot_status()   # 키움 모의투자 슬롯(진입/청산 조건 포함)
     return out
 
@@ -736,6 +798,7 @@ def get_kis_mock(date_from="", date_to=""):
             combined = _attach_realized_pnl(combined, sell_px_mode="open")
             out["order_total"] = int(len(combined))
             out["orders"] = combined.tail(500).to_dict("records")
+            out["strategy_perf"] = _strategy_perf(combined, out.get("positions", []))   # 전략별 실현+미실현
     # 슬롯 현황 + 신호 수
     out["slot_status"] = _kis_slot_status()
     if KIS_SIGNALS_CSV.exists():
@@ -1883,6 +1946,14 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
     <tbody id="mock-orders"><tr><td colspan="9" style="color:#8b949e;text-align:center">매매내역 없음</td></tr></tbody>
     </table>
   </div>
+  <div class="section">
+    <h2>키움 전략별 성과 <span style="color:#8b949e;font-size:11px;font-weight:400">&mdash; 실현(청산·FIFO 추정) + 미실현(보유) 분리 · 표본 작아 건수 병기</span></h2>
+    <table><thead><tr>
+      <th>전략</th><th class="r">청산</th><th class="r">승률</th><th class="r">평균%</th><th class="r">실현손익</th><th class="r">보유</th><th class="r">미실현손익</th>
+    </tr></thead>
+    <tbody id="mock-stratperf"><tr><td colspan="7" style="color:#8b949e;text-align:center">데이터 없음</td></tr></tbody>
+    </table>
+  </div>
   <!-- KIS -->
   <div class="section">
     <h2>KIS 잔고</h2>
@@ -1918,6 +1989,14 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
     <tbody id="kis-orders"><tr><td colspan="9" style="color:#8b949e;text-align:center">매매내역 없음</td></tr></tbody>
     </table>
   </div>
+  <div class="section">
+    <h2>KIS 전략별 성과 <span style="color:#8b949e;font-size:11px;font-weight:400">&mdash; 실현(청산·FIFO 추정) + 미실현(보유) 분리 · 표본 작아 건수 병기</span></h2>
+    <table><thead><tr>
+      <th>전략</th><th class="r">청산</th><th class="r">승률</th><th class="r">평균%</th><th class="r">실현손익</th><th class="r">보유</th><th class="r">미실현손익</th>
+    </tr></thead>
+    <tbody id="kis-stratperf"><tr><td colspan="7" style="color:#8b949e;text-align:center">데이터 없음</td></tr></tbody>
+    </table>
+  </div>
 </div>
 
 <!-- ===== 강도매매 ===== -->
@@ -1946,11 +2025,16 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
     <h2>가상매매 실행 — AI vs 강도 포트폴리오 <span id="ap-ts" style="color:#8b949e;font-size:12px;font-weight:400"></span></h2>
     <div style="color:#8b949e;font-size:12px;margin-bottom:8px">순수 장부 시뮬(브로커 미사용) &middot; 각 10슬롯 &middot; 시작 1,000만 &middot; 06-30~ &middot; 매일 18:31 재계산 &middot; 진입=신호일 종가 / 청산=만기 종가(익절·손절 없음 — 선별 효과만 분리)</div>
     <div class="stats-row" id="ap-stats"><div style="color:#8b949e;font-size:13px">로딩중...</div></div>
-    <table style="margin-top:10px"><thead><tr>
+    <div style="color:#c9d1d9;font-size:13px;margin:12px 0 4px">보유 중</div>
+    <table style="margin-top:2px"><thead><tr>
       <th>포트폴리오</th><th>종목</th><th>전략</th><th class="r">진입일</th><th class="r">점수</th><th class="r">평가손익률</th>
     </tr></thead>
     <tbody id="ap-pos"><tr><td colspan="6" style="color:#8b949e;text-align:center">보유 없음</td></tr></tbody>
     </table>
+    <div style="color:#c9d1d9;font-size:13px;margin:16px 0 4px">전략별 성과 (완료 거래)</div>
+    <div id="ap-bystrat" style="color:#8b949e;font-size:13px">데이터 없음</div>
+    <div style="color:#c9d1d9;font-size:13px;margin:16px 0 4px">완료 매매내역 (클릭해서 펼치기)</div>
+    <div id="ap-trades" style="color:#8b949e;font-size:13px">완료 거래 없음</div>
   </div>
   <div class="section">
     <h2>강도 기록 (최근 300건) <span style="color:#8b949e;font-size:11px;font-weight:400">&mdash; 열 제목 클릭 = 정렬(다시 클릭 = 반대방향)</span></h2>
@@ -2307,12 +2391,27 @@ function fillStopMonitor(elId, tsId, mon){
   }).join('');
 }
 
+function fillStratPerf(elId, perf){
+  // 전략별 성과: 실현(청산) + 미실현(보유) 분리. 표본이 작아 건수 병기.
+  const rows=perf||[];
+  setHtml(elId, rows.length?rows.map(r=>`<tr>
+    <td style="color:#8b949e;font-size:11px">${r.strategy||''}</td>
+    <td class="r">${r.closed_n||0}</td>
+    <td class="r">${r.win_pct!=null?r.win_pct+'%':'-'}</td>
+    <td class="r ${clr(r.avg_pct)}">${r.avg_pct!=null?pct(r.avg_pct):'-'}</td>
+    <td class="r ${clr(r.realized_pnl)}">${fmt(r.realized_pnl)}원</td>
+    <td class="r">${r.open_n||0}</td>
+    <td class="r ${clr(r.unreal_pnl)}">${fmt(r.unreal_pnl)}원</td></tr>`).join('')
+    :'<tr><td colspan="7" style="color:#8b949e;text-align:center">완료·보유 거래 없음</td></tr>');
+}
+
 function fillMock(mock, kis){
   // Kiwoom
   if(mock&&!mock.error){
     fillBal('mock-bal', mock.snapshot);
     fillOrders('mock-orders','mock-ord-cnt', mock.orders, mock.order_total);
     fillSlots('mock-slots', mock.slot_status||[]);  // 백엔드 키는 slot_status (2026-06-30 수정)
+    fillStratPerf('mock-stratperf', mock.strategy_perf);
     const pos=mock.positions||[];
     setHtml('mock-pos', pos.length?pos.map(r=>{
       const ev=(r.evlt_amt!=null&&r.evlt_amt!=='')?r.evlt_amt:(Number(r.qty)||0)*(Number(r.cur_price||r.current_price)||0);
@@ -2331,6 +2430,7 @@ function fillMock(mock, kis){
     fillStopMonitor('kis-stop-rows','kis-stop-ts', kis.stop_monitor);
     fillOrders('kis-orders','kis-ord-cnt', kis.orders, kis.order_total);
     fillSlots('kis-slots', kis.slot_status||[]);  // 백엔드 키는 slot_status (2026-06-30 수정)
+    fillStratPerf('kis-stratperf', kis.strategy_perf);
     const pos=kis.positions||[];
     setHtml('kis-pos', pos.length?pos.map(r=>{
       const ev=(r.evlt_amt!=null&&r.evlt_amt!=='')?r.evlt_amt:(Number(r.qty)||0)*(Number(r.cur_price||r.current_price)||0);
@@ -2425,6 +2525,42 @@ function fillAiPaper(ap){
     <td class="r">${r.score!=null?r.score:''}</td>
     <td class="r ${clr(r.pnl_pct)}">${pct(r.pnl_pct)}</td></tr>`).join('')
     :'<tr><td colspan="6" style="color:#8b949e;text-align:center">보유 없음</td></tr>');
+
+  // 전략별 성과(완료 거래) — 포트폴리오별
+  const bsHtml=['ai','strength'].map(k=>{
+    const p=P[k]; const bs=(p&&p.by_strategy)||[];
+    if(!bs.length) return '';
+    const label=k==='ai'?'🤖 AI':'💪 강도';
+    const tr=bs.map(s=>`<tr>
+      <td style="color:#8b949e;font-size:11px">${s.strategy||''}</td>
+      <td class="r">${s.n}</td>
+      <td class="r">${s.win_pct!=null?s.win_pct+'%':'-'}</td>
+      <td class="r ${clr(s.avg_net)}">${pct(s.avg_net)}</td>
+      <td class="r ${clr(s.pnl)}">${fmt(s.pnl)}원</td></tr>`).join('');
+    return `<div style="margin-bottom:10px"><div style="font-size:12px;margin-bottom:2px">${label}</div>
+      <table><thead><tr><th>전략</th><th class="r">완료</th><th class="r">승률</th><th class="r">평균%</th><th class="r">실현손익</th></tr></thead>
+      <tbody>${tr}</tbody></table></div>`;
+  }).join('');
+  setHtml('ap-bystrat', bsHtml||'완료 거래 없음');
+
+  // 완료 매매내역 — 포트폴리오별 드롭다운(<details>)
+  const trHtml=['ai','strength'].map(k=>{
+    const p=P[k]; const tds=(p&&p.trades)||[];
+    const label=k==='ai'?'🤖 AI':'💪 강도';
+    if(!tds.length) return `<details style="margin-bottom:6px"><summary style="cursor:pointer;color:#c9d1d9">${label} — 완료 0건</summary></details>`;
+    const body=tds.map(t=>`<tr>
+      <td>${t.code||''} ${t.name||''}</td>
+      <td style="color:#8b949e;font-size:11px">${t.strategy||''}</td>
+      <td class="r" style="font-size:11px">${t.entry_date||''}</td>
+      <td class="r" style="font-size:11px">${t.exit_date||''}</td>
+      <td class="r">${t.score!=null?t.score:''}</td>
+      <td class="r ${clr(t.net_pct)}">${pct(t.net_pct)}</td>
+      <td class="r ${clr(t.pnl)}">${fmt(t.pnl)}원</td></tr>`).join('');
+    return `<details style="margin-bottom:6px"><summary style="cursor:pointer;color:#c9d1d9">${label} — 완료 ${tds.length}건 (클릭)</summary>
+      <table style="margin-top:6px"><thead><tr><th>종목</th><th>전략</th><th class="r">진입</th><th class="r">청산</th><th class="r">점수</th><th class="r">순수익%</th><th class="r">손익</th></tr></thead>
+      <tbody>${body}</tbody></table></details>`;
+  }).join('');
+  setHtml('ap-trades', trHtml||'완료 거래 없음');
 }
 
 function renderStRows(){

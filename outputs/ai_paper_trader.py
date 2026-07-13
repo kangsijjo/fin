@@ -186,6 +186,20 @@ def simulate(sig, cal_all, cal, closes, rank_col, min_score=None):
                         "pnl_pct": pnl_pct})
     cur_eq = equity[-1]["equity"] if equity else CAPITAL0
     done = pd.DataFrame(trades)
+
+    # 전략별 집계(2026-07-13) — 완료 거래 기준 건수/승률/평균순%/실현손익합
+    by_strategy = []
+    if len(done):
+        for strat, g in done.groupby("strategy"):
+            by_strategy.append({
+                "strategy": str(strat),
+                "n": int(len(g)),
+                "win_pct": round(float((g["net_pct"] > 0).mean() * 100), 1),
+                "avg_net": round(float(g["net_pct"].mean()), 2),
+                "pnl": int(g["pnl"].sum()),
+            })
+        by_strategy.sort(key=lambda r: -r["pnl"])
+
     return {
         "equity": cur_eq,
         "ret_pct": round((cur_eq / CAPITAL0 - 1) * 100, 2),
@@ -197,6 +211,9 @@ def simulate(sig, cal_all, cal, closes, rank_col, min_score=None):
         "skipped_full": skipped_full,
         "positions": sorted(pos_out, key=lambda r: -(r["score"] if r["score"] is not None else -999)),
         "recent_trades": trades[-10:][::-1],
+        # 완료 매매내역 전체(최근순) — 대시보드 드롭다운용(2026-07-13). 표본이 작아 전량 포함.
+        "trades": trades[::-1],
+        "by_strategy": by_strategy,
         "equity_curve": equity[-60:],
     }
 
