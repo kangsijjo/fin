@@ -579,16 +579,77 @@ def _pick_strength(idx, code, strategy, ref_date):
     return picked if picked is not None else lst[-1][1]
 
 
-def _attach_strength_mock(out, account_prefix):
-    """보유 포지션·매수 주문행에 score_ic(신호강도) 부착(2026-07-13)."""
-    idx = _signal_strength_index(account_prefix)
-    if not idx:
-        return
-    for p in out.get("positions", []):
-        p["score_ic"] = _pick_strength(idx, p.get("code"), p.get("strategy"), p.get("entry_date"))
-    for o in out.get("orders", []):
-        if str(o.get("side", "")).lower() == "buy":
-            o["score_ic"] = _pick_strength(idx, o.get("code"), o.get("strategy"), o.get("date"))
+def _round_trip_trades(combined, strength_idx):
+    """주문로그를 라운드트립(매수→매도)으로 묶어 한 종목 진입·청산을 한 줄로(2026-07-13).
+
+    FIFO 로 매수 로트와 매도를 매칭(_attach_realized_pnl 과 동일 규약). 매도가는 이미
+    보정된 값(combined 은 _attach_realized_pnl 적용본). 미청산 매수는 매도열 공란(보유중).
+    tp_sell(익절 '발주')은 제외 — 실제 체결은 별도 'sell' 합성행으로 들어옴.
+    반환: 최신순 dict 리스트(code,name,strategy,score_ic,buy_date,buy_time,buy_price,
+          sell_date,sell_time,sell_price,qty,pnl,pnl_pct,reason,open)."""
+    from collections import deque
+    out = []
+    try:
+        df = combined.copy()
+        df["_d"] = df.get("date", "").astype(str)
+        df["_t"] = df.get("time", "").astype(str)
+        df = df.sort_values(["_d", "_t"])
+        lots = {}   # code -> deque of buy lot dicts
+        for _, r in df.iterrows():
+            ok = str(r.get("ok", "")).strip().lower() not in ("false", "0", "")
+            if not ok:
+                continue
+            side = str(r.get("side", "")).lower()
+            code = str(r.get("code", "")).zfill(6)
+            try:
+                qty = int(float(r.get("qty", 0) or 0)); price = float(r.get("price", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if side == "buy":
+                if qty <= 0:
+                    continue
+                sc = _pick_strength(strength_idx, code, r.get("strategy", ""), r.get("date", "")) \
+                    if strength_idx else None
+                lots.setdefault(code, deque()).append({
+                    "code": code, "name": str(r.get("name", "") or ""),
+                    "strategy": str(r.get("strategy", "") or ""), "score_ic": sc,
+                    "buy_date": str(r.get("date", "")), "buy_time": str(r.get("time", "")),
+                    "buy_price": int(round(price)), "qty": qty})
+            elif side == "sell":   # tp_sell(발주)은 제외
+                rem = qty
+                q = lots.get(code)
+                while rem > 0 and q:
+                    lot = q[0]
+                    take = min(rem, lot["qty"])
+                    bp, sp = lot["buy_price"], int(round(price))
+                    out.append({
+                        "code": code, "name": lot["name"], "strategy": lot["strategy"],
+                        "score_ic": lot["score_ic"],
+                        "buy_date": lot["buy_date"], "buy_time": lot["buy_time"], "buy_price": bp,
+                        "sell_date": str(r.get("date", "")), "sell_time": str(r.get("time", "")),
+                        "sell_price": sp, "qty": take,
+                        "pnl": int(round((sp - bp) * take)) if (bp > 0 and sp > 0) else "",
+                        "pnl_pct": round((sp / bp - 1) * 100, 2) if bp > 0 else "",
+                        "reason": str(r.get("reason", "") or r.get("msg", "") or ""),
+                        "open": False})
+                    lot["qty"] -= take; rem -= take
+                    if lot["qty"] <= 0:
+                        q.popleft()
+        # 남은 매수 로트 = 보유중(매도열 공란)
+        for code, q in lots.items():
+            for lot in q:
+                out.append({
+                    "code": code, "name": lot["name"], "strategy": lot["strategy"],
+                    "score_ic": lot["score_ic"],
+                    "buy_date": lot["buy_date"], "buy_time": lot["buy_time"], "buy_price": lot["buy_price"],
+                    "sell_date": "", "sell_time": "", "sell_price": "", "qty": lot["qty"],
+                    "pnl": "", "pnl_pct": "", "reason": "보유중", "open": True})
+    except Exception:
+        return out
+    # 최신순: 청산건은 매도일, 보유건은 매수일 기준
+    out.sort(key=lambda t: (t["sell_date"] or t["buy_date"], t["sell_time"] or t["buy_time"]),
+             reverse=True)
+    return out
 
 
 def _strategy_perf(combined, positions):
@@ -713,7 +774,11 @@ def get_kiwoom_mock(date_from="", date_to=""):
             except Exception:
                 pass
             out["strategy_perf"] = _strategy_perf(combined, out["positions"])   # 전략별 실현+미실현
-    _attach_strength_mock(out, "kiwoom")   # 보유·매수행에 신호강도(score_ic) 부착
+            _sidx = _signal_strength_index("kiwoom")
+            out["trades"] = _round_trip_trades(combined, _sidx)   # 라운드트립 매매내역(한 줄)
+            out["trade_total"] = len(out["trades"])
+            for p in out["positions"]:   # 보유 포지션 강도 부착
+                p["score_ic"] = _pick_strength(_sidx, p.get("code"), p.get("strategy"), p.get("entry_date"))
     out["slot_status"] = _kiwoom_slot_status()   # 키움 모의투자 슬롯(진입/청산 조건 포함)
     return out
 
@@ -858,7 +923,11 @@ def get_kis_mock(date_from="", date_to=""):
             out["order_total"] = int(len(combined))
             out["orders"] = combined.tail(500).to_dict("records")
             out["strategy_perf"] = _strategy_perf(combined, out.get("positions", []))   # 전략별 실현+미실현
-    _attach_strength_mock(out, "kis")   # 보유·매수행에 신호강도(score_ic) 부착
+            _sidx = _signal_strength_index("kis")
+            out["trades"] = _round_trip_trades(combined, _sidx)   # 라운드트립 매매내역(한 줄)
+            out["trade_total"] = len(out["trades"])
+            for p in out.get("positions", []):   # 보유 포지션 강도 부착
+                p["score_ic"] = _pick_strength(_sidx, p.get("code"), p.get("strategy"), p.get("entry_date"))
     # 슬롯 현황 + 신호 수
     out["slot_status"] = _kis_slot_status()
     if KIS_SIGNALS_CSV.exists():
@@ -2000,10 +2069,10 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
   <div class="section">
     <h2>키움 매매내역 <span id="mock-ord-cnt" style="color:#8b949e;font-size:11px;font-weight:400"></span></h2>
     <table><thead><tr>
-      <th class="r">시각</th><th>구분</th><th>종목</th><th>전략</th><th class="r">강도</th>
-      <th class="r">수량</th><th class="r">가격</th><th class="r">손익(원)</th><th class="r">손익률</th><th>사유</th>
+      <th>종목</th><th class="r">매수시간</th><th class="r">매도시각</th><th>전략</th><th class="r">강도</th>
+      <th class="r">수량</th><th class="r">매수가격</th><th class="r">매도가격</th><th class="r">손익(원)</th><th class="r">손익률</th><th>사유</th>
     </tr></thead>
-    <tbody id="mock-orders"><tr><td colspan="9" style="color:#8b949e;text-align:center">매매내역 없음</td></tr></tbody>
+    <tbody id="mock-orders"><tr><td colspan="11" style="color:#8b949e;text-align:center">매매내역 없음</td></tr></tbody>
     </table>
   </div>
   <div class="section">
@@ -2043,10 +2112,10 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
   <div class="section">
     <h2>KIS 매매내역 <span id="kis-ord-cnt" style="color:#8b949e;font-size:11px;font-weight:400"></span></h2>
     <table><thead><tr>
-      <th class="r">시각</th><th>구분</th><th>종목</th><th>전략</th><th class="r">강도</th>
-      <th class="r">수량</th><th class="r">가격</th><th class="r">손익(원)</th><th class="r">손익률</th><th>사유</th>
+      <th>종목</th><th class="r">매수시간</th><th class="r">매도시각</th><th>전략</th><th class="r">강도</th>
+      <th class="r">수량</th><th class="r">매수가격</th><th class="r">매도가격</th><th class="r">손익(원)</th><th class="r">손익률</th><th>사유</th>
     </tr></thead>
-    <tbody id="kis-orders"><tr><td colspan="9" style="color:#8b949e;text-align:center">매매내역 없음</td></tr></tbody>
+    <tbody id="kis-orders"><tr><td colspan="11" style="color:#8b949e;text-align:center">매매내역 없음</td></tr></tbody>
     </table>
   </div>
   <div class="section">
@@ -2401,32 +2470,34 @@ function fillBal(elId, snap){
   h+=`<div class="stat"><div class="v" style="font-size:14px">${snap.date||''} ${snap.time||''}</div><div class="l">스냅샷 기준</div></div>`;
   el.innerHTML=h;
 }
-function fillOrders(elId, cntId, orders, total){
+function fillOrders(elId, cntId, trades, total){
+  // 라운드트립 매매내역 — 한 종목 진입(매수)·청산(매도)을 한 줄로(2026-07-13).
   const tb=document.getElementById(elId); if(!tb) return;
-  const rows=(orders||[]).slice(-50).reverse();   // 최신 50건만(최신순)
+  const rows=(trades||[]).slice(0,80);   // 최신순(백엔드 정렬), 최근 80건
   const cnt=document.getElementById(cntId);
   if(cnt) cnt.textContent = total ? `(전체 ${fmt(total)}건 중 최근 ${rows.length})` : '';
-  tb.innerHTML = rows.length ? rows.map(o=>{
-    const sell=String(o.side||'').toLowerCase().includes('sell');   // 'sell' + 'tp_sell'(익절 지정가)
-    const tp=String(o.side||'').toLowerCase()==='tp_sell';
-    const d=String(o.date||'');
-    const dstr=d.length>=8 ? d.slice(4,6)+'/'+d.slice(6,8)+' ' : '';
-    const fail=(o.ok===false || o.ok==='False');
-    const hasPnl = sell && !fail && o.pnl!=='' && o.pnl!=null;
-    const pnlAmt = hasPnl ? `<span class="${clr(o.pnl)}">${fmt(o.pnl)}원</span>` : '';
-    const pnlPct = hasPnl ? `<span class="${clr(o.pnl_pct)}">${pct(o.pnl_pct)}</span>` : '';
-    return `<tr>
-      <td class="r" style="font-size:11px">${dstr}${o.time||''}</td>
-      <td class="${sell?'neg':'pos'}">${tp?'익절주문':(sell?'매도':'매수')}</td>
-      <td>${o.name||''} <span style="color:#8b949e;font-size:11px">${o.code||''}</span></td>
-      <td style="color:#8b949e;font-size:11px">${o.strategy||''}</td>
-      <td class="r">${o.score_ic!=null?(o.score_ic>=6?'<b style="color:#3fb950">'+o.score_ic+'</b>':o.score_ic):''}</td>
-      <td class="r">${fmt(o.qty)}</td>
-      <td class="r">${fmt(o.price)}</td>
+  const dm=d=>{const s=String(d||'');return s.length>=8?s.slice(4,6)+'/'+s.slice(6,8):'';};
+  tb.innerHTML = rows.length ? rows.map(t=>{
+    const bt=(dm(t.buy_date)+' '+(t.buy_time||'').slice(0,5)).trim();
+    const st=t.open?'<span style="color:#8b949e">보유중</span>'
+                   :(dm(t.sell_date)+' '+(t.sell_time||'').slice(0,5)).trim();
+    const hasPnl = !t.open && t.pnl!=='' && t.pnl!=null;
+    const pnlAmt = hasPnl ? `<span class="${clr(t.pnl)}">${fmt(t.pnl)}원</span>` : '';
+    const pnlPct = hasPnl ? `<span class="${clr(t.pnl_pct)}">${pct(t.pnl_pct)}</span>` : '';
+    const sc=t.score_ic;
+    return `<tr${t.open?' style="background:rgba(88,166,255,0.06)"':''}>
+      <td>${t.name||''} <span style="color:#8b949e;font-size:11px">${t.code||''}</span></td>
+      <td class="r" style="font-size:11px">${bt}</td>
+      <td class="r" style="font-size:11px">${st}</td>
+      <td style="color:#8b949e;font-size:11px">${t.strategy||''}</td>
+      <td class="r">${sc!=null?(sc>=6?'<b style="color:#3fb950">'+sc+'</b>':sc):''}</td>
+      <td class="r">${fmt(t.qty)}</td>
+      <td class="r">${fmt(t.buy_price)}</td>
+      <td class="r">${t.open?'':fmt(t.sell_price)}</td>
       <td class="r">${pnlAmt}</td>
       <td class="r">${pnlPct}</td>
-      <td style="font-size:11px;color:#8b949e">${o.reason||''}${fail?' ✕실패':''}</td></tr>`;
-  }).join('') : '<tr><td colspan="10" style="color:#8b949e;text-align:center">매매내역 없음</td></tr>';
+      <td style="font-size:11px;color:#8b949e">${t.reason||''}</td></tr>`;
+  }).join('') : '<tr><td colspan="11" style="color:#8b949e;text-align:center">매매내역 없음</td></tr>';
 }
 
 function fillStopMonitor(elId, tsId, mon){
@@ -2470,7 +2541,7 @@ function fillMock(mock, kis){
   // Kiwoom
   if(mock&&!mock.error){
     fillBal('mock-bal', mock.snapshot);
-    fillOrders('mock-orders','mock-ord-cnt', mock.orders, mock.order_total);
+    fillOrders('mock-orders','mock-ord-cnt', mock.trades, mock.trade_total);  // 라운드트립
     fillSlots('mock-slots', mock.slot_status||[]);  // 백엔드 키는 slot_status (2026-06-30 수정)
     fillStratPerf('mock-stratperf', mock.strategy_perf);
     const pos=mock.positions||[];
@@ -2490,7 +2561,7 @@ function fillMock(mock, kis){
   if(kis&&!kis.error){
     fillBal('kis-bal', kis.snapshot);
     fillStopMonitor('kis-stop-rows','kis-stop-ts', kis.stop_monitor);
-    fillOrders('kis-orders','kis-ord-cnt', kis.orders, kis.order_total);
+    fillOrders('kis-orders','kis-ord-cnt', kis.trades, kis.trade_total);  // 라운드트립
     fillSlots('kis-slots', kis.slot_status||[]);  // 백엔드 키는 slot_status (2026-06-30 수정)
     fillStratPerf('kis-stratperf', kis.strategy_perf);
     const pos=kis.positions||[];
