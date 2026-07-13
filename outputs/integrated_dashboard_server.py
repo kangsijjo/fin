@@ -533,6 +533,64 @@ def _attach_realized_pnl(combined, sell_px_mode="close"):
         return combined
 
 
+def _signal_strength_index(account_prefix):
+    """signal_strength_log.csv → {(code, strategy): [(signal_date, score_ic)] 정렬}.
+
+    account_prefix: 'kiwoom' | 'kis' (강도로그 account 열이 'kiwoom_안C'/'KIS_안D')."""
+    idx = {}
+    path = BASE / "db" / "signal_strength_log.csv"
+    if not path.exists():
+        return idx
+    try:
+        df = pd.read_csv(path, dtype={"code": str}, encoding="utf-8-sig")
+        if "account" in df.columns:
+            df = df[df["account"].astype(str).str.lower().str.startswith(account_prefix)]
+        df["code"] = df["code"].astype(str).str.zfill(6)
+        df["signal_date"] = df["signal_date"].astype(str).str.replace("-", "", regex=False)
+        df["score_ic"] = pd.to_numeric(df["score_ic"], errors="coerce")
+        for _, r in df.iterrows():
+            if pd.isna(r["score_ic"]):
+                continue
+            idx.setdefault((r["code"], str(r.get("strategy", ""))), []) \
+               .append((r["signal_date"], round(float(r["score_ic"]), 2)))
+        for k in idx:
+            idx[k].sort()
+    except Exception:
+        pass
+    return idx
+
+
+def _pick_strength(idx, code, strategy, ref_date):
+    """(code, strategy)의 신호 중 ref_date(진입/주문일) 이전 최신 강도. 없으면 코드 전체 폴백."""
+    code = str(code or "").zfill(6)
+    lst = idx.get((code, str(strategy or "")))
+    if not lst:   # 전략 불일치 시 같은 코드의 아무 전략이나(재신호 등)
+        cand = [v for (c, _s), vs in idx.items() if c == code for v in vs]
+        lst = sorted(cand) if cand else None
+    if not lst:
+        return None
+    ref = str(ref_date or "").replace("-", "")[:8]
+    picked = None
+    for sd, sc in lst:
+        if not ref or sd <= ref:
+            picked = sc
+        else:
+            break
+    return picked if picked is not None else lst[-1][1]
+
+
+def _attach_strength_mock(out, account_prefix):
+    """보유 포지션·매수 주문행에 score_ic(신호강도) 부착(2026-07-13)."""
+    idx = _signal_strength_index(account_prefix)
+    if not idx:
+        return
+    for p in out.get("positions", []):
+        p["score_ic"] = _pick_strength(idx, p.get("code"), p.get("strategy"), p.get("entry_date"))
+    for o in out.get("orders", []):
+        if str(o.get("side", "")).lower() == "buy":
+            o["score_ic"] = _pick_strength(idx, o.get("code"), o.get("strategy"), o.get("date"))
+
+
 def _strategy_perf(combined, positions):
     """전략별 성과(2026-07-13) — 실현(청산 매도행 pnl) + 미실현(현 보유 pnl) 분리 집계.
 
@@ -655,6 +713,7 @@ def get_kiwoom_mock(date_from="", date_to=""):
             except Exception:
                 pass
             out["strategy_perf"] = _strategy_perf(combined, out["positions"])   # 전략별 실현+미실현
+    _attach_strength_mock(out, "kiwoom")   # 보유·매수행에 신호강도(score_ic) 부착
     out["slot_status"] = _kiwoom_slot_status()   # 키움 모의투자 슬롯(진입/청산 조건 포함)
     return out
 
@@ -799,6 +858,7 @@ def get_kis_mock(date_from="", date_to=""):
             out["order_total"] = int(len(combined))
             out["orders"] = combined.tail(500).to_dict("records")
             out["strategy_perf"] = _strategy_perf(combined, out.get("positions", []))   # 전략별 실현+미실현
+    _attach_strength_mock(out, "kis")   # 보유·매수행에 신호강도(score_ic) 부착
     # 슬롯 현황 + 신호 수
     out["slot_status"] = _kis_slot_status()
     if KIS_SIGNALS_CSV.exists():
@@ -1931,16 +1991,16 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
   <div class="section">
     <h2>&#xD0A4;&#xC6C0; &#xBCF4;&#xC720; &#xD3EC;&#xC9C0;&#xC158;</h2>
     <table><thead><tr>
-      <th>&#xC885;&#xBAA9;</th><th>&#xC804;&#xB7B5;</th><th class="r">&#xC218;&#xB7C9;</th>
+      <th>&#xC885;&#xBAA9;</th><th>&#xC804;&#xB7B5;</th><th class="r">강도</th><th class="r">&#xC218;&#xB7C9;</th>
       <th class="r">&#xD3C9;&#xADE0;&#xB2E8;&#xAC00;</th><th class="r">&#xD604;&#xC7AC;&#xAC00;</th><th class="r">&#xD3C9;&#xAC00;&#xAE08;&#xC561;</th><th class="r">&#xC190;&#xC775;(&#xC6D0;)</th><th class="r">&#xC190;&#xC775;&#xB960;</th><th class="r">&#xC9C4;&#xC785;&#xC77C;</th>
     </tr></thead>
-    <tbody id="mock-pos"><tr><td colspan="9" style="color:#8b949e;text-align:center">&#xBCF4;&#xC720; &#xD3EC;&#xC9C0;&#xC158; &#xC5C6;&#xC74C;</td></tr></tbody>
+    <tbody id="mock-pos"><tr><td colspan="10" style="color:#8b949e;text-align:center">&#xBCF4;&#xC720; &#xD3EC;&#xC9C0;&#xC158; &#xC5C6;&#xC74C;</td></tr></tbody>
     </table>
   </div>
   <div class="section">
     <h2>키움 매매내역 <span id="mock-ord-cnt" style="color:#8b949e;font-size:11px;font-weight:400"></span></h2>
     <table><thead><tr>
-      <th class="r">시각</th><th>구분</th><th>종목</th><th>전략</th>
+      <th class="r">시각</th><th>구분</th><th>종목</th><th>전략</th><th class="r">강도</th>
       <th class="r">수량</th><th class="r">가격</th><th class="r">손익(원)</th><th class="r">손익률</th><th>사유</th>
     </tr></thead>
     <tbody id="mock-orders"><tr><td colspan="9" style="color:#8b949e;text-align:center">매매내역 없음</td></tr></tbody>
@@ -1974,16 +2034,16 @@ pre.logbox{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding
   <div class="section">
     <h2>KIS &#xBCF4;&#xC720; &#xD3EC;&#xC9C0;&#xC158;</h2>
     <table><thead><tr>
-      <th>&#xC885;&#xBAA9;</th><th>&#xC804;&#xB7B5;</th><th class="r">&#xC218;&#xB7C9;</th>
+      <th>&#xC885;&#xBAA9;</th><th>&#xC804;&#xB7B5;</th><th class="r">강도</th><th class="r">&#xC218;&#xB7C9;</th>
       <th class="r">&#xD3C9;&#xADE0;&#xB2E8;&#xAC00;</th><th class="r">&#xD604;&#xC7AC;&#xAC00;</th><th class="r">&#xD3C9;&#xAC00;&#xAE08;&#xC561;</th><th class="r">&#xC190;&#xC775;(&#xC6D0;)</th><th class="r">&#xC190;&#xC775;&#xB960;</th><th class="r">&#xC9C4;&#xC785;&#xC77C;</th>
     </tr></thead>
-    <tbody id="kis-pos"><tr><td colspan="9" style="color:#8b949e;text-align:center">&#xBCF4;&#xC720; &#xD3EC;&#xC9C0;&#xC158; &#xC5C6;&#xC74C;</td></tr></tbody>
+    <tbody id="kis-pos"><tr><td colspan="10" style="color:#8b949e;text-align:center">&#xBCF4;&#xC720; &#xD3EC;&#xC9C0;&#xC158; &#xC5C6;&#xC74C;</td></tr></tbody>
     </table>
   </div>
   <div class="section">
     <h2>KIS 매매내역 <span id="kis-ord-cnt" style="color:#8b949e;font-size:11px;font-weight:400"></span></h2>
     <table><thead><tr>
-      <th class="r">시각</th><th>구분</th><th>종목</th><th>전략</th>
+      <th class="r">시각</th><th>구분</th><th>종목</th><th>전략</th><th class="r">강도</th>
       <th class="r">수량</th><th class="r">가격</th><th class="r">손익(원)</th><th class="r">손익률</th><th>사유</th>
     </tr></thead>
     <tbody id="kis-orders"><tr><td colspan="9" style="color:#8b949e;text-align:center">매매내역 없음</td></tr></tbody>
@@ -2360,12 +2420,13 @@ function fillOrders(elId, cntId, orders, total){
       <td class="${sell?'neg':'pos'}">${tp?'익절주문':(sell?'매도':'매수')}</td>
       <td>${o.name||''} <span style="color:#8b949e;font-size:11px">${o.code||''}</span></td>
       <td style="color:#8b949e;font-size:11px">${o.strategy||''}</td>
+      <td class="r">${o.score_ic!=null?(o.score_ic>=6?'<b style="color:#3fb950">'+o.score_ic+'</b>':o.score_ic):''}</td>
       <td class="r">${fmt(o.qty)}</td>
       <td class="r">${fmt(o.price)}</td>
       <td class="r">${pnlAmt}</td>
       <td class="r">${pnlPct}</td>
       <td style="font-size:11px;color:#8b949e">${o.reason||''}${fail?' ✕실패':''}</td></tr>`;
-  }).join('') : '<tr><td colspan="9" style="color:#8b949e;text-align:center">매매내역 없음</td></tr>';
+  }).join('') : '<tr><td colspan="10" style="color:#8b949e;text-align:center">매매내역 없음</td></tr>';
 }
 
 function fillStopMonitor(elId, tsId, mon){
@@ -2416,6 +2477,7 @@ function fillMock(mock, kis){
     setHtml('mock-pos', pos.length?pos.map(r=>{
       const ev=(r.evlt_amt!=null&&r.evlt_amt!=='')?r.evlt_amt:(Number(r.qty)||0)*(Number(r.cur_price||r.current_price)||0);
       return `<tr><td>${r.code||''} ${r.name||''}</td><td style="color:#8b949e;font-size:11px">${r.strategy||''}</td>
+       <td class="r">${r.score_ic!=null?(r.score_ic>=6?'<b style="color:#3fb950">'+r.score_ic+'</b>':r.score_ic):'-'}</td>
        <td class="r">${fmt(r.qty)}</td><td class="r">${fmt(r.avg_price)}</td>
        <td class="r">${fmt(r.cur_price||r.current_price)}</td>
        <td class="r">${fmt(ev)}원</td>
@@ -2435,6 +2497,7 @@ function fillMock(mock, kis){
     setHtml('kis-pos', pos.length?pos.map(r=>{
       const ev=(r.evlt_amt!=null&&r.evlt_amt!=='')?r.evlt_amt:(Number(r.qty)||0)*(Number(r.cur_price||r.current_price)||0);
       return `<tr><td>${r.code||''} ${r.name||''}</td><td style="color:#8b949e;font-size:11px">${r.strategy||''}</td>
+       <td class="r">${r.score_ic!=null?(r.score_ic>=6?'<b style="color:#3fb950">'+r.score_ic+'</b>':r.score_ic):'-'}</td>
        <td class="r">${fmt(r.qty)}</td><td class="r">${fmt(r.avg_price)}</td>
        <td class="r">${fmt(r.cur_price||r.current_price)}</td>
        <td class="r">${fmt(ev)}원</td>
