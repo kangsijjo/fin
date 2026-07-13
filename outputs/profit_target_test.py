@@ -151,7 +151,10 @@ def apply_exit_rules(trades, target_pct=TARGET_PCT, stop_pct=STOP_PCT):
             "exit_price":   new_xp,
             "gross_pct":    round(gross, 3),
             "net_pct":      round(gross - COSTS["total_pct"], 3),
-            "holding_days": date_idx_map.get(new_xd, ei) - ei,
+            # +1: 진입일 포함 카운트(베이스 StrategyTrade.holding_days 와 정합).
+            # [2026-07-12] 종전 (idx-ei) 는 N-1 로 베이스보다 항상 1일 짧게 나와
+            # '익절이 보유기간을 줄인 것'처럼 오독됐음(profit_sweep 은 +1 로 일관).
+            "holding_days": date_idx_map.get(new_xd, ei) - ei + 1,
             "hit_target":   hit_tgt,
             "hit_stop":     hit_stp,
         })
@@ -208,12 +211,49 @@ os.makedirs("results", exist_ok=True)
 _range_tag = f"{START_DATE or 'all'}_{END_DATE or 'all'}"
 CACHE_FILE = Path(f"results/_base_trades_cache_{_range_tag}.pkl")
 
+
+def _cache_signature():
+    """데이터 파일 상태 + 전략 목록 시그니처 — 변경 시 캐시 자동 무효화(2026-07-12).
+
+    [배경] 종전 캐시는 날짜범위 태그로만 키잉돼, 데이터가 매일 자라거나(신규 트레이드
+    누락) ALL_STRATEGIES 에 전략을 추가해도 --no-cache 없이는 영영 옛 결과를 재사용했다.
+    게다가 오버레이는 매 실행 최신 데이터로 빌드돼 'Δavg = 옛 베이스 vs 새 가격' 혼합
+    비교가 됐다. daily_loader 방식(파일 수+총 크기)에 전략 지문을 더한다."""
+    import glob as _g
+    files = sorted(_g.glob("./macro_data/daily/*.csv"))
+    total = 0
+    for f in files:
+        try:
+            total += os.path.getsize(f)
+        except OSError:
+            pass
+    strat_sig = "|".join(sorted(s.name for s in ALL_STRATEGIES))
+    return {"n_files": len(files), "total_size": total,
+            "strategies": strat_sig, "cost": COSTS.get("total_pct"),
+            "range": _range_tag}
+
+
+_sig_now = _cache_signature()
+base_cache = None
+
 if not args.no_cache and CACHE_FILE.exists():
-    print(f"\n▶ 기존 백테스트 캐시 로드: {CACHE_FILE.name}")
-    with open(CACHE_FILE, "rb") as f:
-        base_cache = pickle.load(f)   # {name: {"trades": [...], "sb": {...}}}
-    print(f"  {len(base_cache)}개 전략 캐시 완료 (--no-cache 로 재실행 가능)")
-else:
+    try:
+        with open(CACHE_FILE, "rb") as f:
+            _cached_blob = pickle.load(f)
+    except Exception:
+        _cached_blob = None
+    # 신형 캐시(dict with __sig__) 만 신뢰 — 시그니처 일치 시에만 사용
+    if isinstance(_cached_blob, dict) and _cached_blob.get("__sig__") == _sig_now:
+        base_cache = _cached_blob["data"]
+        print(f"\n▶ 기존 백테스트 캐시 로드: {CACHE_FILE.name}")
+        print(f"  {len(base_cache)}개 전략 캐시 (시그니처 일치, --no-cache 로 강제 재실행)")
+    else:
+        _has_sig = isinstance(_cached_blob, dict) and "__sig__" in _cached_blob
+        why = "데이터/전략 변경 감지" if _has_sig else "구형 캐시(시그니처 없음)"
+        print(f"\n▶ 캐시 무효({why}) — 재실행")
+        CACHE_FILE.unlink(missing_ok=True)
+
+if base_cache is None:
     print(f"\n▶ {len(ALL_STRATEGIES)}개 전략 백테스트 실행 중...\n")
     base_cache = {}
     for strat in ALL_STRATEGIES:
@@ -231,7 +271,7 @@ else:
         base_cache[name] = {"trades": trades, "sb": sb}
         print(f"{sb['n']:,} 거래  avg {sb['avg']:+.2f}%")
     with open(CACHE_FILE, "wb") as f:
-        pickle.dump(base_cache, f)
+        pickle.dump({"__sig__": _sig_now, "data": base_cache}, f)   # 시그니처 포함 저장
     print(f"\n  ✓ 캐시 저장: {CACHE_FILE.name}")
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -286,6 +326,16 @@ _ov_label = MODE_LABEL[:12]
 for r in results:
     name = r["name"]
     sb, sp, delta = r["sb"], r["sp"], r["delta"]
+
+    # 오버레이 0건(sp=None) 가드(2026-07-12) — 섹션4/6엔 있었으나 여기(섹션5 비교표)엔
+    # 없어, 캐시된 트레이드의 entry_date 가 현재 데이터에 없으면 sp['n']/sp.get 에서
+    # 크래시해 비교표·요약·CSV 가 통째로 미출력되던 것.
+    if not sp:
+        print(f"  {name:<22}  {'[기존]':<12}"
+              f"  {str(sb['n']):>5}  {str(sb['win%']):>6}  {sb['avg']:>+7.2f}")
+        print(f"  {'':22}  {f'[{_ov_label}]':<12}  (오버레이 0건 — 조건 매칭 트레이드 없음)")
+        print("─" * W)
+        continue
 
     def _fmt(s, extra_cols):
         base = (f"  {str(s['n']):>5}  {str(s['win%']):>6}  "
@@ -349,6 +399,8 @@ out_path  = args.out or f"results/exit_compare_{_start_tag}_{_end_tag}_{_opt_tag
 rows_csv = []
 for r in results:
     for mode, s in [("기존", r["sb"]), (MODE_LABEL[:20], r["sp"])]:
+        if not s:   # 오버레이 0건 — CSV 크래시 방지(2026-07-12)
+            continue
         rows_csv.append({
             "strategy":        r["name"],
             "mode":            mode,

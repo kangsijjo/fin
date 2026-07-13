@@ -28,6 +28,29 @@ from simulator import Simulator
 from data_collector import _is_excluded
 import analyzer
 
+_MARKET_MAP_CACHE = None
+
+
+def _load_market_map():
+    """name_cache.csv(code,name,market) → {code: 'KOSPI'|'KOSDAQ'}. 거래세 분기용.
+    파일 없으면 빈 dict(호출측이 KOSDAQ 폴백). 1회 로드 후 캐시."""
+    global _MARKET_MAP_CACHE
+    if _MARKET_MAP_CACHE is not None:
+        return _MARKET_MAP_CACHE
+    m = {}
+    try:
+        import pandas as pd
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "name_cache.csv")
+        if os.path.exists(p):
+            d = pd.read_csv(p, dtype={"code": str}, encoding="utf-8-sig")
+            if "market" in d.columns:
+                m = {str(c).zfill(6): str(mk).upper()
+                     for c, mk in zip(d["code"], d["market"]) if mk}
+    except Exception:
+        pass
+    _MARKET_MAP_CACHE = m
+    return m
+
 
 MODES = ["A", "B", "AB"]
 
@@ -44,6 +67,7 @@ def run_one_date(date_str, mode):
     """
     bars_by_code = data_loader.load_all_for_date(date_str)
     name_map = data_loader.get_stock_name_map(date_str)
+    market_map = _load_market_map()   # code → 'KOSPI'|'KOSDAQ' (거래세 분기용, 2026-07-12)
     info = {
         'filter_applied': bool(config.ENABLE_FOREIGN_FILTER),
         'd1_date': None,
@@ -94,7 +118,9 @@ def run_one_date(date_str, mode):
             mode=mode,
             stock_code=code,
             stock_name=name_map.get(code, code),
-            market="KOSDAQ",
+            # [2026-07-12] 종전 전종목 "KOSDAQ" 하드코딩 → KOSPI 종목에 거래세 0.20%
+            # (KOSDAQ) 오적용(0.02%p 과대). name_cache 의 market 으로 분기. 미상은 KOSDAQ 보수적.
+            market=market_map.get(str(code).zfill(6), "KOSDAQ"),
         )
         trades.extend(sim.simulate(annotated))
     return trades, info
