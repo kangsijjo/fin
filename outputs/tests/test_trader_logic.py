@@ -399,6 +399,41 @@ def test_append_signals_zero_byte_recreates_header(tmp_path, monkeypatch):
     assert "signal_date" in df.columns and len(df) == 1
 
 
+def test_order_with_retry_429(monkeypatch):
+    """초당 주문한도(HTTP 429) 재시도 — 07-13 서킷브레이커 3연발 중 2건 유실 실사례.
+    429 는 재시도(미접수 거부라 중복 없음), 그 외 예외는 즉시 전파(중복주문 위험)."""
+    import pytest as _pt
+    import kiwoom_trader as kt
+    monkeypatch.setattr(kt.time, "sleep", lambda s: None)   # 대기 생략
+
+    calls = {"n": 0}
+    def flaky():   # 2번 429 후 성공
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise RuntimeError("API Error (HTTP 429): Unknown error")
+        return {"return_code": 0, "ord_no": "OK1"}
+    r = kt._order_with_retry(flaky, "매도", retries=2)
+    assert r["ord_no"] == "OK1" and calls["n"] == 3
+
+    def always_429():
+        raise RuntimeError("API Error (HTTP 429)")
+    with _pt.raises(RuntimeError, match="429"):
+        kt._order_with_retry(always_429, "매도", retries=2)   # 소진 후 전파
+
+    calls2 = {"n": 0}
+    def other_err():
+        calls2["n"] += 1
+        raise RuntimeError("증거금 부족")
+    with _pt.raises(RuntimeError, match="증거금"):
+        kt._order_with_retry(other_err, "매수", retries=2)
+    assert calls2["n"] == 1   # 429 아님 → 재시도 없이 즉시 전파(중복주문 방지)
+
+    def rejected():   # HTTP 200 + return_code!=0 은 _assert_order_ok 가 승격
+        return {"return_code": 8005, "return_msg": "주문거부"}
+    with _pt.raises(RuntimeError, match="8005"):
+        kt._order_with_retry(rejected, "매수", retries=2)
+
+
 def test_assert_order_ok_promotes_rejection():
     """키움 동기 응답의 주문 거부(HTTP 200 + return_code!=0)를 예외로 승격 —
     거부가 ok=True 로 기록되던 critical 수정(2026-07-11)."""

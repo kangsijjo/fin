@@ -230,6 +230,26 @@ def _assert_order_ok(r, what):
     return r
 
 
+def _order_with_retry(fn, what, retries=2, wait=1.5):
+    """주문 호출 래퍼 — 초당 주문한도(HTTP 429) 거부 시 대기 후 재시도(2026-07-14).
+
+    실사례: 07-13 15:21 서킷브레이커 3건 연속 발사 중 1건만 성공, 2건이 HTTP 429 로
+    거부돼 재해성 손실 종목(-49%)의 청산이 하루 밀림. 429 는 '주문 미접수' 거부라
+    재시도해도 중복 체결 위험이 없다(그 외 예외는 재시도 금지 — 중복 주문 위험)."""
+    last = None
+    for i in range(retries + 1):
+        try:
+            return _assert_order_ok(fn(), what)
+        except Exception as e:
+            last = e
+            if "429" in str(e) and i < retries:
+                print(f"    [재시도] {what} 초당한도(429) — {wait * (i + 1):.1f}초 대기 후 {i + 2}/{retries + 1}")
+                time.sleep(wait * (i + 1))
+                continue
+            raise
+    raise last
+
+
 def _norm_stk_code(v):
     """키움 잔고 종목코드 정규화 — 접두어 'A'(A005930) 만 제거.
 
@@ -686,7 +706,7 @@ def cmd_buy():
                 continue
 
             try:
-                r = _assert_order_ok(api.order.stock_buy_order_request_kt10000(
+                r = _order_with_retry(lambda: api.order.stock_buy_order_request_kt10000(
                     dmst_stex_tp="KRX", stk_cd=code, ord_qty=str(qty),
                     trde_tp=ORDER_TYPE_BUY,
                     ord_uv="",
@@ -724,6 +744,7 @@ def cmd_buy():
                     "order_type": ORDER_TYPE_BUY, "ok": False, "order_no": "",
                     "msg": str(e)[:200],
                 })
+            time.sleep(0.5)   # 주문 간 간격 — 연속 발사 429 예방(2026-07-14)
 
     print(f"\n[buy] 주문 {n_placed}건 완료")
 
@@ -1103,7 +1124,7 @@ def cmd_place_targets(api=None, pos=None):
             print(f"  [skip] {code} {name} — 목표 {tgt_px:,} > 오늘 상한가(≈{int(pc * 1.3):,})")
             continue
         try:
-            r = _assert_order_ok(api.order.stock_sell_order_request_kt10001(
+            r = _order_with_retry(lambda: api.order.stock_sell_order_request_kt10001(
                 dmst_stex_tp="KRX", stk_cd=code, ord_qty=str(qty),
                 trde_tp=ORDER_TYPE_LIMIT, ord_uv=str(tgt_px)), "익절지정가")
             ono = _pick(r, "ord_no", "odno", default="")
@@ -1119,6 +1140,7 @@ def cmd_place_targets(api=None, pos=None):
                        "code": code, "name": name, "strategy": strat,
                        "qty": qty, "price": tgt_px, "order_type": ORDER_TYPE_LIMIT,
                        "ok": False, "order_no": "", "msg": str(e)[:200]})
+        time.sleep(0.5)   # 주문 간 간격 — 연속 발사 429 예방(2026-07-14)
     print(f"[target] 익절 지정가 {n}건 발주")
 
 
@@ -1302,7 +1324,7 @@ def cmd_sell():
             except Exception as e:
                 print(f"  [warn] {code} 익절 지정가 취소 실패({e}) — 시장가 매도 시도 계속")
         try:
-            r = _assert_order_ok(api.order.stock_sell_order_request_kt10001(
+            r = _order_with_retry(lambda: api.order.stock_sell_order_request_kt10001(
                 dmst_stex_tp="KRX", stk_cd=code, ord_qty=str(qty),
                 trde_tp=ORDER_TYPE_SELL,
                 ord_uv="",   # 시장가
@@ -1332,6 +1354,7 @@ def cmd_sell():
                        "qty": qty, "price": ref_px,
                        "order_type": ORDER_TYPE_SELL, "ok": False, "order_no": "",
                        "msg": (reason + " | " if reason else "") + str(e)[:180]})
+        time.sleep(0.7)   # 주문 간 간격 — 연속 발사 시 429 예방(2026-07-14, 실사례 07-13)
     print(f"[sell] 주문 {n_placed}건 완료")
 
 

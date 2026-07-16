@@ -242,9 +242,12 @@ class KISMockClient:
         return h
 
     def _hashkey(self, body: dict) -> str:
+        # [2026-07-14] 경로 수정: /oauth2/Hashkey → /uapi/hashkey (KIS 공식).
+        # 종전 경로는 매 주문마다 404 를 반환해 왕복 낭비+로그 노이즈였음(실측 07-13,
+        # 폴백 "" 덕에 주문 자체는 성공 — hashkey 는 모의에서 선택 헤더).
         try:
             r = requests.post(
-                f"{MOCK_URL}/oauth2/Hashkey",
+                f"{MOCK_URL}/uapi/hashkey",
                 headers={"Content-Type": "application/json",
                          "appkey": _APP_KEY, "appsecret": _APP_SECRET},
                 json=body, timeout=10,
@@ -252,7 +255,7 @@ class KISMockClient:
             r.raise_for_status()
             return r.json().get("HASH", "")
         except Exception as e:
-            print(f"[warn] hashkey 실패: {e}")
+            print(f"[warn] hashkey 실패(주문은 hashkey 없이 진행): {e}")
             return ""
 
     def get_balance(self):
@@ -1087,6 +1090,7 @@ def cmd_buy():
                     "order_type": "시장가(VTTC0802U)", "reason": "signal",
                     "ok": False, "order_no": "", "msg": str(e)[:200],
                 })
+            time.sleep(0.6)   # 주문 간 간격 — 초당한도 예방(2026-07-14)
 
     print(f"\n[buy] 주문 {n_placed}건 완료")
 
@@ -1156,6 +1160,7 @@ def cmd_sell():
                 "order_type": "시장가(VTTC0801U)", "reason": reason,
                 "ok": False, "order_no": "", "msg": str(e)[:200],
             })
+        time.sleep(0.6)   # 주문 간 간격 — 초당한도 예방(2026-07-14, 키움 07-13 429 실사례 계열)
 
     print(f"[sell] 주문 {n_placed}건 완료")
     return sold_ok
