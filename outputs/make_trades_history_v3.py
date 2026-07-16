@@ -26,6 +26,11 @@ import pandas as pd
 from strategies.daily_loader import load_macro_daily, default_costs, filter_universe
 from strategies.high_with_filters import HighWithFiltersStrategy
 from strategies.high_52w import FiftyTwoWeekHighStrategy
+from strategies.rsi_reversal import RsiReversalStrategy
+from strategies.rsi_volume import RsiVolumeStrategy
+from strategies.high52w_foreign import High52wForeignStrategy
+from strategies.foreign_high import ForeignHighStrategy
+from strategies.gc_foreign import GcForeignStrategy
 from make_trades_history_v2 import compute_stock_features
 
 OUT = "./trades_history_v3.csv"
@@ -41,6 +46,25 @@ STRATEGIES = [
                      use_market_filter=True, use_volume_filter=False, name="h500_40_MKT")),
     ("h252_40",     FiftyTwoWeekHighStrategy(lookback_days=252, holding_days=40, name="h252_40")),
     ("h500_20",     FiftyTwoWeekHighStrategy(lookback_days=500, holding_days=20, name="h500_20")),
+    # ── 라이브 운용 6전략 (2026-07-17 추가) ──────────────────────────────────
+    # 목적: IC 가중치(FactorScorer)·AI 학습·paper_audit Drift 비교가 '실제 운용 중인
+    # 전략' 기준이 되도록. 종전엔 위 레거시 3전략 수익률로 "어떤 지표가 먹히나"를
+    # 학습해 그 잣대로 안C/안D 신호를 채점하는 구조적 불일치가 있었음.
+    # 이름은 라이브 신호CSV(paper_signals/kis_paper_signals)와 정확히 일치시킨다
+    # — 백테스트 별칭 star_high_52w_20_filt 는 여기서 high_52w_filt 로(클래스·파라미터
+    # 동일, strategy_engine 인스턴스와 같은 기본값: 시장게이트+거래량 1.5x).
+    # ※ KIS 3전략의 라이브 손절(-15/-10/-26%)은 미적용(레거시와 동일한 '만기 보유
+    #   순수익' 규약 유지 — IC 는 신호 품질 측정이므로 청산 오버레이 없이 학습).
+    ("high_52w_filt",  HighWithFiltersStrategy(lookback_days=252, holding_days=20,
+                        name="high_52w_filt")),
+    ("rsi_reversal",   RsiReversalStrategy(name="rsi_reversal")),
+    ("rsi_vol",        RsiVolumeStrategy(holding_days=7, name="rsi_vol")),
+    ("h52w_for3d_mkt", High52wForeignStrategy(foreign_n=3, holding_days=20,
+                        use_market_filter=True, name="h52w_for3d_mkt")),
+    ("for_high20_mkt", ForeignHighStrategy(n_days=3, high_period=20, holding_days=20,
+                        use_market_filter=True, name="for_high20_mkt")),
+    ("gc_for3d",       GcForeignStrategy(fast_ma=20, slow_ma=60, foreign_n=3,
+                        holding_days=15, name="gc_for3d")),
 ]
 
 

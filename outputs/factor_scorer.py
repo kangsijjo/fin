@@ -73,6 +73,11 @@ IC_FEATURES = [
     "news_sent_7d", "crd_remn_rt", "prm_net_5d_ratio",
 ]
 
+# 라이브 운용 6전략(안C 3 + 안D 3) — IC 산출 기준 필터(2026-07-17).
+# make_trades_history_v3 의 라이브 전략 라벨과 정확히 일치해야 한다.
+LIVE_STRATEGY_NAMES = {"high_52w_filt", "rsi_reversal", "rsi_vol",
+                       "h52w_for3d_mkt", "for_high20_mkt", "gc_for3d"}
+
 # 피처 계약(목록·순서·로더)은 feature_spec 단일 출처에서 가져온다 (2026-06-29 단일화 —
 # 과거 이 24리스트가 factor_scorer·dashboard·ai_trainer 3곳에 하드코딩되어 어긋나며
 # 'ai_prob 조용한 None'(11피처 모델에 24피처 입력) 버그를 유발했음).
@@ -126,6 +131,21 @@ class FactorScorer:
         if target not in df.columns:
             print("[FactorScorer] trades_history_v3.csv 에 net_pct 컬럼 없음")
             return
+
+        # [2026-07-17] IC 산출 기준을 '라이브 운용 전략'으로 — 종전엔 레거시 풀
+        # (h252_40/h500_20/h500_40_MKT, 현재 미운용)의 수익률로 "어떤 지표가 먹히나"를
+        # 학습해 그 잣대로 안C/안D 신호를 채점하는 구조적 불일치가 있었음.
+        # trades_history 에 라이브 전략 행이 충분하면(≥2,000) 그 행만으로 IC·백분위를
+        # 계산하고, 부족하면(구버전 CSV 등) 전체로 폴백해 견고성 유지.
+        if "strategy" in df.columns:
+            _live = df[df["strategy"].astype(str).isin(LIVE_STRATEGY_NAMES)]
+            if len(_live) >= 2000:
+                print(f"[FactorScorer] IC 기준: 라이브 6전략 {len(_live):,}건 "
+                      f"(전체 {len(df):,}건 중 — 레거시 풀 제외)")
+                df = _live
+            else:
+                print(f"[FactorScorer] 라이브 전략 표본 {len(_live):,}건 < 2,000 — "
+                      f"전체 {len(df):,}건으로 폴백(구버전 trades_history?)")
 
         y = df[target].astype(float)
         computed = 0
