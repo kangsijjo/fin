@@ -681,10 +681,10 @@ def _expiry_due(ds, signal_date, holding, today):
     return (xi - (len(ds) - 1)) == 1 and today > ds[-1]
 
 
-def codes_due_for_exit(close_map):
+def codes_due_for_exit(close_map, reasons=("expire", "stop")):
     """만기 도달 or stop 발동 종목 → {code: reason}.
 
-    reason: 'expire' | 'stop'
+    reason: 'expire' | 'stop' / reasons: 이번 실행에서 판정할 사유 필터(2026-07-17).
     stop 판단: 전일 종가(close_map) ≤ 진입가 × (1 + stop_pct)
     만기 판단: 진입일 포함 holding_days 영업일째
 
@@ -693,9 +693,10 @@ def codes_due_for_exit(close_map):
     오판(키움 CJ ENM 사례의 일반형). stop 도 원장의 전략/진입가 기준(최신 신호 전략으로
     stop_pct 를 잘못 고르는 것 방지). 원장에 없는 코드만 신호CSV 만기 폴백.
 
-    ※ 실행 시점 주의: KIS 트레이더는 09:01 daily 만 스케줄되어 있어 만기 매도가
-    '만기일 09:01 시가'에 나간다(백테스트 가정은 종가 청산). 15:21 매도 트리거를
-    추가하기 전까지는 이것이 실제 동작 — 문서화 2026-07-07.
+    [2026-07-17 트리거 분리] 만기(expire)는 15:21 마감 동시호가 매도(=백테스트의 '만기일
+    종가 청산'과 정합, daily-pm), stop 은 09:01 시가 매도(전일 종가 판정→익일 시가 —
+    stop_sweep 재수정 의미론과 정합, daily-am). 인자 없는 구 'daily' 는 기본값으로 둘 다
+    판정(작업 재등록 전 하위호환 — 종전과 동일하게 만기가 09:01 시가에 나감).
     """
     from strategies.daily_loader import load_macro_daily
     # 대시 없는 'YYYYMMDD' — ds(load_macro_daily date)·signal_date 와 동일 형식.
@@ -716,14 +717,17 @@ def codes_due_for_exit(close_map):
         # [2026-07-10] 원장에 있으면 판정불가(verdict None)여도 폴백 금지 — None 경로로
         # '옛 신호 만기 오염'(조기청산)이 재유입되던 구멍. 판정불가는 보류+경고로 처리.
         ledger_decided.add(code)
-        sd = str(info.get("signal_date", "")).replace("-", "")
-        verdict = _expiry_due(code_dates.get(code), sd,
-                              info.get("holding_days", HOLDING_DAYS_DEFAULT), today)
-        if verdict is None:
-            print(f"[sell][warn] {code} 원장 signal_date({sd}) 달력 판정불가 — 만기 보류, 원장 확인 필요")
-            undecidable.append(code)
-        elif verdict:
-            due[code] = "expire"
+        if "expire" in reasons:
+            sd = str(info.get("signal_date", "")).replace("-", "")
+            verdict = _expiry_due(code_dates.get(code), sd,
+                                  info.get("holding_days", HOLDING_DAYS_DEFAULT), today)
+            if verdict is None:
+                print(f"[sell][warn] {code} 원장 signal_date({sd}) 달력 판정불가 — 만기 보류, 원장 확인 필요")
+                undecidable.append(code)
+            elif verdict:
+                due[code] = "expire"
+                continue
+        if "stop" not in reasons:
             continue
         # stop — 원장 전략/진입가 기준. cur_close 는 NaN 가능(CSV 빈 셀) → 'not >0' 로 차단
         stop_pct = STRATEGY_STOP.get(str(info.get("strategy", "")))
@@ -741,8 +745,8 @@ def codes_due_for_exit(close_map):
         except Exception:
             pass
 
-    # 원장에 없는 코드(원장 유실·수동매수) 만기 폴백 — 신호CSV 스캔
-    if not os.path.exists(SIGNALS_CSV):
+    # 원장에 없는 코드(원장 유실·수동매수) 만기 폴백 — 신호CSV 스캔 (expire 판정 시에만)
+    if "expire" not in reasons or not os.path.exists(SIGNALS_CSV):
         return due
     s = pd.read_csv(SIGNALS_CSV, dtype={"code": str})
     s["signal_date"] = s["signal_date"].astype(str)
@@ -1095,16 +1099,16 @@ def cmd_buy():
     print(f"\n[buy] 주문 {n_placed}건 완료")
 
 
-def cmd_sell():
-    """만기 or stop 발동 종목 매도.
+def cmd_sell(reasons=("expire", "stop")):
+    """만기 or stop 발동 종목 매도. reasons 로 사유 한정(am=stop만/pm=expire만, 2026-07-17).
 
     stop 판단: 전일 종가 <= 진입가 x (1 + stop_pct)
     """
     close_map = _today_close_map()
-    due = codes_due_for_exit(close_map)
+    due = codes_due_for_exit(close_map, reasons=reasons)
     sold_ok = set()   # 매도주문 성공 코드 — daily 가 잔고반영 대기에 사용(2026-07-10)
     if not due:
-        print("[sell] 청산 대상 없음 — 종료")
+        print(f"[sell] 청산 대상 없음({'+'.join(reasons)}) — 종료")
         return sold_ok
 
     client = KISMockClient()
@@ -1290,10 +1294,9 @@ if __name__ == "__main__":
         elif cmd == "reconcile":
             cmd_reconcile()
         elif cmd == "daily":
-            # stop-loss는 전일 종가 기준 → sell 먼저 실행.
-            # ※ 만기도 여기(09:01)서 발동 — 만기일 '시가' 매도임(2026-07-07 문서 정정).
-            #   백테스트 가정(종가 청산)과 맞추려면 15:21 sell 트리거 추가 필요(후속 과제).
-            print("[daily] 매도(만기/stop) 후 매수")
+            # 구(단일 트리거) 경로 — 하위호환. 만기+stop 둘 다 09:01에 발동(만기는 시가).
+            # 작업 재등록(KisTraderAM/PM 분리) 후에는 daily-am/daily-pm 이 대신 쓰인다.
+            print("[daily] 매도(만기/stop) 후 매수 — 구 단일 트리거 경로")
             _sold = cmd_sell()
             if _sold:
                 # 매도 체결이 잔고에 반영될 때까지 대기 — 안 하면 슬롯/예산이 해방되지
@@ -1304,9 +1307,46 @@ if __name__ == "__main__":
             # 잠깐 대기 후 스냅샷 기록(대시보드가 당일 보유를 바로 반영).
             _wait_balance_settle()
             cmd_status()
+        elif cmd == "daily-am":
+            # 09:01 전용(2026-07-17 트리거 분리): stop 매도(전일 종가 판정→시가 매도,
+            # 백테스트 의미론과 정합) + 매수. 만기는 15:21 daily-pm 담당(종가 청산 정합).
+            print("[daily-am] 손절 매도 후 매수 (만기는 15:21 PM 담당)")
+            _hour = datetime.now().hour
+            _sold = cmd_sell(reasons=("stop",))
+            if _sold:
+                _wait_positions_clear(_sold)
+            if _hour >= 12:
+                # StartWhenAvailable 지연복구가 정오를 넘긴 경우 — 한낮 시장가 매수는
+                # 가격 이동 위험이라 생략(키움 daily-am 과 동일 정책, 2026-07-12).
+                msg = "⚠ [KIS] 09:01 매수 트리거가 정오 이후 지연복구됨 — 당일 매수 생략(가격 이동 위험)"
+                print(msg)
+                try:
+                    import notifier
+                    notifier.safe_send(msg)
+                except Exception:
+                    pass
+            else:
+                cmd_buy()
+                _wait_balance_settle()
+            cmd_status()
+        elif cmd == "daily-pm":
+            # 15:21 전용(2026-07-17 신설): 만기 매도만 — 마감 동시호가 체결 ≈ 종가 청산
+            # = 백테스트 가정과 정합(종전엔 만기가 09:01 시가에 나가 갭 1회가 계통 노출).
+            _hour = datetime.now().hour
+            if _hour < 12:
+                msg = "⚠ [KIS] 15:21 만기 트리거가 오전에 지연복구됨 — 만기 매도가 시가 체결됨(종가 아님)을 고지하고 진행"
+                print(msg)
+                try:
+                    import notifier
+                    notifier.safe_send(msg)
+                except Exception:
+                    pass
+            print("[daily-pm] 만기 매도 (마감 동시호가 ≈ 종가 청산)")
+            cmd_sell(reasons=("expire",))
+            cmd_status()
         else:
             print(f"[main] 알 수 없는 명령: {cmd}")
-            print("사용법: python kis_trader.py [status|buy|sell|stopcheck|reconcile|daily]")
+            print("사용법: python kis_trader.py [status|buy|sell|stopcheck|reconcile|daily|daily-am|daily-pm]")
             sys.exit(1)
 
     # 체결 묶음 알림 — 이번 실행에서 쌓인 매수/매도를 1통으로 (없으면 전송 안 함)

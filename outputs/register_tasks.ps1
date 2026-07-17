@@ -62,19 +62,27 @@ try {
         -Action $a4 -Trigger $t4 -Settings $s4 -Principal $principal -Force | Out-Null
     Write-Host "[OK] StockAI\KisSignal (weekdays 18:31, runs on wake if missed)" -ForegroundColor Green
 
-    # 5. KIS trader: weekdays 09:01 + at logon (부팅 시 자동 실행, bat 내부 주말 스킵)
-    Write-Host "[5/6] Registering KIS trader..."
-    $a5  = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_kis_trader.bat"
-    $t5a = New-ScheduledTaskTrigger -Weekly `
-               -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "09:01"
-    $t5b = New-ScheduledTaskTrigger -AtLogOn
+    # 5. KIS trader: AM(09:01 stop매도+매수) / PM(15:21 만기매도=마감 동시호가) 분리.
+    #    [2026-07-17] 만기 매도를 종가 청산(백테스트 가정)과 정합시키기 위해 PM 트리거
+    #    신설 + am/pm 명시 인자(지연복구 가드는 kis_trader.py daily-am/pm 내부).
+    Write-Host "[5/6] Registering KIS trader (AM/PM split)..."
+    Unregister-ScheduledTask -TaskName "KisTrader" -TaskPath "\StockAI\" -Confirm:$false -ErrorAction SilentlyContinue
     $s5  = New-ScheduledTaskSettingsSet `
                -MultipleInstances IgnoreNew `
                -StartWhenAvailable `
                -ExecutionTimeLimit (New-TimeSpan -Hours 2)
-    Register-ScheduledTask -TaskName "StockAI\KisTrader" `
-        -Action $a5 -Trigger $t5a,$t5b -Settings $s5 -Principal $principal -Force | Out-Null
-    Write-Host "[OK] StockAI\KisTrader (weekdays 09:01 + at logon)" -ForegroundColor Green
+    $a5a = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_kis_trader.bat" -Argument "am"
+    $t5a = New-ScheduledTaskTrigger -Weekly `
+               -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "09:01"
+    $t5b = New-ScheduledTaskTrigger -AtLogOn
+    Register-ScheduledTask -TaskName "StockAI\KisTraderAM" `
+        -Action $a5a -Trigger $t5a,$t5b -Settings $s5 -Principal $principal -Force | Out-Null
+    $a5c = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_kis_trader.bat" -Argument "pm"
+    $t5c = New-ScheduledTaskTrigger -Weekly `
+               -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "15:21"
+    Register-ScheduledTask -TaskName "StockAI\KisTraderPM" `
+        -Action $a5c -Trigger $t5c -Settings $s5 -Principal $principal -Force | Out-Null
+    Write-Host "[OK] StockAI\KisTraderAM(09:01 stop+buy, +logon) / KisTraderPM(15:21 expiry)" -ForegroundColor Green
 
     # 6. Dashboard: at logon (60s delay inside bat)
     Write-Host "[6/6] Registering dashboard..."

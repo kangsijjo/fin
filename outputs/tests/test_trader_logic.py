@@ -299,7 +299,7 @@ def test_kis_codes_due_ledger_expiry_and_stop(tmp_path, monkeypatch):
     dates = ["20260102", "20260103", "20260106", "20260107", "20260108",
              "20260109", "20260112", "20260113"]
     monkeypatch.setattr(dl, "load_macro_daily",
-                        lambda *a, **k: _synth_macro_df(["000060", "000070"], dates))
+                        lambda *a, **k: _synth_macro_df(["000060", "000070", "000080"], dates))
     monkeypatch.setattr(kx, "SIGNALS_CSV", str(tmp_path / "kis_paper_signals.csv"))
     monkeypatch.setattr(kx, "KIS_POSITIONS_CSV", str(tmp_path / "kis_positions.csv"))
 
@@ -320,6 +320,13 @@ def test_kis_codes_due_ledger_expiry_and_stop(tmp_path, monkeypatch):
     # 종가가 stop 위면 발동 안 함 (-26% 경계)
     due2 = kx.codes_due_for_exit({"000070": 7500.0})
     assert "000070" not in due2
+
+    # reasons 필터(2026-07-17 트리거 분리): am=stop만 / pm=expire만
+    kx.save_kis_position("000080", 10000, "gc_for3d", "20260102", 2)   # 만기 도과
+    due_am = kx.codes_due_for_exit({"000070": 7300.0, "000080": 9000.0}, reasons=("stop",))
+    assert due_am.get("000070") == "stop" and "000080" not in due_am   # am: 만기 무시
+    due_pm = kx.codes_due_for_exit({"000070": 7300.0, "000080": 9000.0}, reasons=("expire",))
+    assert due_pm.get("000080") == "expire" and "000070" not in due_pm  # pm: stop 무시
 
 
 def test_after_market_signed_price_and_snapshot_replace(tmp_path, monkeypatch):
