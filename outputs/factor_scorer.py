@@ -83,6 +83,7 @@ LIVE_STRATEGY_NAMES = {"high_52w_filt", "rsi_reversal", "rsi_vol",
 # 'ai_prob 조용한 None'(11피처 모델에 24피처 입력) 버그를 유발했음).
 from feature_spec import (
     FALLBACK_MODEL_ORDER as MODEL_FEATURE_ORDER,   # 폴백 24피처(하위호환 별칭)
+    STRAT_FEATURES,                                 # 전략 one-hot 계약(구3 + 라이브6)
     load_model_feature_order,                       # features.csv 의 실제 학습 순서 로더
 )
 
@@ -442,10 +443,11 @@ class FactorScorer:
         feats.update(macro_feats)                   # 매크로는 종목 공통
         feats.update(db_feats.get(code, {}))        # DB 피처 (있으면 덮어씀)
 
-        # 전략 더미 피처
-        feats["strat_h252_40"]     = 1.0 if strategy == "h252_40"     else 0.0
-        feats["strat_h500_20"]     = 1.0 if strategy == "h500_20"     else 0.0
-        feats["strat_h500_40_MKT"] = 1.0 if strategy == "h500_40_MKT" else 0.0
+        # 전략 더미 피처 — feature_spec.STRAT_FEATURES 단일 출처(학습 one-hot 과 동일 규칙).
+        # 2026-07-17: 라이브 6전략 학습 편입으로 하드코딩 3개 → 계약 기반 일반화.
+        # 구 모델은 order 에 없는 키를 무시하므로(모델별 order 로만 벡터화) 양방향 안전.
+        for _sf in STRAT_FEATURES:
+            feats[_sf] = 1.0 if _sf == f"strat_{strategy}" else 0.0
 
         return feats
 

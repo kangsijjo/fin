@@ -265,6 +265,10 @@ def test_codes_due_ledger_priority_over_stale_signal(tmp_path, monkeypatch):
 
     dates = ["20260102", "20260103", "20260106", "20260107", "20260108",
              "20260109", "20260112", "20260113"]
+    # sys.modules 고정 — 트레이더는 함수 내 `from strategies.daily_loader import ...` 로
+    # 호출 시점에 sys.modules 를 조회한다. 앞선 테스트가 이 엔트리를 교체해 두면 아래
+    # setattr 패치가 무력화됨(2026-07-17 11:02 preflight 순서-의존 실패 실사례). 고정으로 방탄.
+    monkeypatch.setitem(sys.modules, "strategies.daily_loader", dl)
     monkeypatch.setattr(dl, "load_macro_daily",
                         lambda *a, **k: _synth_macro_df(["000030", "000040", "000050"], dates))
     monkeypatch.setattr(kt, "SIGNALS_CSV", str(tmp_path / "paper_signals.csv"))
@@ -298,6 +302,7 @@ def test_kis_codes_due_ledger_expiry_and_stop(tmp_path, monkeypatch):
 
     dates = ["20260102", "20260103", "20260106", "20260107", "20260108",
              "20260109", "20260112", "20260113"]
+    monkeypatch.setitem(sys.modules, "strategies.daily_loader", dl)   # 오염 방탄(위 테스트와 동일 사유)
     monkeypatch.setattr(dl, "load_macro_daily",
                         lambda *a, **k: _synth_macro_df(["000060", "000070", "000080"], dates))
     monkeypatch.setattr(kx, "SIGNALS_CSV", str(tmp_path / "kis_paper_signals.csv"))

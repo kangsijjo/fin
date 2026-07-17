@@ -60,8 +60,17 @@ FEATURE_GROUPS = {
     "program":      ["prm_net_5d_ratio"],
 }
 
-# 전략 one-hot 피처 (현재 학습 풀: h252_40 / h500_20 / h500_40_MKT). 항상 포함.
-STRAT_FEATURES = ["strat_h252_40", "strat_h500_20", "strat_h500_40_MKT"]
+# 전략 one-hot 피처 — 학습 데이터의 strategy 컬럼에서 생기는 더미(항상 포함).
+#   2026-07-17: trades_history_v3 에 라이브 6전략 편입(강도 잣대 교체) → 학습 산출물에
+#   strat_(라이브명) one-hot 이 새로 생김. 미선언 시 test_trained_features_are_declared
+#   가 계약 drift 로 잡아냄(2026-07-17 12:47 재학습에서 실제 발생 — 그래서 선언 확장).
+STRAT_FEATURES = [
+    # 구 백테스트 풀 (h252/h500 계열)
+    "strat_h252_40", "strat_h500_20", "strat_h500_40_MKT",
+    # 라이브 6전략 (factor_scorer.LIVE_STRATEGY_NAMES 와 동일 명칭)
+    "strat_high_52w_filt", "strat_rsi_reversal", "strat_rsi_vol",
+    "strat_h52w_for3d_mkt", "strat_for_high20_mkt", "strat_gc_for3d",
+]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 추론 폴백 순서 — meta_model_v4.features.csv 가 없을 때만 쓰는 '전체' 하드코딩.

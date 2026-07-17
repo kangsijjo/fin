@@ -15,6 +15,12 @@ ins_net5_db
 rsi_db
 macd_hist_db
 bb_pct_db
+strat_for_high20_mkt
+strat_gc_for3d
 strat_h252_40
 strat_h500_20
 strat_h500_40_MKT
+strat_h52w_for3d_mkt
+strat_high_52w_filt
+strat_rsi_reversal
+strat_rsi_vol
