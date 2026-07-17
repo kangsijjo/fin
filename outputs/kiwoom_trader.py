@@ -131,6 +131,14 @@ def kiwoom_lock(timeout: int = 30):
 
 import config
 
+# 콘솔 인코딩 방탄(2026-07-17) — KIS 쪽과 동일: bat 밖 실행(cp949)에서 이모지 print
+# 가 UnicodeEncodeError 로 즉사하는 것 방지.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 SIGNALS_CSV = "./paper_signals.csv"
 ORDERS_DIR = "./db/kiwoom"
 HOLDING_DAYS_DEFAULT = 40   # 구버전 CSV 호환 fallback
@@ -1414,6 +1422,19 @@ def cmd_daily(mode=None):
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
 
+    # 크래시 텔레그램(2026-07-17) — KIS 쪽 '무경보 사망' 실사례(모의서버 장애로 PM
+    # ReadTimeout 즉사, 스케줄러 이력에만 흔적)와 동일 클래스 방지. 미처리 예외를
+    # 텔레그램으로 격상하고 traceback/종료코드는 원래대로 유지.
+    def _crash_hook(_tp, _val, _tb):
+        try:
+            import notifier
+            notifier.safe_send(f"🚨 [키움] {cmd} 크래시: {_tp.__name__}: {_val}"
+                               " — 실행 중단(자동 재시도 없음), 로그 확인 요망")
+        except Exception:
+            pass
+        sys.__excepthook__(_tp, _val, _tb)
+    sys.excepthook = _crash_hook
+
     # status 도 락 안에서 — cmd_status 의 ensure(prune/heal)가 원장 '쓰기' 작업이라
     # 락 없이 daily 와 겹치면 load-modify-write 레이스(행 유실/부활) 가능(2026-07-10).
     with kiwoom_lock(timeout=60):
@@ -1430,9 +1451,23 @@ if __name__ == "__main__":
         elif cmd == "daily":
             cmd_daily()
         elif cmd == "daily-am":     # 09:03 트리거 전용(지연복구 가드 포함, 2026-07-12)
-            cmd_daily("am")
+            if datetime.now().hour >= 15:
+                # [2026-07-17] 장외 재점화 가드 — 캐치업/수동 재실행이 15시 이후 AM 을
+                # 점화하면 손절매도까지 장외 주문이 됨. 15시 이후는 PM/익일 소관.
+                _m = "⚠ [키움] daily-am 이 15시 이후 점화됨 — 전체 생략(재점화 가드)"
+                print(_m)
+                try:
+                    import notifier
+                    notifier.safe_send(_m)
+                except Exception:
+                    pass
+            else:
+                cmd_daily("am")
         elif cmd == "daily-pm":     # 15:21 트리거 전용
             cmd_daily("pm")
+            # watchdog 완료 마커(2026-07-17) — 시작 마커는 실행 중 크래시를 못 잡는다
+            # (KIS 15:21 ReadTimeout 사망을 [OK] 로 본 실사례). 끝까지 와야 찍힌다.
+            print("오후 모드 완료")
         else:
             print(f"[main] 알 수 없는 명령: {cmd}")
             print("사용법: python kiwoom_trader.py [status|buy|sell|targets|reconcile|daily|daily-am|daily-pm]")

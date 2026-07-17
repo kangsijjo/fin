@@ -49,6 +49,15 @@ import requests
 import pandas as pd
 
 # ── 상수 ──────────────────────────────────────────────────────────────────────
+# 콘솔 인코딩 방탄(2026-07-17) — bat 는 PYTHONIOENCODING=utf-8 을 세팅하지만 수동/타
+# 런처 실행은 cp949 콘솔이라 ⚠🚨 등 이모지 print 가 UnicodeEncodeError 로 즉사
+# (가드 실사격 테스트에서 실제 크래시 — progress.py 게이지 크래시와 동일 클래스).
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 MOCK_URL         = "https://openapivts.koreainvestment.com:29443"
 TOKEN_CACHE      = ".kis_mock_token.json"
 SIGNALS_CSV      = "./kis_paper_signals.csv"   # kis_live_signal.py 출력 파일
@@ -1279,6 +1288,19 @@ def _wait_balance_settle(max_wait=20, interval=4):
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
 
+    # 크래시 텔레그램(2026-07-17) — KIS 모의서버 장애(ReadTimeout/500)로 PM 만기매도가
+    # '무경보 사망'한 실사례(15:21 ExitCode=1, 스케줄러 이력에만 남음). 어떤 미처리
+    # 예외든 즉시 텔레그램으로 격상하고 원래 traceback/종료코드는 그대로 유지.
+    def _crash_hook(_tp, _val, _tb):
+        try:
+            import notifier
+            notifier.safe_send(f"🚨 [KIS] {cmd} 크래시: {_tp.__name__}: {_val}"
+                               " — 실행 중단(자동 재시도 없음), 로그 확인 요망")
+        except Exception:
+            pass
+        sys.__excepthook__(_tp, _val, _tb)
+    sys.excepthook = _crash_hook
+
     # status 도 락 안에서 — 2026-07-10 prune/heal 도입으로 원장 '쓰기' 작업이 됐다.
     # 락 없이 daily 와 겹치면 load-modify-write 레이스로 방금 매수한 원장 행이 유실되거나
     # prune 삭제가 되살아날 수 있음.
@@ -1297,28 +1319,11 @@ if __name__ == "__main__":
             # 구(단일 트리거) 경로 — 하위호환. 만기+stop 둘 다 09:01에 발동(만기는 시가).
             # 작업 재등록(KisTraderAM/PM 분리) 후에는 daily-am/daily-pm 이 대신 쓰인다.
             print("[daily] 매도(만기/stop) 후 매수 — 구 단일 트리거 경로")
-            _sold = cmd_sell()
-            if _sold:
-                # 매도 체결이 잔고에 반영될 때까지 대기 — 안 하면 슬롯/예산이 해방되지
-                # 않은 채 buy 가 돌아 당일 신규매수가 누락됨(2026-07-10)
-                _wait_positions_clear(_sold)
-            cmd_buy()
-            # 매수 직후 잔고API 체결반영 지연 대비 — 우리 기록이 잔고에 잡힐 때까지
-            # 잠깐 대기 후 스냅샷 기록(대시보드가 당일 보유를 바로 반영).
-            _wait_balance_settle()
-            cmd_status()
-        elif cmd == "daily-am":
-            # 09:01 전용(2026-07-17 트리거 분리): stop 매도(전일 종가 판정→시가 매도,
-            # 백테스트 의미론과 정합) + 매수. 만기는 15:21 daily-pm 담당(종가 청산 정합).
-            print("[daily-am] 손절 매도 후 매수 (만기는 15:21 PM 담당)")
             _hour = datetime.now().hour
-            _sold = cmd_sell(reasons=("stop",))
-            if _sold:
-                _wait_positions_clear(_sold)
-            if _hour >= 12:
-                # StartWhenAvailable 지연복구가 정오를 넘긴 경우 — 한낮 시장가 매수는
-                # 가격 이동 위험이라 생략(키움 daily-am 과 동일 정책, 2026-07-12).
-                msg = "⚠ [KIS] 09:01 매수 트리거가 정오 이후 지연복구됨 — 당일 매수 생략(가격 이동 위험)"
+            if _hour >= 15 or _hour < 8:
+                # [2026-07-17] 구 경로도 장외 가드 — 인자 없는 수동/정체불명 실행이
+                # 10:51 에 이 경로로 점화된 실사례(정규 작업은 전부 am/pm 인자 사용).
+                msg = f"⚠ [KIS] 구 daily 경로가 장외 시간({_hour}시)에 점화됨 — 전체 생략"
                 print(msg)
                 try:
                     import notifier
@@ -1326,9 +1331,50 @@ if __name__ == "__main__":
                 except Exception:
                     pass
             else:
+                _sold = cmd_sell()
+                if _sold:
+                    # 매도 체결이 잔고에 반영될 때까지 대기 — 안 하면 슬롯/예산이 해방되지
+                    # 않은 채 buy 가 돌아 당일 신규매수가 누락됨(2026-07-10)
+                    _wait_positions_clear(_sold)
                 cmd_buy()
+                # 매수 직후 잔고API 체결반영 지연 대비 — 우리 기록이 잔고에 잡힐 때까지
+                # 잠깐 대기 후 스냅샷 기록(대시보드가 당일 보유를 바로 반영).
                 _wait_balance_settle()
-            cmd_status()
+                cmd_status()
+        elif cmd == "daily-am":
+            # 09:01 전용(2026-07-17 트리거 분리): stop 매도(전일 종가 판정→시가 매도,
+            # 백테스트 의미론과 정합) + 매수. 만기는 15:21 daily-pm 담당(종가 청산 정합).
+            print("[daily-am] 손절 매도 후 매수 (만기는 15:21 PM 담당)")
+            _hour = datetime.now().hour
+            if _hour >= 15 or _hour < 8:
+                # [2026-07-17] 장외 재점화 가드 — 로그온 트리거/캐치업이 재부팅·심야에
+                # AM 로직을 재점화한 실사례(12:36, 23:21). 15시 이후 손절판정·매수는
+                # PM/익일 아침 소관이므로 전체 생략(장외 주문 잔여물 방지).
+                msg = f"⚠ [KIS] daily-am 이 장외 시간({_hour}시)에 점화됨 — 전체 생략(재점화 가드)"
+                print(msg)
+                try:
+                    import notifier
+                    notifier.safe_send(msg)
+                except Exception:
+                    pass
+            else:
+                _sold = cmd_sell(reasons=("stop",))
+                if _sold:
+                    _wait_positions_clear(_sold)
+                if _hour >= 12:
+                    # StartWhenAvailable 지연복구가 정오를 넘긴 경우 — 한낮 시장가 매수는
+                    # 가격 이동 위험이라 생략(키움 daily-am 과 동일 정책, 2026-07-12).
+                    msg = "⚠ [KIS] 09:01 매수 트리거가 정오 이후 지연복구됨 — 당일 매수 생략(가격 이동 위험)"
+                    print(msg)
+                    try:
+                        import notifier
+                        notifier.safe_send(msg)
+                    except Exception:
+                        pass
+                else:
+                    cmd_buy()
+                    _wait_balance_settle()
+                cmd_status()
         elif cmd == "daily-pm":
             # 15:21 전용(2026-07-17 신설): 만기 매도만 — 마감 동시호가 체결 ≈ 종가 청산
             # = 백테스트 가정과 정합(종전엔 만기가 09:01 시가에 나가 갭 1회가 계통 노출).
@@ -1344,6 +1390,9 @@ if __name__ == "__main__":
             print("[daily-pm] 만기 매도 (마감 동시호가 ≈ 종가 청산)")
             cmd_sell(reasons=("expire",))
             cmd_status()
+            # watchdog 완료 마커 — '시작 마커'는 크래시를 못 잡음(07-17: 시작 직후
+            # ReadTimeout 사망을 watchdog 이 [OK] 로 봤던 실사례). 끝까지 와야 찍힌다.
+            print("[daily-pm] 완료")
         else:
             print(f"[main] 알 수 없는 명령: {cmd}")
             print("사용법: python kis_trader.py [status|buy|sell|stopcheck|reconcile|daily|daily-am|daily-pm]")

@@ -272,15 +272,18 @@ def check_trading():
         # [2026-07-12] 로그 '파일 존재'는 09:03 매수 실행이 이미 만족시킴 — 15:21 매도
         # (만기+서킷브레이커, 키움의 유일한 청산 경로)가 죽어도 무경보이던 사각지대.
         # 오후 실행이 남기는 '오후 모드' 마커로 실행 여부를 직접 확인.
+        # [2026-07-17] '시작 마커'→'완료 마커' 전환 — KIS PM 이 시작 직후 ReadTimeout 으로
+        # 죽었는데 시작 마커가 이미 찍혀 [OK] 로 통과한 실사례. 끝까지 완주해야 찍히는
+        # 완료 마커(트레이더가 마지막에 print)로 크래시도 잡는다.
         out.append(("trade_kiwoom_pm", "키움 매도(15:21)",
-                    _log_contains_today(f"kiwoom_{TODAY_STR}.log", "오후 모드"),
-                    "오늘 15:21 매도(만기/서킷브레이커) 실행 흔적 없음"))
+                    _log_contains_today(f"kiwoom_{TODAY_STR}.log", "오후 모드 완료"),
+                    "오늘 15:21 매도(만기/서킷브레이커) 완주 흔적 없음(미실행 또는 도중 크래시)"))
         # [2026-07-17] KIS 만기매도 PM 트리거 감시 — KisTraderPM(15:21, daily-pm) 재등록
         # 확인 후 활성화(재등록 전에 넣으면 매일 오탐이라 보류했던 항목).
         # KIS 로그는 실행별 파일(kis_trader_YYYYMMDD_HHMM.log)이라 글롭 검색.
         out.append(("trade_kis_pm", "KIS 만기매도(15:21)",
-                    _any_log_contains_today("kis_trader_*.log", "[daily-pm]"),
-                    "오늘 15:21 만기매도(daily-pm) 실행 흔적 없음"))
+                    _any_log_contains_today("kis_trader_*.log", "[daily-pm] 완료"),
+                    "오늘 15:21 만기매도(daily-pm) 완주 흔적 없음(미실행 또는 도중 크래시)"))
     return out
 
 
@@ -362,7 +365,9 @@ def main():
     print(f"[watchdog] {NOW.strftime('%Y-%m-%d %H:%M')}  정상 {n_ok}/{n_total}"
           + (f", 이상 {len(fails)}건" if fails else ""))
     for k, lbl, ok, det in results:
-        print(f"  [{'OK' if ok else 'XX'}] {lbl}: {det}")
+        # OK 행에 실패 문구(det)를 그대로 찍으면 "[OK] ... 미실행" 같은 모순 출력이
+        # 됨(2026-07-17 판독 혼선 실사례) — 정상 행은 '정상'으로만.
+        print(f"  [OK] {lbl}: 정상" if ok else f"  [XX] {lbl}: {det}")
 
     if msg and notifier is not None:
         sent = notifier.safe_send(msg) if hasattr(notifier, "safe_send") else notifier.send(msg)

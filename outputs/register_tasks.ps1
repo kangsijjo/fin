@@ -74,15 +74,17 @@ try {
     $a5a = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_kis_trader.bat" -Argument "am"
     $t5a = New-ScheduledTaskTrigger -Weekly `
                -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "09:01"
-    $t5b = New-ScheduledTaskTrigger -AtLogOn
+    # [2026-07-17] AtLogOn 트리거 제거 — 재부팅/절전복귀 로그온마다 매매 로직이 재점화
+    # (12:36, 23:21 실사례). '09:01 놓침' 복구는 StartWhenAvailable 이 단독으로 담당하며
+    # 정오/장외 가드는 kis_trader.py daily-am 내부에 있음.
     Register-ScheduledTask -TaskName "StockAI\KisTraderAM" `
-        -Action $a5a -Trigger $t5a,$t5b -Settings $s5 -Principal $principal -Force | Out-Null
+        -Action $a5a -Trigger $t5a -Settings $s5 -Principal $principal -Force | Out-Null
     $a5c = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_kis_trader.bat" -Argument "pm"
     $t5c = New-ScheduledTaskTrigger -Weekly `
                -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "15:21"
     Register-ScheduledTask -TaskName "StockAI\KisTraderPM" `
         -Action $a5c -Trigger $t5c -Settings $s5 -Principal $principal -Force | Out-Null
-    Write-Host "[OK] StockAI\KisTraderAM(09:01 stop+buy, +logon) / KisTraderPM(15:21 expiry)" -ForegroundColor Green
+    Write-Host "[OK] StockAI\KisTraderAM(09:01 stop+buy) / KisTraderPM(15:21 expiry)" -ForegroundColor Green
 
     # 6. Dashboard: at logon (60s delay inside bat)
     Write-Host "[6/6] Registering dashboard..."
