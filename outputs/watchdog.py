@@ -129,6 +129,22 @@ def _log_contains_today(fname, needle):
     return False
 
 
+def _any_log_contains_today(pattern, needle):
+    """오늘 날짜가 든 pattern 매칭 로그들(실행별 파일, 예: kis_trader_YYYYMMDD_HHMM.log)
+    중 하나라도 needle 을 담고 있는가 — KIS 처럼 실행마다 새 파일을 만드는 잡용."""
+    for root in (_LOGS, _OUT_LOGS):
+        for p in glob.glob(os.path.join(root, pattern)):
+            if TODAY_STR not in os.path.basename(p):
+                continue
+            try:
+                with open(p, encoding="utf-8", errors="replace") as f:
+                    if needle in f.read():
+                        return True
+            except Exception:
+                pass
+    return False
+
+
 def _snap_date(fname):
     try:
         d = json.loads(open(os.path.join(_KIWOOM_DIR, fname), encoding="utf-8").read())
@@ -259,6 +275,12 @@ def check_trading():
         out.append(("trade_kiwoom_pm", "키움 매도(15:21)",
                     _log_contains_today(f"kiwoom_{TODAY_STR}.log", "오후 모드"),
                     "오늘 15:21 매도(만기/서킷브레이커) 실행 흔적 없음"))
+        # [2026-07-17] KIS 만기매도 PM 트리거 감시 — KisTraderPM(15:21, daily-pm) 재등록
+        # 확인 후 활성화(재등록 전에 넣으면 매일 오탐이라 보류했던 항목).
+        # KIS 로그는 실행별 파일(kis_trader_YYYYMMDD_HHMM.log)이라 글롭 검색.
+        out.append(("trade_kis_pm", "KIS 만기매도(15:21)",
+                    _any_log_contains_today("kis_trader_*.log", "[daily-pm]"),
+                    "오늘 15:21 만기매도(daily-pm) 실행 흔적 없음"))
     return out
 
 
