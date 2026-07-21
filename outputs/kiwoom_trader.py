@@ -196,7 +196,19 @@ class KiwoomBundle:
         self.acct = acct
 
 
+_API_BUNDLE = None   # 프로세스 1회 인증 캐시 — 아래 get_api 토큰 재발급 방지(2026-07-21)
+
+
 def get_api():
+    # [2026-07-21] 한 실행에서 매도·매수·익절·상태조회가 각각 get_api() 를 호출해
+    # 매번 새 토큰을 발급 → 키움 모의서버의 '토큰 발급' rate limit(HTTP 429)에 걸려
+    # cmd_status 가 즉사(daily-am 크래시 실사례, 매매 자체는 이미 완료된 뒤였음).
+    # 토큰은 실행 수초 동안 유효하므로 프로세스 생애 1회만 발급·재사용한다(각 스케줄
+    # 실행은 새 프로세스라 만료 걱정 없음). 어제 고친 '주문 429'(_order_with_retry)와는
+    # 다른 엔드포인트라 그 방어로는 못 잡던 경로.
+    global _API_BUNDLE
+    if _API_BUNDLE is not None:
+        return _API_BUNDLE
     if not config.KIWOOM_APP_KEY or not config.KIWOOM_APP_SECRET:
         print("[ERROR] .env 에 KIWOOM_MOCK_APP_KEY / KIWOOM_MOCK_APP_SECRET 없음")
         sys.exit(1)
@@ -214,10 +226,21 @@ def get_api():
         sys.exit(1)
     base = get_base_url()
     tm = TokenManager()
-    tm.get_token()   # 토큰 발급 검증 (실패 시 예외)
+    # 첫 발급도 429 재시도 — 모의서버 순단으로 최초 발급이 429 날 수 있음(미접수라 안전).
+    for _i in range(3):
+        try:
+            tm.get_token()   # 토큰 발급 검증 (실패 시 예외)
+            break
+        except Exception as _e:
+            if "429" in str(_e) and _i < 2:
+                print(f"[kiwoom] 토큰 발급 429 — 재시도 {_i+1}/2 (3초 대기)")
+                time.sleep(3.0)
+                continue
+            raise
     print(f"[kiwoom] 토큰 발급 OK (env={config.KIWOOM_ENV}, {base})")
-    return KiwoomBundle(Order(base_url=base, token_manager=tm),
-                        Account(base_url=base, token_manager=tm))
+    _API_BUNDLE = KiwoomBundle(Order(base_url=base, token_manager=tm),
+                               Account(base_url=base, token_manager=tm))
+    return _API_BUNDLE
 
 
 def guard_mock_only():
@@ -1415,7 +1438,21 @@ def cmd_daily(mode=None):
             #   만기청산으로 비워진 슬롯의 신규 진입은 다음날 09:03 매수가 담당(2026-07-10 명확화).
             cmd_buy()
             # 오후 매수분 익절 지정가는 다음날 아침 cmd_place_targets 가 재발주(당일주문 곧 만료라 생략)
-    cmd_status()
+    # [2026-07-21] 매매(매도·매수·익절)는 위에서 이미 완료 — 마지막 잔고 스냅샷은 대시보드
+    # 표시용이라 여기서 실패해도 매매 결과엔 무영향. 크래시로 exit 1(무서운 '매매 크래시'
+    # 텔레그램)을 내지 않도록 비치명 처리하되, 실패 사실은 조용히 알린다(원장 자가치유는
+    # 다음 status/daily 실행이 재수행). 단, 매매 도중 실패는 위에서 정상 전파돼 여전히 경보.
+    try:
+        cmd_status()
+    except Exception as _e:
+        msg = (f"⚠ [키움] 매매는 완료됐으나 잔고 스냅샷 실패: {type(_e).__name__} "
+               "— 대시보드 표시만 지연(매매 영향 없음)")
+        print(msg)
+        try:
+            import notifier
+            notifier.safe_send(msg)
+        except Exception:
+            pass
 
 
 # ── 진입점 ────────────────────────────────────────────────────────────────────

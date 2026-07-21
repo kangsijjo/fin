@@ -573,6 +573,17 @@ def test_circuit_breaker_codes_threshold_and_fallback():
         kt.CIRCUIT_BREAKER_PCT = orig
 
 
+def test_kiwoom_get_api_memoized(monkeypatch):
+    """get_api() 는 프로세스당 1회만 토큰 발급 — 캐시가 있으면 즉시 반환(재발급 없음).
+    (2026-07-21 daily-am 토큰 429 크래시 회귀 방지: 매도·매수·익절·상태조회가 각각
+    get_api 를 불러 토큰을 여러 번 발급 → 모의서버 rate limit 429 로 cmd_status 즉사.)"""
+    import kiwoom_trader as kt
+    sentinel = object()
+    monkeypatch.setattr(kt, "_API_BUNDLE", sentinel)
+    # 캐시가 채워져 있으면 config/네트워크를 건드리지 않고 그대로 반환해야 한다.
+    assert kt.get_api() is sentinel
+
+
 def test_kis_order_candidates_strength_first_tv_fallback():
     """KIS 후보 정렬 — 강도 내림차순, 무기록은 tv순 뒤로. 필터(6.0 차단)는 미적용이므로
     낮은 강도도 '뒤로 밀릴 뿐' 제외되지 않는다."""
