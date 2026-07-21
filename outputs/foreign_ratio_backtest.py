@@ -29,6 +29,7 @@ from strategies.high52w_foreign import High52wForeignStrategy
 from strategies.foreign_high import ForeignHighStrategy
 from strategies.gc_foreign import GcForeignStrategy
 from strategies.foreign_ratio_high import ForeignRatioHighStrategy
+from strategies.foreign_inst_flow_ratio import ForeignInstFlowRatioStrategy
 
 STOCK_DB_CANDIDATES = [
     os.getenv("STOCK_DB", ""),
@@ -109,6 +110,19 @@ def main():
             ratio_n=20, ratio_delta_min=0.2, lookback_days=20, holding_days=20, use_market_filter=True)),
         ("[ratio] rn10 d0.1 h252", ForeignRatioHighStrategy(
             ratio_n=10, ratio_delta_min=0.1, lookback_days=252, holding_days=20)),
+        # ── 2단 전략(사용자 설계): 외국인+기관 순매수 top100 N일연속 → 지분율 2~3주 상승 ──
+        ("[2stage] t100 c5 up15 d0", ForeignInstFlowRatioStrategy(
+            top_n=100, flow_consec=5, ratio_up_days=15, ratio_delta_min=0.0, holding_days=20)),
+        ("[2stage] t100 c5 up15 d0.1", ForeignInstFlowRatioStrategy(
+            top_n=100, flow_consec=5, ratio_up_days=15, ratio_delta_min=0.1, holding_days=20)),
+        ("[2stage] t100 c5 up10 d0 both", ForeignInstFlowRatioStrategy(
+            top_n=100, flow_consec=5, ratio_up_days=10, ratio_delta_min=0.0,
+            both_positive=True, holding_days=20)),
+        ("[2stage] t50 c3 up15 d0.1", ForeignInstFlowRatioStrategy(
+            top_n=50, flow_consec=3, ratio_up_days=15, ratio_delta_min=0.1, holding_days=20)),
+        ("[2stage] t100 c5 up15 d0.1 MKT", ForeignInstFlowRatioStrategy(
+            top_n=100, flow_consec=5, ratio_up_days=15, ratio_delta_min=0.1,
+            use_market_filter=True, holding_days=20)),
     ]
 
     print(f"\n{'전략':28s} {'매매수':>7s} {'승률%':>7s} {'평균%':>7s} {'중앙%':>7s} {'최고%':>7s} {'최악%':>8s}")
@@ -120,21 +134,21 @@ def main():
         print(f"{label:28s} {m['n']:>7,} {m['win']:>7.1f} {m['avg']:>7.2f} "
               f"{m['med']:>7.2f} {m['best']:>7.1f} {m['worst']:>8.1f}")
 
-    # 요약: flow 평균 vs ratio 최고
-    flows = [m for l, m in rows if l.startswith("[flow]") and m["n"] > 0]
-    ratios = [(l, m) for l, m in rows if l.startswith("[ratio]") and m["n"] > 0]
+    # 요약: 최고 flow vs 최고 후보(ratio·2stage 통합)
+    flows = [(l, m) for l, m in rows if l.startswith("[flow]") and m["n"] > 0]
+    ratios = [(l, m) for l, m in rows
+              if (l.startswith("[ratio]") or l.startswith("[2stage]")) and m["n"] > 0]
     if flows and ratios:
-        flow_avg = sum(m["avg"] for m in flows) / len(flows)
-        flow_win = sum(m["win"] for m in flows) / len(flows)
+        # 공정 비교: 최고 ratio vs 최고 flow(‘평균 flow’와 비교하면 ratio 쪽에 유리하게 기울음).
+        # 배포 가치 판정은 '최고 flow 를 유의미하게(+0.3%p) 상회 + 표본 충분' 일 때만.
+        best_flow = max(flows, key=lambda x: x[1]["avg"])
         best_ratio = max(ratios, key=lambda x: x[1]["avg"])
-        print("\n── 요약 ──")
-        print(f"  flow 3전략 평균: 승률 {flow_win:.1f}% / 평균수익 {flow_avg:+.2f}%")
-        print(f"  ratio 최고({best_ratio[0]}): 승률 {best_ratio[1]['win']:.1f}% / "
-              f"평균수익 {best_ratio[1]['avg']:+.2f}% (표본 {best_ratio[1]['n']:,})")
-        verdict = ("지분율 방식이 우세 — 배포 검토 가치 있음"
-                   if best_ratio[1]["avg"] > flow_avg and best_ratio[1]["n"] >= 100
-                   else "지분율 방식이 baseline 을 못 넘음 — 배포 보류 권장")
-        print(f"  판정: {verdict}")
+        bf, br = best_flow[1], best_ratio[1]
+        print("\n── 요약(공정: 최고 vs 최고) ──")
+        print(f"  최고 flow ({best_flow[0]}): 승률 {bf['win']:.1f}% / 평균 {bf['avg']:+.2f}% / 중앙 {bf['med']:+.2f}% (n {bf['n']:,})")
+        print(f"  최고 ratio({best_ratio[0]}): 승률 {br['win']:.1f}% / 평균 {br['avg']:+.2f}% / 중앙 {br['med']:+.2f}% (n {br['n']:,})")
+        beats = br["avg"] > bf["avg"] + 0.3 and br["n"] >= 100
+        print(f"  판정: {'지분율이 최고 flow 를 유의미하게 상회 — 배포 검토' if beats else '지분율이 최고 flow 를 유의미하게 넘지 못함 — 배포 보류(기존 순매수 전략이 이미 동등 이상)'}")
 
 
 if __name__ == "__main__":
