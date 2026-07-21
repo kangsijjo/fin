@@ -112,6 +112,15 @@ def daily_data_job():
     _run_subprocess("KRX 수급(KIS) 수집",
                     [sys.executable, "-m", "src.collector.supply_demand"])
 
+    # 외국인 지분율(보유비중) 일별 누적 — AI 피처(2026-07-21, feature_spec.foreign_ratio).
+    # --backfill 은 일봉 달력의 '미수집 날짜'만 채운다(멱등·자가치유) → 평소엔 신규 1~2일치.
+    # pykrx 한도소진율 엔드포인트(KRX 로그인 .env 사용). 이 갱신이 없으면 지분율 피처가
+    # 2026-07-20 에 고착돼 라이브 추론(model_proba)이 스테일해짐(USE_AI=False 라 매매 무영향).
+    _run_subprocess("외국인 지분율 수집",
+                    [sys.executable,
+                     os.path.join(os.path.dirname(__file__), "foreign_ratio_collector.py"),
+                     "--backfill"])
+
     # 키움 수집은 여기서 하지 않는다 (2026-06-12 변경).
     # 키움 API 키를 다른 시스템과 공유 중이라 주중 사용 시 토큰/한도 충돌 우려
     # → 토요일 08:00 kiwoom_weekly_job 에서 주 1회 일괄 수집.
