@@ -16,8 +16,17 @@ v2 대비 변경:
 """
 
 import os
+import sys
 import sqlite3
 from datetime import datetime, timedelta
+
+# 콘솔 인코딩 방탄 — 기존 print 문의 em-dash(—) 등이 cp949 콘솔(nohup/파이프 리다이렉트)에서
+# UnicodeEncodeError 로 스크립트를 CSV 쓰기 직전에 죽이던 것 방지(2026-07-21 실사례).
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 import bisect
 import numpy as np
