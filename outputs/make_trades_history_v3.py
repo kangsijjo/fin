@@ -160,6 +160,25 @@ def load_supply_demand_db(con):
         return {}
 
 
+def load_foreign_ratio_db(con):
+    """stock.db foreign_ratio (2018~) → 외국인 지분율 시계열.
+    반환: {ticker: {"d": [...], "r": [...]} }  (2026-07-21 추가)
+    """
+    try:
+        df = pd.read_sql(
+            "SELECT date, ticker, holding_ratio FROM foreign_ratio ORDER BY ticker, date", con)
+        df["date"] = df["date"].astype(str).str.replace("-", "").str[:8]
+        df["ticker"] = df["ticker"].astype(str).str.zfill(6)
+        result = {}
+        for tk, g in df.groupby("ticker"):
+            result[tk] = {"d": g["date"].tolist(), "r": g["holding_ratio"].tolist()}
+        print(f"[foreign_ratio_db] {len(result):,}종목 로드 (2018~)")
+        return result
+    except Exception as e:
+        print(f"[foreign_ratio_db] 로드 실패(테이블 없음?): {e}")
+        return {}
+
+
 def load_tech_indicators_db(con):
     """stock.db korea_indicators → RSI / MACD hist / BB 위치 (사전 계산 기술지표).
     반환: {ticker: {"d":[], "rsi":[], "macd_h":[], "bb_pct":[]} }
@@ -245,6 +264,22 @@ def supply_features_db(sd_db, code, sig_date, days=5):
     return float(f_sum), float(i_sum)
 
 
+def foreign_ratio_features(fr_db, code, sig_date, chg_days=20):
+    """외국인 지분율 수준(%) + chg_days 영업일 변화(%p) at sig_date. (2026-07-21)"""
+    g = fr_db.get(code)
+    if not g:
+        return np.nan, np.nan
+    hi = bisect.bisect_right(g["d"], sig_date)   # sig_date 이하 마지막 위치 = hi-1
+    if hi <= 0:
+        return np.nan, np.nan
+    level = g["r"][hi - 1]
+    j = hi - 1 - chg_days
+    chg = (level - g["r"][j]) if j >= 0 and g["r"][j] is not None else np.nan
+    level = float(level) if level is not None else np.nan
+    chg = float(chg) if chg == chg else np.nan   # NaN 보존
+    return level, chg
+
+
 def tech_features(tech_db, code, sig_date):
     """RSI / MACD hist / BB 위치."""
     rsi    = _bisect_val(tech_db, code, sig_date, "rsi")
@@ -280,7 +315,7 @@ def main():
 
     # 3) 외부 피처 (stock.db)
     con = open_stock_db()
-    news_by_code, macro_ind, credit_db, sd_db, tech_db = None, None, {}, {}, {}
+    news_by_code, macro_ind, credit_db, sd_db, tech_db, fr_db = None, None, {}, {}, {}, {}
 
     if con is not None:
         # 뉴스 감성
@@ -303,6 +338,9 @@ def main():
 
         # 기술지표 DB
         tech_db = load_tech_indicators_db(con)
+
+        # 외국인 지분율 DB (2018~) — AI 피처 (2026-07-21)
+        fr_db = load_foreign_ratio_db(con)
 
     # 매크로 (stock.db + indicators.csv 병합)
     try:
@@ -343,6 +381,9 @@ def main():
         # 기술지표 DB
         rsi_db, macd_h_db, bb_pct_db = tech_features(tech_db, t.code, sd)
 
+        # 외국인 지분율 DB (AI 피처, 2026-07-21)
+        for_hold_ratio, for_ratio_chg20 = foreign_ratio_features(fr_db, t.code, sd)
+
         row = {
             "date": sd, "code": t.code, "strategy": sid,
             "entry_date": t.entry_date, "exit_date": t.exit_date,
@@ -361,6 +402,9 @@ def main():
             "rsi_db":       None if np.isnan(rsi_db) else round(rsi_db, 2),
             "macd_hist_db": None if np.isnan(macd_h_db) else round(macd_h_db, 4),
             "bb_pct_db":    None if np.isnan(bb_pct_db) else round(bb_pct_db, 4),
+            # 외국인 지분율 DB (AI 피처, 2026-07-21)
+            "for_hold_ratio":  None if np.isnan(for_hold_ratio) else round(for_hold_ratio, 4),
+            "for_ratio_chg20": None if np.isnan(for_ratio_chg20) else round(for_ratio_chg20, 4),
         }
         for k in feat_keys:
             v = sf.get(k)

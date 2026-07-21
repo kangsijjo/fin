@@ -378,6 +378,29 @@ class FactorScorer:
         except Exception as e:
             print(f"[FactorScorer] supply_demand 로드 실패: {e}")
 
+        # foreign_ratio (외국인 지분율, 2018~) — AI(xgboost) 피처(2026-07-21).
+        # score_ic(강도 5.7)의 IC_FEATURES 엔 일부러 미반영 — 강도 분포 안정 유지.
+        # 테이블 date 는 무대시 YYYYMMDD(수집기 저장 포맷) → date_str 과 직접 비교.
+        try:
+            _cut = (_dt.strptime(date_str, "%Y%m%d") - _td(days=45)).strftime("%Y%m%d")
+            fr = pd.read_sql(
+                "SELECT ticker, date, holding_ratio FROM foreign_ratio "
+                "WHERE date >= ? ORDER BY ticker, date", con, params=[_cut])
+            if len(fr) > 0:
+                fr["date"] = fr["date"].astype(str)
+                for code, g in fr.groupby("ticker"):
+                    g = g[g["date"] <= date_str].sort_values("date")
+                    if len(g) == 0:
+                        continue
+                    code = str(code).zfill(6)
+                    r = g["holding_ratio"].tolist()
+                    result.setdefault(code, {})
+                    result[code]["for_hold_ratio"] = float(r[-1])
+                    if len(r) > 20:
+                        result[code]["for_ratio_chg20"] = float(r[-1] - r[-21])
+        except Exception as e:
+            print(f"[FactorScorer] foreign_ratio 로드 실패: {e}")
+
         # korea_indicators
         try:
             ki = pd.read_sql(

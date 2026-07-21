@@ -43,6 +43,12 @@ ALL_FEATURES = [
     "rsi_db", "macd_hist_db", "bb_pct_db",
     # 키움 프로그램매매 (kiwoom_backfill merge 후 존재 — 없으면 자동 제외)
     "prm_net_5d_ratio",
+    # 외국인 지분율(보유비중) — foreign_ratio 테이블(2018~). 2026-07-21 추가.
+    #   독립 전략은 백테스트에서 엣지 없었으나(순수/2단 모두 기각), 모델이 가중치를
+    #   스스로 정하는 AI 피처로는 저위험 시도. ※ score_ic(강도 5.7)의 IC_FEATURES 에는
+    #   일부러 미반영 — 강도 분포 안정 유지(8월 재점검 약속). xgboost 학습 경로에만 투입.
+    "for_hold_ratio",      # 외국인 지분율 수준(%)
+    "for_ratio_chg20",     # 외국인 지분율 20영업일 변화(%p) = 매집 추세
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -58,6 +64,7 @@ FEATURE_GROUPS = {
     "supply_db":    ["for_net5_db", "ins_net5_db"],
     "tech_db":      ["rsi_db", "macd_hist_db", "bb_pct_db"],
     "program":      ["prm_net_5d_ratio"],
+    "foreign_ratio": ["for_hold_ratio", "for_ratio_chg20"],   # 외국인 지분율(2026-07-21)
 }
 
 # 전략 one-hot 피처 — 학습 데이터의 strategy 컬럼에서 생기는 더미(항상 포함).
@@ -82,6 +89,7 @@ FALLBACK_MODEL_ORDER = [
     "score_tv", "news_sent_7d", "news_cnt_7d", "vix", "vix_chg_5d", "sox_ret_5d",
     "usdkrw_chg_5d", "kospi_ret_20d", "for_net5_db", "ins_net5_db", "rsi_db",
     "macd_hist_db", "bb_pct_db", "prm_net_5d_ratio",
+    "for_hold_ratio", "for_ratio_chg20",
 ] + STRAT_FEATURES
 
 
