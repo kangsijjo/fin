@@ -20,10 +20,20 @@ factor_scorer.py — 다인수 팩터 점수 엔진
 """
 
 import os
+import sys
 import bisect
 import numpy as np
 import pandas as pd
 from datetime import datetime as _dt, timedelta as _td
+
+# 콘솔 인코딩 방탄 — IC 진단 print 의 em-dash(—)가 cp949 콘솔에서 UnicodeEncodeError 로
+# FactorScorer 초기화를 통째로 죽이던 것 방지(2026-07-21 실측). 강도 재계산 경로가
+# 이 초기화를 타므로 매매 중 크래시로 이어질 수 있어 방탄 추가.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 설정: 파일 경로

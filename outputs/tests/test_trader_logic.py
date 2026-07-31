@@ -573,22 +573,50 @@ def test_circuit_breaker_codes_threshold_and_fallback():
         kt.CIRCUIT_BREAKER_PCT = orig
 
 
-def test_strength_threshold_in_sync_across_accounts():
-    """양 계좌 강도 임계가 동일하고, 가상매매 시뮬도 같은 값을 쓰는지.
+def test_strength_thresholds_declared_per_account():
+    """계좌별 강도 임계가 '의도한 값'으로 고정돼 있는지 + 가상매매가 키움과 동기인지.
 
-    (2026-07-21 사용자 신고 회귀 방지: KIS 는 필터 자체가 없어 6 미만이 체결됐고,
-    키움은 5.7 인데 로그가 '< 6' 으로 표시돼 약속과 실제가 어긋나 있었다.
-    임계가 파일마다 따로 놀면 같은 사고가 재발하므로 계약으로 고정한다.)"""
+    (2026-07-21 사용자 신고 회귀 방지: KIS 는 필터 자체가 없어 6 미만이 전량 체결됐고,
+    키움은 5.7 인데 로그가 '< 6' 으로 표시돼 약속과 실제가 어긋나 있었다.)
+    계좌별로 값이 '다른 것'은 의도된 설계다 — KIS 는 신호 풀이 희소(월 14건)해 6.0 이면
+    사실상 매매 정지라 5.7. 다만 값이 조용히 표류하면 같은 사고가 재발하므로 못박는다."""
     import kiwoom_trader as kt
     import kis_trader as kx
 
-    assert kt.MIN_STRENGTH_SCORE == 6.0
-    assert kx.MIN_STRENGTH_SCORE == kt.MIN_STRENGTH_SCORE, "양 계좌 강도 임계 불일치"
+    assert kt.MIN_STRENGTH_SCORE == 6.0, "키움 강도 임계가 의도(6.0)와 다름"
+    assert kx.MIN_STRENGTH_SCORE == 5.7, "KIS 강도 임계가 의도(5.7)와 다름"
 
-    # 가상매매(strength 포트폴리오)도 라이브와 같은 임계를 써야 비교가 성립
+    # 가상매매(strength 포트폴리오)는 키움 라이브 룰을 미러링 → 같은 값이어야 비교 성립
     src = open(os.path.join(OUTPUTS, "ai_paper_trader.py"), encoding="utf-8").read()
     assert f'min_score={kt.MIN_STRENGTH_SCORE}' in src, \
-        "ai_paper_trader 의 strength 시뮬 min_score 가 라이브 임계와 불일치"
+        "ai_paper_trader 의 strength 시뮬 min_score 가 키움 라이브 임계와 불일치"
+
+
+def test_verify_strength_recovers_and_fails_closed(tmp_path, monkeypatch):
+    """매매 전 강도 재확인: 무기록이면 재계산 시도, 그래도 없으면 '무기록'으로 보고.
+
+    (2026-07-21 사용자 요청 "매매 시행 전 강도 재확인 후 매매" — 호출부는 무기록을
+    차단(fail-closed)하므로, 이 함수가 미확보분을 정확히 돌려주는 것이 안전의 핵심.)"""
+    import kiwoom_trader as kt
+
+    sigs = [{"code": "005930", "strategy": "rsi_reversal", "signal_date": "20260721"},
+            {"code": "000660", "strategy": "rsi_reversal", "signal_date": "20260721"}]
+
+    # (1) 전원 기록 있음 → 재계산 없이 그대로 통과, 미확보 0건
+    full = {("005930", "rsi_reversal"): 6.4, ("000660", "rsi_reversal"): 7.1}
+    out, missing = kt.verify_strength(sigs, dict(full))
+    assert missing == set() and out == full
+
+    # (2) 일부 무기록 + 재계산도 실패 → 그 항목이 '미확보'로 보고돼야(호출부가 차단)
+    def _boom(*a, **k):
+        raise RuntimeError("강도 로거 사용 불가(테스트)")
+    monkeypatch.setattr(kt, "_strength_map", lambda *a, **k: {("005930", "rsi_reversal"): 6.4})
+    import sys as _sys
+    monkeypatch.setitem(_sys.modules, "strength_logger",
+                        type("M", (), {"log_strength": staticmethod(_boom)}))
+    out2, missing2 = kt.verify_strength(sigs, {("005930", "rsi_reversal"): 6.4})
+    assert ("000660", "rsi_reversal") in missing2, "재계산 실패분이 미확보로 보고되지 않음"
+    assert ("005930", "rsi_reversal") not in missing2
 
 
 def test_kiwoom_get_api_memoized(monkeypatch):

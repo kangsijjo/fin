@@ -87,10 +87,14 @@ STRATEGY_STOP = {
 # 강도 필터(2026-07-21 신설, 사용자 결정) — score_ic(0~10)가 이 값 미만이면 매수 스킵.
 # 종전 KIS 는 강도로 '정렬만' 하고 차단은 안 해(표본 축적 우선) 6 미만도 전량 매수 후보였음
 # — 실제로 7월 KIS 신호 14건 중 6.0 이상은 1건뿐이라 대부분이 6 미만 체결(보유 092730
-# 네오팜 5.84 등). "모의계좌는 강도 6 이상만" 원칙을 양 계좌 통일 적용(키움도 6.0).
-# 고지된 단점: KIS 매수가 사실상 월 1건 수준으로 급감 → 표본 축적·재점검이 느려짐.
-# 키움과 동일하게 강도 기록 없는 신호는 통과(fail-open) — 기록 실패로 매매 전면 중단 방지.
-MIN_STRENGTH_SCORE = 6.0
+# 네오팜 5.84 등).
+# [KIS 는 5.7] 처음엔 양 계좌 6.0 통일이었으나 사용자 재검토로 KIS 만 5.7 로 조정 —
+# KIS 신호 풀이 월 14건 수준으로 희소해 6.0 이면 월 1건까지 줄어 사실상 매매 정지가 됨
+# (7월 소급: 6.0→1건 vs 5.7→3건). 키움은 신호가 월 595건이라 6.0 을 감당 가능.
+# ※ 계좌별 임계가 다르므로 계좌 간 성과 비교 시 이 차이를 감안할 것.
+# 강도 무기록 신호는 매수 전 '강도 재확인'에서 즉석 재계산 후에도 불가하면 차단(fail-closed,
+# 2026-07-21) — 종전 fail-open 이 6 미만 체결의 잔여 경로였음.
+MIN_STRENGTH_SCORE = 5.7
 
 
 # ── 환경변수 로드 ──────────────────────────────────────────────────────────────
@@ -906,6 +910,45 @@ def _strength_map(sigs):
         return {}
 
 
+def verify_strength(sigs, strength, account="KIS_안D"):
+    """[매매 전 사전점검] 강도 재확인 — 키움 verify_strength 와 동일 규약(2026-07-21).
+
+    무기록 후보가 있으면 strength_logger 로 즉석 재계산(로그 기록까지 되어 감사와 정합).
+    재계산 후에도 없으면 호출부가 차단(fail-closed).
+    반환: (갱신된 strength map, 여전히 무기록인 {(code, strategy)} 집합)
+    """
+    need = {(str(s.get("code", "")).zfill(6), str(s.get("strategy", ""))) for s in sigs}
+    missing = {k for k in need if k not in strength}
+    if not missing:
+        print(f"[verify] 강도 재확인 OK — 후보 {len(need)}건 전원 기록 확보")
+        return strength, set()
+
+    print(f"[verify] 강도 무기록 {len(missing)}건 — 즉석 재계산 시도(약 10초)")
+    try:
+        from strategies.daily_loader import load_macro_daily
+        import strength_logger
+        df = load_macro_daily()
+        last_date = str(sigs[0].get("signal_date", "")).replace("-", "")
+        strength_logger.log_strength(account, df, last_date, sigs, verbose=False)
+        strength = _strength_map(sigs)
+    except Exception as e:
+        print(f"[verify] 강도 재계산 실패: {e}")
+
+    still = {k for k in need if k not in strength}
+    if still:
+        msg = (f"⚠ [{account}] 강도 재확인 실패 {len(still)}건 — 해당 후보 매수 차단"
+               f"(fail-closed). 강도 로깅 점검 요망")
+        print(f"[verify] {msg}")
+        try:
+            import notifier
+            notifier.safe_send(msg)
+        except Exception:
+            pass
+    else:
+        print(f"[verify] 강도 재계산 완료 — 후보 {len(need)}건 전원 확보")
+    return strength, still
+
+
 def _order_candidates(cands, strength, tv_map, strat):
     """매수 후보 정렬 — 강도(score_ic) 내림차순, 무기록은 뒤에서 거래대금 내림차순.
 
@@ -995,6 +1038,19 @@ def cmd_buy():
     # 매수 예산 — 주문가능금액(가수도정산 포함) 우선(2026-07-07).
     # daily 는 09:01 에 매도 후 매수하는데, 매도대금(D+2 정산대기)은 dnca_tot_amt
     # (정산완료 예수금)에 안 잡혀 과소매수가 됨. API 가 orderable 을 안 주면 예수금 폴백.
+    # [매매 전 사전점검 ②] 잔고 재확인(2026-07-21) — 주문 직전 시점의 잔고를 다시 조회.
+    # daily-am 은 앞단 손절매도 체결이 뒤늦게 반영되므로 초기 조회값이 낡을 수 있다.
+    # 실패 시 기존 조회값 유지(보수적).
+    try:
+        _fresh = client.get_balance()
+        _sum = getattr(client, "last_summary", {}) or {}
+        _d2 = _to_int(_sum.get("deposit", deposit))
+        if _d2:
+            deposit = _d2
+        print(f"[verify] 잔고 재확인 OK — 예수금 {deposit:,}원 / 보유 {len(_fresh)}종목")
+    except Exception as e:
+        print(f"[verify] 잔고 재조회 실패({e}) — 직전 조회값으로 진행")
+
     _orderable = _to_int((getattr(client, "last_summary", {}) or {}).get("orderable", 0))
     buy_budget = _orderable if _orderable > 0 else deposit
     print(f"[buy] 오늘 신호 {len(sigs)}건  예수금 {deposit:,}원  주문가능 {buy_budget:,}원")
@@ -1025,7 +1081,9 @@ def cmd_buy():
         print(f"[buy] 후보 정렬: 강도(score_ic) 내림차순 — 기록 {len(strength)}건")
         print(f"[buy] 강도 필터: score_ic < {MIN_STRENGTH_SCORE} 스킵 예정 {n_weak}건")
     else:
-        print("[buy] 강도 기록 없음 — 거래대금순 폴백 + 강도 필터 미적용(fail-open)")
+        print("[buy] 강도 기록 없음 — 재확인 단계에서 재계산 시도")
+    # 매매 전 사전점검 ①: 강도 재확인(무기록이면 즉석 재계산, 그래도 없으면 차단)
+    strength, _unknown_strength = verify_strength(sigs, strength)
     sigs_by_strat = {k: [] for k in STRATEGY_PRIORITY}
     for sig in sigs:
         strat = str(sig.get("strategy", "h52w_for3d_mkt"))
@@ -1061,10 +1119,13 @@ def cmd_buy():
                 print(f"    [skip] {code} {name} — 이미 보유/주문됨")
                 continue
 
-            # 강도 필터(2026-07-21 신설) — score_ic < MIN_STRENGTH_SCORE 면 스킵.
-            # 기록 없으면 통과(fail-open, 키움과 동일 규약).
+            # 강도 필터(2026-07-21 신설) — 주문 직전 최종 게이트. verify_strength 가 이미
+            # 무기록을 재계산했으므로 여기서 None 이면 확인 불가로 차단(fail-closed).
             _sc = strength.get((code, str(sig.get("strategy", strat))))
-            if _sc is not None and _sc < MIN_STRENGTH_SCORE:
+            if _sc is None:
+                print(f"    [skip] {code} {name} — 강도 확인 불가(재계산 실패) → 차단")
+                continue
+            if _sc < MIN_STRENGTH_SCORE:
                 print(f"    [skip] {code} {name} — 강도 {_sc:.2f} < {MIN_STRENGTH_SCORE}")
                 continue
             # NaN 방어: 'close <= 0' 은 NaN 에서 False 라 통과 후 int(NaN) 크래시로
@@ -1085,6 +1146,14 @@ def cmd_buy():
             if qty < 1 or qty * close < MIN_ORDER_AMOUNT:
                 print(f"    [skip] {code} {name} — 예산 부족 ({budget:,.0f}원)")
                 continue
+
+            # 주문 직전 잔고 충분성 최종 확인(2026-07-21, 키움과 동일 규약)
+            _need = qty * close
+            if _need > remaining_dep:
+                print(f"    [skip] {code} {name} — 잔고 부족(필요 {_need:,.0f} > 잔여 {remaining_dep:,.0f})")
+                continue
+            print(f"    [verify] {code} {name} — 강도 {_sc:.2f} ≥ {MIN_STRENGTH_SCORE} / "
+                  f"잔여 {remaining_dep:,.0f} ≥ 주문 {_need:,.0f} → 주문 실행")
 
             try:
                 ono = client.order_buy(code, qty)

@@ -585,6 +585,48 @@ def _strength_map(sigs):
         return {}
 
 
+def verify_strength(sigs, strength, account="kiwoom_안C"):
+    """[매매 전 사전점검] 강도 재확인 — 후보 전원의 score_ic 가 확보됐는지 검증한다.
+
+    (2026-07-21 사용자 요청 "매매 시행 전 강도 재확인 후 매매")
+    무기록 후보가 있으면 그 자리에서 strength_logger 로 즉석 재계산한다(실측 6~10초 —
+    로그 기록까지 되므로 대시보드/감사와도 정합). 재계산 후에도 없으면 호출부가 차단
+    (fail-closed) — 종전엔 무기록이 무필터 통과(fail-open)라 6 미만 체결의 잔여 경로였음.
+
+    반환: (갱신된 strength map, 여전히 무기록인 {(code, strategy)} 집합)
+    """
+    need = {(str(s.get("code", "")).zfill(6), str(s.get("strategy", ""))) for s in sigs}
+    missing = {k for k in need if k not in strength}
+    if not missing:
+        print(f"[verify] 강도 재확인 OK — 후보 {len(need)}건 전원 기록 확보")
+        return strength, set()
+
+    print(f"[verify] 강도 무기록 {len(missing)}건 — 즉석 재계산 시도(약 10초)")
+    try:
+        from strategies.daily_loader import load_macro_daily
+        import strength_logger
+        df = load_macro_daily()
+        last_date = str(sigs[0].get("signal_date", "")).replace("-", "")
+        strength_logger.log_strength(account, df, last_date, sigs, verbose=False)
+        strength = _strength_map(sigs)      # 기록 후 재조회
+    except Exception as e:
+        print(f"[verify] 강도 재계산 실패: {e}")
+
+    still = {k for k in need if k not in strength}
+    if still:
+        msg = (f"⚠ [{account}] 강도 재확인 실패 {len(still)}건 — 해당 후보 매수 차단"
+               f"(fail-closed). 강도 로깅 점검 요망")
+        print(f"[verify] {msg}")
+        try:
+            import notifier
+            notifier.safe_send(msg)
+        except Exception:
+            pass
+    else:
+        print(f"[verify] 강도 재계산 완료 — 후보 {len(need)}건 전원 확보")
+    return strength, still
+
+
 def todays_signals():
     """원본 모드: '직전 영업일 신호'를 다음날 아침 매수 — 최신 macro 일자의 신호.
 
@@ -648,7 +690,9 @@ def cmd_buy():
                                       str(s.get("strategy", ""))), 99) < MIN_STRENGTH_SCORE)
         print(f"[buy] 강도 필터: score_ic < {MIN_STRENGTH_SCORE} 스킵 예정 {n_weak}건 / 기록 {len(strength)}건")
     else:
-        print("[buy] 강도 기록 없음 — 강도 필터 미적용(fail-open)")
+        print("[buy] 강도 기록 없음 — 재확인 단계에서 재계산 시도")
+    # 매매 전 사전점검 ①: 강도 재확인(무기록이면 즉석 재계산, 그래도 없으면 차단)
+    strength, _unknown_strength = verify_strength(sigs, strength)
 
     # ── 전략별 슬롯 현황 ──────────────────────────────────────────────────────
     # 원장(매수 당시 전략)으로 덮어씀 — '최신 신호' 전략맵은 보유 중 종목이 다른
@@ -693,6 +737,20 @@ def cmd_buy():
     for strat in STRATEGY_PRIORITY:
         sigs_by_strat[strat] = _order_candidates(sigs_by_strat[strat], strength, tv_map, strat)
 
+    # ── 매매 전 사전점검 ②: 잔고 재확인 ────────────────────────────────────
+    # (2026-07-21 사용자 요청) 매수 직전 시점의 실제 예수금을 다시 조회한다. cmd_buy
+    # 진입 후 슬롯·정렬 계산 사이에 시간이 흐르고, daily-am 은 앞단 손절매도 체결이
+    # 뒤늦게 반영될 수 있어 초기 조회값이 낡을 수 있다. 실패 시 초기값 유지(보수적).
+    try:
+        _dep2 = get_deposit(api)
+        if _dep2 != dep:
+            print(f"[verify] 잔고 재확인: 예수금 {_dep2:,}원 (직전 조회 {dep:,}원 → 갱신)")
+        else:
+            print(f"[verify] 잔고 재확인 OK — 예수금 {_dep2:,}원")
+        dep = _dep2
+    except Exception as e:
+        print(f"[verify] 잔고 재조회 실패({e}) — 직전 조회값 {dep:,}원으로 진행")
+
     # ── 우선순위대로 슬롯 채우기 ─────────────────────────────────────────────
     n_placed = 0
     remaining_dep = dep
@@ -724,9 +782,14 @@ def cmd_buy():
             if not (close > 0):
                 continue
 
-            # 강도 필터 — score_ic < 6.0 이면 스킵(기록 없으면 통과, 2026-07-02)
+            # 강도 필터 — 주문 직전 최종 게이트(2026-07-02 도입, 2026-07-21 fail-closed).
+            # verify_strength 가 이미 무기록을 재계산했다 → 여기서도 None 이면 확인 불가로
+            # 간주하고 차단한다(종전 fail-open 이 6 미만 체결의 잔여 경로였음).
             _sc = strength.get((code, strat))
-            if _sc is not None and _sc < MIN_STRENGTH_SCORE:
+            if _sc is None:
+                print(f"    [skip] {code} {name} — 강도 확인 불가(재계산 실패) → 차단")
+                continue
+            if _sc < MIN_STRENGTH_SCORE:
                 print(f"    [skip] {code} {name} — 강도 {_sc:.2f} < {MIN_STRENGTH_SCORE}")
                 continue
 
@@ -744,6 +807,15 @@ def cmd_buy():
             if qty < 1 or qty * close < MIN_ORDER_AMOUNT:
                 print(f"    [skip] {code} {name} — 예산 부족 ({budget:,.0f}원)")
                 continue
+
+            # 주문 직전 잔고 충분성 최종 확인(2026-07-21) — 슬롯 균등분배 예산은 계산값이라
+            # 반올림·앞선 체결로 실제 잔여를 넘어설 수 있다. 넘으면 주문하지 않는다.
+            _need = qty * close
+            if _need > remaining_dep:
+                print(f"    [skip] {code} {name} — 잔고 부족(필요 {_need:,.0f} > 잔여 {remaining_dep:,.0f})")
+                continue
+            print(f"    [verify] {code} {name} — 강도 {_sc:.2f} ≥ {MIN_STRENGTH_SCORE} / "
+                  f"잔여 {remaining_dep:,.0f} ≥ 주문 {_need:,.0f} → 주문 실행")
 
             try:
                 r = _order_with_retry(lambda: api.order.stock_buy_order_request_kt10000(
