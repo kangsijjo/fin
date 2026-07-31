@@ -1,5 +1,9 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
+REM [2026-07-21] Force UTF-8 for Python output. Without this the collector logs
+REM were written in CP949 and the dashboard tail (byte-sliced) could not decode
+REM them, showing thousands of replacement chars instead of Korean.
+set PYTHONIOENCODING=utf-8
 REM ============================================================
 REM  KRX credit + short balance auto-runner (T-1 data)
 REM ============================================================

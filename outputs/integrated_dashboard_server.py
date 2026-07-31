@@ -88,19 +88,44 @@ def safe_db(query, params=()):
         return []
 
 
+def _log_encoding(path, sample=65536):
+    """로그 파일의 인코딩을 '파일 선두'에서 판정한다.
+
+    [2026-07-21 한글깨짐 수정] 종전엔 tail 로 잘라낸 바이트 조각에 대고 utf-8→cp949
+    순으로 시도했는데, 조각의 시작이 문자 중간이면 **양쪽 다 실패**해 최후 폴백인
+    `utf-8 errors=replace` 가 파일 전체를 물음표로 만들었다(실측: collect 45KB 로그가
+    한글 22자 / 깨짐문자 4,502개). 파일 선두는 항상 문자 경계이므로 여기서 판정하면
+    조각 경계와 무관하게 정확하다. 판정 후엔 조각을 그 인코딩으로 replace 디코드 —
+    깨지는 건 경계의 한두 글자뿐이다.
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(sample)
+    except Exception:
+        return "utf-8"
+    if not head:
+        return "utf-8"
+    for cut in (0, 1, 2, 3):        # 샘플 끝에서 잘린 멀티바이트 문자 무시
+        try:
+            head[:len(head) - cut].decode("utf-8")
+            return "utf-8"
+        except UnicodeDecodeError:
+            continue
+    return "cp949"                  # utf-8 로 성립 불가 → 레거시 cp949 로그
+
+
+def _decode_log(raw: bytes, path) -> str:
+    """tail 바이트 조각 → 문자열 (파일 선두 기준 인코딩으로 안전 디코드)."""
+    return raw.decode(_log_encoding(path), errors="replace")
+
+
 def tail_log(path, n=60):
     """로그 파일 마지막 n줄을 문자열로 반환 (JS textContent 호환)."""
     if not Path(path).exists():
         return ""
     try:
         raw = Path(path).read_bytes()[-20000:]
-        # Windows 환경에서 CP949(EUC-KR) 로그 파일 대응 — UTF-8 먼저 시도
-        for enc in ("utf-8", "cp949"):
-            try:
-                return "\n".join(raw.decode(enc).strip().splitlines()[-n:])
-            except UnicodeDecodeError:
-                continue
-        return "\n".join(raw.decode("utf-8", errors="replace").strip().splitlines()[-n:])
+        return "\n".join(_decode_log(raw, path).strip().splitlines()[-n:])
     except Exception:
         return ""
 
@@ -1193,7 +1218,7 @@ def get_ai_status():
     _sch = _latest_log("collect_*.log")
     if _sch.exists():
         try:
-            log_txt = _sch.read_bytes()[-30000:].decode("utf-8", errors="replace")
+            log_txt = _decode_log(_sch.read_bytes()[-30000:], _sch)   # 인코딩 자동판정(2026-07-21)
             auc_m = re.findall(r"AUC[:\s=]+([0-9]+\.[0-9]+)", log_txt)
             if auc_m: model_info["auc"] = float(auc_m[-1])
         except Exception: pass
@@ -1674,13 +1699,9 @@ def api_logfile(name):
         raw = p.read_bytes()
         truncated = len(raw) > 500_000
         raw = raw[-500_000:]
-        for enc in ("utf-8", "cp949"):
-            try:
-                txt = raw.decode(enc); break
-            except UnicodeDecodeError:
-                continue
-        else:
-            txt = raw.decode("utf-8", errors="replace")
+        # [2026-07-21] 조각 경계에서 양쪽 디코드가 실패해 전체가 물음표가 되던 버그 —
+        # 파일 선두 기준으로 인코딩을 판정한 뒤 조각을 replace 디코드(_decode_log).
+        txt = _decode_log(raw, p)
         if truncated:
             txt = "...(앞부분 생략 — 최근 500KB만 표시)...\n" + txt
         return jsonify({"name": name, "content": txt, "kb": round(p.stat().st_size / 1024, 1)})
