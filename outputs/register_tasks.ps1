@@ -186,6 +186,19 @@ try {
         -Action $a11 -Trigger $t11 -Settings $s11 -Principal $principal -Force | Out-Null
     Write-Host "[OK] StockAI\AIPipeline (Sunday 03:00, gated: collect->dataset->train)" -ForegroundColor Green
 
+    # 11-b. Pre-market warmup (08:50): verify strength records (recompute if missing)
+    #       + warm API tokens so 09:01/09:03 traders fire immediately.
+    #       Balance is deliberately NOT pre-fetched (must follow the morning sells).
+    Write-Host "[11b] Registering pre-market warmup (08:50)..."
+    $a11b = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_pretrade_warmup.bat"
+    $t11b = New-ScheduledTaskTrigger -Weekly `
+                -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "08:50"
+    $s11b = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable `
+                -ExecutionTimeLimit (New-TimeSpan -Minutes 8)
+    Register-ScheduledTask -TaskName "StockAI\PretradeWarmup" `
+        -Action $a11b -Trigger $t11b -Settings $s11b -Principal $principal -Force | Out-Null
+    Write-Host "[OK] StockAI\PretradeWarmup (08:50 weekdays, strength+token prewarm)" -ForegroundColor Green
+
     # 12. Watchdog (silent-failure detector -> Telegram): problems-only at 07:45/09:20/18:50
     Write-Host "[12/13] Registering watchdog (3x daily checks)..."
     $a12  = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_watchdog.bat"
