@@ -53,8 +53,21 @@ set "EXITCODE=2"
 goto :report
 
 :run
+REM Retry loop (2026-07-21): transient API failures (token 429 on 07-21 09:03 etc.)
+REM killed runs. Re-run is SAFE: buys idempotent via db/kiwoom/orders_YYYYMMDD.csv
+REM (same-day same-code skip), sells recompute from broker positions.
+REM 2 retries, 5 min apart.
+set "TRIES=0"
+:attempt
+set /a TRIES+=1
 !PYEXE! kiwoom_trader.py !CMD! >> "!LOGFILE!" 2>&1
 set "EXITCODE=!ERRORLEVEL!"
+echo  attempt !TRIES! exit=!EXITCODE! (time: %TIME%) >> "!LOGFILE!"
+if !EXITCODE! NEQ 0 if !TRIES! LSS 3 (
+    echo  retry in 300s >> "!LOGFILE!"
+    ping 127.0.0.1 -n 301 > nul
+    goto :attempt
+)
 
 :report
 echo  Exit code: !EXITCODE! (time: %TIME%) >> "!LOGFILE!"

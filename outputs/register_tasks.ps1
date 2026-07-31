@@ -67,9 +67,13 @@ try {
     #    신설 + am/pm 명시 인자(지연복구 가드는 kis_trader.py daily-am/pm 내부).
     Write-Host "[5/6] Registering KIS trader (AM/PM split)..."
     Unregister-ScheduledTask -TaskName "KisTrader" -TaskPath "\StockAI\" -Confirm:$false -ErrorAction SilentlyContinue
+    # [2026-07-21] RestartOnFailure: bat 재시도 루프(5분x2)의 OS 레벨 백스톱 —
+    # bat 프로세스 자체가 못 뜨거나 강제종료돼 exit!=0 인 경우 스케줄러가 재시작.
+    # 매수는 orders CSV 멱등키, 매도는 재계산이라 재실행 안전(설계 확인됨).
     $s5  = New-ScheduledTaskSettingsSet `
                -MultipleInstances IgnoreNew `
                -StartWhenAvailable `
+               -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 5) `
                -ExecutionTimeLimit (New-TimeSpan -Hours 2)
     $a5a = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_kis_trader.bat" -Argument "am"
     $t5a = New-ScheduledTaskTrigger -Weekly `
@@ -140,6 +144,7 @@ try {
     $s9  = New-ScheduledTaskSettingsSet `
                -MultipleInstances IgnoreNew `
                -StartWhenAvailable `
+               -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 5) `
                -ExecutionTimeLimit (New-TimeSpan -Hours 2)
     $a9a = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_kiwoom.bat" -Argument "auto am"
     $t9a = New-ScheduledTaskTrigger -Weekly `
