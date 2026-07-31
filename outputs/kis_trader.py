@@ -84,6 +84,14 @@ STRATEGY_STOP = {
     "gc_for3d":       -0.26,
 }
 
+# 강도 필터(2026-07-21 신설, 사용자 결정) — score_ic(0~10)가 이 값 미만이면 매수 스킵.
+# 종전 KIS 는 강도로 '정렬만' 하고 차단은 안 해(표본 축적 우선) 6 미만도 전량 매수 후보였음
+# — 실제로 7월 KIS 신호 14건 중 6.0 이상은 1건뿐이라 대부분이 6 미만 체결(보유 092730
+# 네오팜 5.84 등). "모의계좌는 강도 6 이상만" 원칙을 양 계좌 통일 적용(키움도 6.0).
+# 고지된 단점: KIS 매수가 사실상 월 1건 수준으로 급감 → 표본 축적·재점검이 느려짐.
+# 키움과 동일하게 강도 기록 없는 신호는 통과(fail-open) — 기록 실패로 매매 전면 중단 방지.
+MIN_STRENGTH_SCORE = 6.0
+
 
 # ── 환경변수 로드 ──────────────────────────────────────────────────────────────
 def _load_dotenv(path=".env"):
@@ -904,7 +912,8 @@ def _order_candidates(cands, strength, tv_map, strat):
     [2026-07-10 도입 — 사용자 결정] 키움은 2026-07-06 tv순 역선택 진단(체결분 -3.3%p)
     으로 강도순 전환·실측 검증됨(≥6 평균 +1.90%). KIS 는 자체 표본이 13건뿐이라 통계
     확증은 불가하지만, 정렬은 후보>빈슬롯일 때만 작동하는 저위험 변경이라 대칭 적용.
-    ※ 키움의 MIN_STRENGTH_SCORE(6.0 미만 차단) 필터는 KIS 미도입 — KIS 표본 축적 후 결정."""
+    ※ 2026-07-21 부터 KIS 도 MIN_STRENGTH_SCORE(6.0) 차단 필터 적용 — 정렬은 그 후
+    통과분의 우선순위를 정한다(키움과 동일 구조)."""
     def _key(r):
         code = str(r.get("code", "")).zfill(6)
         sc = strength.get((code, str(r.get("strategy", strat))))
@@ -1010,9 +1019,13 @@ def cmd_buy():
     # 전략별 신호 분류 + 강도(score_ic) 내림차순, 무기록은 tv순 폴백(2026-07-10 전환)
     strength = _strength_map(sigs)
     if strength:
+        n_weak = sum(1 for s in sigs
+                     if (strength.get((str(s.get("code", "")).zfill(6),
+                                       str(s.get("strategy", "")))) or 99) < MIN_STRENGTH_SCORE)
         print(f"[buy] 후보 정렬: 강도(score_ic) 내림차순 — 기록 {len(strength)}건")
+        print(f"[buy] 강도 필터: score_ic < {MIN_STRENGTH_SCORE} 스킵 예정 {n_weak}건")
     else:
-        print("[buy] 강도 기록 없음 — 거래대금순 폴백")
+        print("[buy] 강도 기록 없음 — 거래대금순 폴백 + 강도 필터 미적용(fail-open)")
     sigs_by_strat = {k: [] for k in STRATEGY_PRIORITY}
     for sig in sigs:
         strat = str(sig.get("strategy", "h52w_for3d_mkt"))
@@ -1046,6 +1059,13 @@ def cmd_buy():
 
             if code in positions or code in already:
                 print(f"    [skip] {code} {name} — 이미 보유/주문됨")
+                continue
+
+            # 강도 필터(2026-07-21 신설) — score_ic < MIN_STRENGTH_SCORE 면 스킵.
+            # 기록 없으면 통과(fail-open, 키움과 동일 규약).
+            _sc = strength.get((code, str(sig.get("strategy", strat))))
+            if _sc is not None and _sc < MIN_STRENGTH_SCORE:
+                print(f"    [skip] {code} {name} — 강도 {_sc:.2f} < {MIN_STRENGTH_SCORE}")
                 continue
             # NaN 방어: 'close <= 0' 은 NaN 에서 False 라 통과 후 int(NaN) 크래시로
             # cmd_buy 전체가 죽음 — 'not (close > 0)' 은 NaN 도 걸러냄(2026-07-10)

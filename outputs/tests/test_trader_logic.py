@@ -573,6 +573,24 @@ def test_circuit_breaker_codes_threshold_and_fallback():
         kt.CIRCUIT_BREAKER_PCT = orig
 
 
+def test_strength_threshold_in_sync_across_accounts():
+    """양 계좌 강도 임계가 동일하고, 가상매매 시뮬도 같은 값을 쓰는지.
+
+    (2026-07-21 사용자 신고 회귀 방지: KIS 는 필터 자체가 없어 6 미만이 체결됐고,
+    키움은 5.7 인데 로그가 '< 6' 으로 표시돼 약속과 실제가 어긋나 있었다.
+    임계가 파일마다 따로 놀면 같은 사고가 재발하므로 계약으로 고정한다.)"""
+    import kiwoom_trader as kt
+    import kis_trader as kx
+
+    assert kt.MIN_STRENGTH_SCORE == 6.0
+    assert kx.MIN_STRENGTH_SCORE == kt.MIN_STRENGTH_SCORE, "양 계좌 강도 임계 불일치"
+
+    # 가상매매(strength 포트폴리오)도 라이브와 같은 임계를 써야 비교가 성립
+    src = open(os.path.join(OUTPUTS, "ai_paper_trader.py"), encoding="utf-8").read()
+    assert f'min_score={kt.MIN_STRENGTH_SCORE}' in src, \
+        "ai_paper_trader 의 strength 시뮬 min_score 가 라이브 임계와 불일치"
+
+
 def test_kiwoom_get_api_memoized(monkeypatch):
     """get_api() 는 프로세스당 1회만 토큰 발급 — 캐시가 있으면 즉시 반환(재발급 없음).
     (2026-07-21 daily-am 토큰 429 크래시 회귀 방지: 매도·매수·익절·상태조회가 각각

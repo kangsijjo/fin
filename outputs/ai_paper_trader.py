@@ -6,9 +6,9 @@ ai_paper_trader.py — AI/강도 '가상매매 실행' (순수 장부 시뮬 —
 
 두 포트폴리오(각 10슬롯 · 시작 1,000만 · 2026-06-30~):
   ai       : 당일 신호를 ai_prob(meta_model_v4 big-win 확률) 내림차순으로 슬롯 채움 (필터 없음)
-  strength : 동일 신호를 score_ic(IC 강도) 내림차순 + **5.7 미만 스킵**(라이브 키움 매수필터와
+  strength : 동일 신호를 score_ic(IC 강도) 내림차순 + **6.0 미만 스킵**(라이브 키움 매수필터와
              동일 — 슬롯 1순위여도 임계 미만이면 미진입, 2026-07-03 사용자 확인 반영.
-             2026-07-17 잣대 교체에 맞춰 6.0→5.7 재매핑 — kiwoom_trader.MIN_STRENGTH_SCORE 와 동기)
+             2026-07-21 사용자 결정으로 양 계좌 6.0 통일 — kiwoom/kis MIN_STRENGTH_SCORE 와 동기)
 → 실제 모의계좌(균등배분·거래대금순)와 3자 비교해 'AI/강도 선별이 돈이 되는가'를 실측.
 
 규약(paper_audit 과 동일 — 검증 패널과 비교 가능):
@@ -235,7 +235,7 @@ def main():
         "portfolios": {
             "ai":       simulate(sig, cal_all, cal, closes, "ai_prob"),
             # min_score 는 kiwoom_trader.MIN_STRENGTH_SCORE 와 동기 유지(라이브 룰 쌍둥이)
-            "strength": simulate(sig, cal_all, cal, closes, "score_ic", min_score=5.7),
+            "strength": simulate(sig, cal_all, cal, closes, "score_ic", min_score=6.0),
         },
     }
     os.makedirs("./db", exist_ok=True)
