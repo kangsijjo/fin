@@ -76,8 +76,13 @@ try {
                -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 5) `
                -ExecutionTimeLimit (New-TimeSpan -Hours 2)
     $a5a = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_kis_trader.bat" -Argument "am"
+    # [2026-07-21] 09:01 → 09:00 — 백테스트 진입가 가정은 '다음날 시가'인데 실제 체결은
+    # 개장 후라 그만큼 계통 오차가 난다(장 초반 변동성). 실측상 프로세스 시작 후 2~3초에
+    # 주문이 나가므로 09:00 트리거면 개장 직후 체결 = 시가에 최대한 근접.
+    # (08:50 예열로 토큰·강도가 준비돼 있어 지연 요소 없음. 장전 동시호가 진입은
+    #  모의서버 수용 여부 확인 후 별도 검토 — 06:33 실측은 'RC4057 장시작전' 거부였음)
     $t5a = New-ScheduledTaskTrigger -Weekly `
-               -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "09:01"
+               -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "09:00"
     # [2026-07-17] AtLogOn 트리거 제거 — 재부팅/절전복귀 로그온마다 매매 로직이 재점화
     # (12:36, 23:21 실사례). '09:01 놓침' 복구는 StartWhenAvailable 이 단독으로 담당하며
     # 정오/장외 가드는 kis_trader.py daily-am 내부에 있음.
@@ -147,8 +152,9 @@ try {
                -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 5) `
                -ExecutionTimeLimit (New-TimeSpan -Hours 2)
     $a9a = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_kiwoom.bat" -Argument "auto am"
+    # [2026-07-21] 09:03 → 09:00 (KIS 와 동일 사유 — 시가 근접). 브로커가 달라 API 경합 없음.
     $t9a = New-ScheduledTaskTrigger -Weekly `
-               -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "09:03"
+               -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "09:00"
     Register-ScheduledTask -TaskName "StockAI\KiwoomTraderAM" `
         -Action $a9a -Trigger $t9a -Settings $s9 -Principal $principal -Force | Out-Null
     $a9b = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_kiwoom.bat" -Argument "auto pm"

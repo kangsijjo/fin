@@ -119,6 +119,15 @@ def main():
             traceback.print_exc()
             problems.append(f"KIS 예열 예외({type(e).__name__})")
 
+    # 장전 동시호가 수용 여부 1회성 실측(결과 파일이 있으면 스스로 생략).
+    # 08:5X 진입이 가능하면 백테스트의 '시가 진입' 가정과 정확히 맞출 수 있어 확인 가치가 큼.
+    # 예열 성패와 무관하게 독립 실행 — 실패해도 매매에 영향 없음.
+    try:
+        import preopen_probe
+        preopen_probe.main()
+    except Exception as e:
+        print(f"[warmup] 장전 탐침 생략({type(e).__name__}: {e})")
+
     if problems:
         msg = "⚠ [사전예열 08:50] " + " / ".join(problems) + " — 장 시작 전 점검 요망"
         print(msg)
