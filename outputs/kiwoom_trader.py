@@ -722,7 +722,7 @@ def cmd_buy():
             # 강도 필터 — score_ic < 6.0 이면 스킵(기록 없으면 통과, 2026-07-02)
             _sc = strength.get((code, strat))
             if _sc is not None and _sc < MIN_STRENGTH_SCORE:
-                print(f"    [skip] {code} {name} — 강도 {_sc:.2f} < {MIN_STRENGTH_SCORE:.0f}")
+                print(f"    [skip] {code} {name} — 강도 {_sc:.2f} < {MIN_STRENGTH_SCORE}")
                 continue
 
             # 잔여 빈 슬롯 수로 예산 균등 분배 (각 전략의 실제 배정 수 반영)
