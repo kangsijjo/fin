@@ -32,7 +32,8 @@ except Exception:
     pass
 
 RESULT_PATH = "./db/preopen_probe_result.json"
-PROBE_CODE = "005930"          # 삼성전자 — 유동성 최상, 가격밴드 안정
+# 탐침 종목은 실행 시점에 유니버스 거래대금 1위로 자동 선택(_pick_probe_stock).
+# 하드코딩(005930)은 코스닥 전용 유니버스에서 항상 실패했음(2026-08-09 수정).
 PROBE_DISCOUNT = 0.71          # 전일종가 대비 −29% ≈ 하한가 근처(체결 불가)
 
 
@@ -46,34 +47,40 @@ def _tick(price):
     return p - (p % 1000)
 
 
-def _prev_close(code):
-    """최근 일봉 CSV 에서 전일 종가 — 하한가 근처 지정가 산출용."""
+def _pick_probe_stock():
+    """탐침 종목·전일종가 선택 — 최근 일봉 CSV 의 '거래대금 최상위' 종목을 쓴다.
+
+    [2026-08-09 수정] 종전엔 005930(삼성전자)을 하드코딩했는데, 이 시스템의 일봉
+    유니버스는 **코스닥 전용**(1,820종목)이라 조회가 항상 실패해 탐침이 매번
+    '전일 종가 조회 실패'로 중단됐다(08-06 실측). 유니버스 안에서 가장 유동성 높은
+    종목을 고르면 환경이 바뀌어도 깨지지 않는다.
+    반환: (code, prev_close) 또는 (None, None)
+    """
     import pandas as pd
     import glob
     files = sorted(glob.glob("./macro_data/daily/*.csv"))
     if not files:
-        return None
-    d = pd.read_csv(files[-1], encoding="utf-8-sig", dtype={"code": str})
-    d["code"] = d["code"].astype(str).str.zfill(6)
-    row = d[d["code"] == code]
-    if not len(row):
-        return None
-    for c in ("close", "종가", "Close"):
-        if c in d.columns:
-            try:
-                return float(row.iloc[0][c])
-            except Exception:
-                pass
-    return None
+        return None, None
+    try:
+        d = pd.read_csv(files[-1], encoding="utf-8-sig", dtype={"code": str})
+    except Exception:
+        return None, None
+    if "close" not in d.columns or "trading_value" not in d.columns or not len(d):
+        return None, None
+    d = d[(d["close"] > 1000) & (d["trading_value"] > 0)]      # 저가주 제외(호가단위 안정)
+    if not len(d):
+        return None, None
+    top = d.nlargest(1, "trading_value").iloc[0]
+    return str(top["code"]).zfill(6), float(top["close"])
 
 
-def probe_kiwoom(price):
+def probe_kiwoom(price, code):
     """키움: 지정가(trde_tp=0) 1주 매수 시도 → (수용여부, 메시지)."""
     import kiwoom_trader as kt
     api = kt.get_api()
     try:
         r = api.order.stock_buy_order_request_kt10000(
-            dmst_stex_tp="KRX", stk_cd=PROBE_CODE, ord_qty="1",
+            dmst_stex_tp="KRX", stk_cd=code, ord_qty="1",
             trde_tp="0", ord_uv=str(int(price)),
         )
         kt._assert_order_ok(r, "탐침매수")
@@ -83,7 +90,7 @@ def probe_kiwoom(price):
         return False, str(e)[:200]
 
 
-def probe_kis(price):
+def probe_kis(price, code):
     """KIS: 지정가(ORD_DVSN=00) 1주 매수 시도 → (수용여부, 메시지)."""
     import requests
     import kis_trader as kx
@@ -91,7 +98,7 @@ def probe_kis(price):
     try:
         # order_buy 와 동일 경로·TR, 다만 지정가(ORD_DVSN=00)+하한가 근처로 체결 차단
         body = {"CANO": kx._CANO, "ACNT_PRDT_CD": kx._ACNT_PRDT_CD,
-                "PDNO": PROBE_CODE, "ORD_DVSN": "00",
+                "PDNO": code, "ORD_DVSN": "00",
                 "ORD_QTY": "1", "ORD_UNPR": str(int(price))}
         hk = cl._hashkey(body)
         r = requests.post(
@@ -122,16 +129,16 @@ def main():
         print(f"[probe] 현재 {hm} — 장 시작 동시호가(08:30~09:00) 구간이 아니라 탐침 무의미. 종료")
         return
 
-    close = _prev_close(PROBE_CODE)
-    if not close:
-        print("[probe] 전일 종가 조회 실패 — 탐침 중단"); return
+    code, close = _pick_probe_stock()
+    if not code or not close:
+        print("[probe] 탐침 종목 선정 실패(일봉 데이터 없음) — 중단"); return
     price = _tick(close * PROBE_DISCOUNT)
-    print(f"[probe] {PROBE_CODE} 전일종가 {close:,.0f} → 지정가 {price:,}원(약 −29%, 체결불가) 1주로 탐침")
+    print(f"[probe] {code} 전일종가 {close:,.0f} → 지정가 {price:,}원(약 −29%, 체결불가) 1주로 탐침")
 
-    res = {"probed_at": now.strftime("%Y-%m-%d %H:%M:%S"), "price": price}
+    res = {"probed_at": now.strftime("%Y-%m-%d %H:%M:%S"), "code": code, "price": price}
     for label, fn in (("kiwoom", probe_kiwoom), ("kis", probe_kis)):
         try:
-            ok, msg = fn(price)
+            ok, msg = fn(price, code)
         except Exception as e:
             ok, msg = False, f"탐침 예외: {type(e).__name__}: {e}"[:200]
         res[label] = {"accepted": ok, "msg": msg}

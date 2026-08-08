@@ -1519,17 +1519,28 @@ def cmd_daily(mode=None):
     # 표시용이라 여기서 실패해도 매매 결과엔 무영향. 크래시로 exit 1(무서운 '매매 크래시'
     # 텔레그램)을 내지 않도록 비치명 처리하되, 실패 사실은 조용히 알린다(원장 자가치유는
     # 다음 status/daily 실행이 재수행). 단, 매매 도중 실패는 위에서 정상 전파돼 여전히 경보.
+    # [2026-08-09] 1회 재시도 + 원인 문구 포함.
+    # 종전엔 예외 '타입'만 알려(APIError) 원인을 알 수 없어 8월 간헐 실패(08-06 2회,
+    # 08-07 1회)를 사후 진단할 수 없었다. 스냅샷은 표시용이라 잠깐 쉬고 한 번 더
+    # 시도해도 매매에 영향이 없으므로, 일시적 레이트리밋/글리치는 재시도로 흡수한다.
     try:
         cmd_status()
-    except Exception as _e:
-        msg = (f"⚠ [키움] 매매는 완료됐으나 잔고 스냅샷 실패: {type(_e).__name__} "
-               "— 대시보드 표시만 지연(매매 영향 없음)")
-        print(msg)
+    except Exception as _e1:
+        print(f"    [warn] 잔고 스냅샷 1차 실패({type(_e1).__name__}: {_e1}) — 3초 후 재시도")
+        time.sleep(3.0)
         try:
-            import notifier
-            notifier.safe_send(msg)
-        except Exception:
-            pass
+            cmd_status()
+            print("    [ok] 잔고 스냅샷 재시도 성공")
+        except Exception as _e2:
+            msg = (f"⚠ [키움] 매매는 완료됐으나 잔고 스냅샷 실패(재시도 포함 2회): "
+                   f"{type(_e2).__name__}: {str(_e2)[:120]} "
+                   "— 대시보드 표시만 지연(매매 영향 없음)")
+            print(msg)
+            try:
+                import notifier
+                notifier.safe_send(msg)
+            except Exception:
+                pass
 
 
 # ── 진입점 ────────────────────────────────────────────────────────────────────
