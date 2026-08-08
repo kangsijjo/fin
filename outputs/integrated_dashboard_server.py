@@ -1987,6 +1987,13 @@ details.logdrop[open]>summary::before{content:"\\25BE  "}
 /* 정렬 가능한 표 헤더 */
 th.sortable{cursor:pointer;user-select:none;transition:color .2s}
 th.sortable:hover{color:#38bdf8}
+/* 표 필터(2026-08-09) — initTableFilter 가 표 위에 자동 삽입 */
+.tblfilter-wrap{display:flex;align-items:center;gap:8px;margin:2px 0 8px}
+input.tblfilter{flex:0 1 280px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;
+  border-radius:6px;padding:5px 10px;font-size:12px;font-family:inherit}
+input.tblfilter:focus{outline:none;border-color:#38bdf8}
+.tblfilter-cnt{font-size:11px;color:#64748b}
+.tblfilter-cnt.hit{color:#38bdf8}
 /* log pre */
 pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding:16px;font-size:12px;font-family:'JetBrains Mono',monospace;line-height:1.6;white-space:pre-wrap;word-break:break-all;max-height:480px;overflow-y:auto;color:#a1a1aa;box-shadow:inset 0 2px 4px rgba(0,0,0,.2)}
 /* file table */
@@ -3106,8 +3113,18 @@ function fillPreview(d){
 // 아래 목록에 id 만 추가하면 된다.
 // 대시보드는 5분마다 자동 재렌더(innerHTML 교체)되므로 MutationObserver 로 정렬을
 // 다시 적용한다. 재적용이 또 관찰을 부르는 무한루프는 _tblSorting 플래그로 차단.
-const SORTABLE_TBODIES = ['ch-signals','mock-orders','kis-orders','mock-pos','kis-pos'];
+// 정렬·필터 대상 표(각 탭 주요 표). 새 표는 여기에 id 만 추가하면 된다.
+const SORTABLE_TBODIES = [
+  'ov-cand',                        // 개요: 오늘의 후보
+  'ch-signals',                     // 천억이: 활성 신호
+  'mock-pos','mock-orders','mock-stratperf',   // 모의계좌(키움)
+  'kis-pos','kis-orders','kis-stratperf',      // 모의계좌(KIS)
+  'st-rows','st-bystrat','ap-pos',  // 강도매매
+  'sc-rows','bt-rows','lab-rows',   // 전략/백테스트/전략랩
+  'dl-files',                       // 데이터+로그: 파일 목록
+];
 const _tblSort = {};      // tbodyId -> {idx, asc}
+const _tblFilter = {};    // tbodyId -> 소문자 검색어
 let _tblSorting = false;
 
 function _cellKey(td){
@@ -3152,10 +3169,33 @@ function _markTblHeaders(tbl,id){
   });
 }
 
+// ── 필터: 표 위 검색창으로 행 숨기기(정렬과 독립적으로 동작) ──
+function _applyTblFilter(id){
+  const q=_tblFilter[id]||'';
+  const tb=document.getElementById(id); if(!tb) return;
+  let shown=0, total=0;
+  Array.from(tb.children).forEach(r=>{
+    if(r.tagName!=='TR') return;
+    if(r.children.length<=1) return;          // '데이터 없음' 안내행(colspan)은 대상 아님
+    total++;
+    const hit=!q||r.textContent.toLowerCase().includes(q);
+    r.style.display=hit?'':'none';            // 숨김만 — 정렬 로직은 그대로 유지됨
+    if(hit) shown++;
+  });
+  const cnt=document.getElementById('cnt-'+id);
+  if(cnt){
+    if(!q){ cnt.textContent=total?`${total}행`:''; cnt.className='tblfilter-cnt'; }
+    else { cnt.textContent=`${shown} / ${total}행 일치`;
+           cnt.className='tblfilter-cnt'+(shown?' hit':''); }
+  }
+}
+
 function initTableSort(){
   SORTABLE_TBODIES.forEach(id=>{
     const tb=document.getElementById(id); if(!tb) return;
     const tbl=tb.closest('table'); if(!tbl) return;
+
+    // ① 헤더 더블클릭 정렬
     tbl.querySelectorAll('thead th').forEach((th,i)=>{
       th.style.cursor='pointer';
       th.title='더블클릭: 오름차순 정렬 (한 번 더: 내림차순)';
@@ -3166,8 +3206,30 @@ function initTableSort(){
         _applyTblSort(id);
       });
     });
+
+    // ② 표 위에 필터 입력창 자동 삽입(HTML 수정 없이 모든 대상 표에 동일 적용)
+    if(!document.getElementById('flt-'+id)){
+      const wrap=document.createElement('div');
+      wrap.className='tblfilter-wrap';
+      const inp=document.createElement('input');
+      inp.type='search'; inp.className='tblfilter'; inp.id='flt-'+id;
+      inp.placeholder='필터 — 종목·전략·사유 등 아무 글자';
+      inp.autocomplete='off';
+      const cnt=document.createElement('span');
+      cnt.className='tblfilter-cnt'; cnt.id='cnt-'+id;
+      wrap.appendChild(inp); wrap.appendChild(cnt);
+      tbl.parentNode.insertBefore(wrap, tbl);
+      inp.addEventListener('input',()=>{
+        _tblFilter[id]=inp.value.trim().toLowerCase();
+        _applyTblFilter(id);
+      });
+    }
+
+    // ③ 자동 재렌더(5분) 후 정렬·필터 재적용
     new MutationObserver(()=>{
-      if(!_tblSorting&&_tblSort[id]) _applyTblSort(id);
+      if(_tblSorting) return;
+      if(_tblSort[id]) _applyTblSort(id);
+      _applyTblFilter(id);     // 필터는 표시 상태라 항상 재적용(행 수 표시 갱신 포함)
     }).observe(tb,{childList:true});
   });
 }
