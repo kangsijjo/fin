@@ -3099,8 +3099,82 @@ function fillPreview(d){
   ).join('');
 }
 
+// ── 표 정렬(헤더 더블클릭) ─────────────────────────────────────────────────
+// [2026-08-09 신설] 천억이 활성신호 / 모의계좌 매매내역·보유포지션 표를 정렬 가능하게.
+// 강도매매 표(sortSt)는 컬럼마다 onclick 을 배선하는 방식이라 표가 늘 때마다 손이 가서,
+// 여기서는 '헤더 위치(index)로 DOM 행을 정렬'하는 범용 방식을 쓴다 — 새 표가 생겨도
+// 아래 목록에 id 만 추가하면 된다.
+// 대시보드는 5분마다 자동 재렌더(innerHTML 교체)되므로 MutationObserver 로 정렬을
+// 다시 적용한다. 재적용이 또 관찰을 부르는 무한루프는 _tblSorting 플래그로 차단.
+const SORTABLE_TBODIES = ['ch-signals','mock-orders','kis-orders','mock-pos','kis-pos'];
+const _tblSort = {};      // tbodyId -> {idx, asc}
+let _tblSorting = false;
+
+function _cellKey(td){
+  const t=(td?td.textContent:'').trim();
+  if(!t||t==='-') return {n:null,s:''};
+  // "1,234" "+5.20%" "-12,345원" "6.11" 같은 표기를 숫자로 인식(빈칸·기호 제거)
+  const c=t.replace(/[,\s원주%]/g,'').replace(/^\+/,'');
+  const n=Number(c);
+  return (c!==''&&!isNaN(n))?{n:n,s:t}:{n:null,s:t};
+}
+
+function _applyTblSort(id){
+  const st=_tblSort[id]; if(!st) return;
+  const tb=document.getElementById(id); if(!tb) return;
+  const rows=Array.from(tb.children).filter(r=>r.tagName==='TR'&&r.children.length>st.idx);
+  if(rows.length<2) return;   // '데이터 없음' 안내행(colspan)은 자동 제외됨
+  const orig=rows.slice();
+  rows.sort((a,b)=>{
+    const A=_cellKey(a.children[st.idx]), B=_cellKey(b.children[st.idx]);
+    let c;
+    if(A.n!==null&&B.n!==null) c=A.n-B.n;                 // 숫자는 수치 비교
+    else if(A.n!==null) c=-1;                              // 숫자를 빈값보다 앞에
+    else if(B.n!==null) c=1;
+    else c=A.s.localeCompare(B.s,'ko');                    // 한글 사전순
+    return st.asc?c:-c;
+  });
+  // 이미 정렬된 상태면 DOM 을 건드리지 않는다 — MutationObserver 콜백은 '비동기'라
+  // 아래 _tblSorting 플래그만으로는 재귀를 막지 못한다(플래그가 false 로 돌아간 뒤
+  // 콜백이 실행 → 다시 정렬 → 또 콜백 … 무한루프로 탭이 멈춤. 2026-08-09 실측).
+  // 순서 변화가 없으면 변이도 없으므로 이 조건이 루프의 종료점이 된다.
+  if(rows.every((r,i)=>r===orig[i])) return;
+  _tblSorting=true;
+  rows.forEach(r=>tb.appendChild(r));
+  _tblSorting=false;
+}
+
+function _markTblHeaders(tbl,id){
+  const st=_tblSort[id];
+  tbl.querySelectorAll('thead th').forEach((th,i)=>{
+    if(th.dataset.orig===undefined) th.dataset.orig=th.textContent;
+    th.textContent=th.dataset.orig+((st&&st.idx===i)?(st.asc?' ▲':' ▼'):'');
+  });
+}
+
+function initTableSort(){
+  SORTABLE_TBODIES.forEach(id=>{
+    const tb=document.getElementById(id); if(!tb) return;
+    const tbl=tb.closest('table'); if(!tbl) return;
+    tbl.querySelectorAll('thead th').forEach((th,i)=>{
+      th.style.cursor='pointer';
+      th.title='더블클릭: 오름차순 정렬 (한 번 더: 내림차순)';
+      th.addEventListener('dblclick',()=>{
+        const cur=_tblSort[id];
+        _tblSort[id]=(cur&&cur.idx===i)?{idx:i,asc:!cur.asc}:{idx:i,asc:true};
+        _markTblHeaders(tbl,id);
+        _applyTblSort(id);
+      });
+    });
+    new MutationObserver(()=>{
+      if(!_tblSorting&&_tblSort[id]) _applyTblSort(id);
+    }).observe(tb,{childList:true});
+  });
+}
+
 window.addEventListener('load',()=>{
   load();
+  initTableSort();
   refreshLogFiles();
   setInterval(()=>{ if(document.visibilityState==='visible') load(); }, 300_000);
 });
