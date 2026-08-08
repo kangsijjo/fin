@@ -583,7 +583,7 @@ def test_strength_thresholds_declared_per_account():
     import kiwoom_trader as kt
     import kis_trader as kx
 
-    assert kt.MIN_STRENGTH_SCORE == 6.0, "키움 강도 임계가 의도(6.0)와 다름"
+    assert kt.MIN_STRENGTH_SCORE == 5.7, "키움 강도 임계가 의도(5.7)와 다름"
     assert kx.MIN_STRENGTH_SCORE == 5.7, "KIS 강도 임계가 의도(5.7)와 다름"
 
     # 가상매매(strength 포트폴리오)는 키움 라이브 룰을 미러링 → 같은 값이어야 비교 성립

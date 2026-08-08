@@ -838,9 +838,9 @@ _KW_STRATEGY_LABEL = {
 }
 _KW_STRATEGY_HOLD = {"high_52w_filt": 20, "rsi_reversal": 5, "rsi_vol": 7}
 _KW_ENTRY = {
-    "high_52w_filt": "종가 > 직전 252영업일 신고가(52주 돌파) + 시장강세 게이트(전종목 평균등락 60일MA>0) + 당일 거래대금 ≥ 30일평균 ×1.5 + 거래대금 ≥ 30억 + 강도(score_ic) ≥ 6.0 (2026-07-21 양 계좌 통일)",
-    "rsi_reversal":  "RSI(14) < 30 (과매도) + 거래대금 ≥ 10억 + 강도(score_ic) ≥ 6.0 (2026-07-21 양 계좌 통일)",
-    "rsi_vol":       "RSI(14) < 30 + 당일 거래대금 > 20일평균 ×2.0(거래량 급증) + 거래대금 ≥ 10억 + 강도(score_ic) ≥ 6.0 (2026-07-21 양 계좌 통일)",
+    "high_52w_filt": "종가 > 직전 252영업일 신고가(52주 돌파) + 시장강세 게이트(전종목 평균등락 60일MA>0) + 당일 거래대금 ≥ 30일평균 ×1.5 + 거래대금 ≥ 30억 + 강도(score_ic) ≥ 5.7 (2026-08-09 재조정)",
+    "rsi_reversal":  "RSI(14) < 30 (과매도) + 거래대금 ≥ 10억 + 강도(score_ic) ≥ 5.7 (2026-08-09 재조정)",
+    "rsi_vol":       "RSI(14) < 30 + 당일 거래대금 > 20일평균 ×2.0(거래량 급증) + 거래대금 ≥ 10억 + 강도(score_ic) ≥ 5.7 (2026-08-09 재조정)",
 }
 _KW_EXIT = {
     "high_52w_filt": "익절 +50% 장중 지정가(매일 아침 발주) 또는 진입 20영업일째 종가 (손절 없음)",
@@ -2531,7 +2531,7 @@ function fillOrders(elId, cntId, trades, total){
       <td class="r" style="font-size:12px;color:#cbd5e1">${bt}</td>
       <td class="r" style="font-size:12px;color:#cbd5e1">${st}</td>
       <td style="color:#94a3b8;font-size:12px">${t.strategy||''}</td>
-      <td class="r">${sc!=null?(sc>=6.0?'<b style="color:#10b981">'+sc+'</b>':sc):''}</td>
+      <td class="r">${sc!=null?(sc>=5.7?'<b style="color:#10b981">'+sc+'</b>':sc):''}</td>
       <td class="r">${fmt(t.qty)}</td>
       <td class="r">${fmt(t.buy_price)}</td>
       <td class="r">${t.open?'':fmt(t.sell_price)}</td>
@@ -2587,7 +2587,7 @@ function fillMock(mock, kis){
     setHtml('mock-pos', pos.length?pos.map(r=>{
       const ev=(r.evlt_amt!=null&&r.evlt_amt!=='')?r.evlt_amt:(Number(r.qty)||0)*(Number(r.cur_price||r.current_price)||0);
       return `<tr><td style="font-weight:500">${r.code||''} ${r.name||''}</td><td style="color:#94a3b8;font-size:12px">${r.strategy||''}</td>
-       <td class="r">${r.score_ic!=null?(r.score_ic>=6.0?'<b style="color:#10b981">'+r.score_ic+'</b>':r.score_ic):'-'}</td>
+       <td class="r">${r.score_ic!=null?(r.score_ic>=5.7?'<b style="color:#10b981">'+r.score_ic+'</b>':r.score_ic):'-'}</td>
        <td class="r">${fmt(r.qty)}</td><td class="r">${fmt(r.avg_price)}</td>
        <td class="r">${fmt(r.cur_price||r.current_price)}</td>
        <td class="r">${fmt(ev)}원</td>
@@ -2606,7 +2606,7 @@ function fillMock(mock, kis){
     setHtml('kis-pos', pos.length?pos.map(r=>{
       const ev=(r.evlt_amt!=null&&r.evlt_amt!=='')?r.evlt_amt:(Number(r.qty)||0)*(Number(r.cur_price||r.current_price)||0);
       return `<tr><td style="font-weight:500">${r.code||''} ${r.name||''}</td><td style="color:#94a3b8;font-size:12px">${r.strategy||''}</td>
-       <td class="r">${r.score_ic!=null?(r.score_ic>=6.0?'<b style="color:#10b981">'+r.score_ic+'</b>':r.score_ic):'-'}</td>
+       <td class="r">${r.score_ic!=null?(r.score_ic>=5.7?'<b style="color:#10b981">'+r.score_ic+'</b>':r.score_ic):'-'}</td>
        <td class="r">${fmt(r.qty)}</td><td class="r">${fmt(r.avg_price)}</td>
        <td class="r">${fmt(r.cur_price||r.current_price)}</td>
        <td class="r">${fmt(ev)}원</td>
@@ -2678,7 +2678,7 @@ function fillAiPaper(ap){
   const P=ap.portfolios;
   el.innerHTML=['ai','strength'].map(k=>{
     const p=P[k]; if(!p) return '';
-    const nm=k==='ai'?'🤖 AI(ai_prob·필터없음)':'💪 강도(score_ic≥6.0 — 라이브 룰)';
+    const nm=k==='ai'?'🤖 AI(ai_prob·필터없음)':'💪 강도(score_ic≥5.7 — 라이브 룰)';
     return `<div class="stat" style="min-width:260px">
       <div class="v ${clr(p.ret_pct)}" style="display:flex;align-items:baseline;gap:8px">${fmt(p.equity)}원 <span style="font-size:14px;font-weight:600">(${pct(p.ret_pct)})</span></div>
       <div class="l" style="margin-top:8px">${nm}<br><span style="color:#64748b;font-size:11px;text-transform:none">보유 ${p.n_pos} · 완료 ${p.n_trades}건${p.win_pct!=null?' · 승률 '+p.win_pct+'%':''}${p.avg_net!=null?' · 평균 '+pct(p.avg_net):''}</span></div>
