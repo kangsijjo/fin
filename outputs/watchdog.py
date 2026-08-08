@@ -257,6 +257,45 @@ def check_signals():
     return out
 
 
+def check_idle_buying(days=5):
+    """[2026-08-09 신설] '연속 N거래일 매수 0건'을 잡는다.
+
+    배경: 8월 초 강도 임계 6.0 이 5거래일 중 4일의 매수를 전부 차단해 계좌가 전액
+    현금이 됐는데 **경보가 한 건도 없었다**. 반대로 무해한 스냅샷 지연 같은 건 매번
+    시끄럽게 알렸다 — 정작 중요한 상태 변화를 놓치는 전형적 감시 공백이었다.
+    (임계가 시장에 비해 높거나, 신호 생성이 조용히 죽었거나, 예산이 0 일 때 걸린다.)
+
+    거래일 달력은 '트레이더 실행 로그'(kiwoom_YYYYMMDD.log — 매 거래일 생성)로 잡는다.
+    주문 CSV 는 주문이 있는 날에만 생기므로 그것만 세면 창이 실제보다 길어져 둔감해진다.
+    """
+    out = []
+    if not (IS_WEEKDAY and _after("09:30")):
+        return out
+    try:
+        # 최근 N 거래일(트레이더가 실제로 돈 날)
+        logs = sorted(glob.glob(os.path.join(_HERE, "logs", "kiwoom_*.log")))[-days:]
+        dates = [os.path.basename(f)[7:15] for f in logs
+                 if os.path.basename(f)[7:15].isdigit()]
+        if len(dates) < days:
+            return out                       # 이력이 짧으면 판정 보류
+        bought = 0
+        for d in dates:
+            p = os.path.join(_KIWOOM_DIR, f"orders_{d}.csv")
+            if not os.path.exists(p):
+                continue                     # 그날 주문 0건 = 매수도 0건
+            try:
+                with open(p, encoding="utf-8-sig") as fh:
+                    bought += sum(1 for ln in fh if ",buy," in ln)
+            except Exception:
+                return out                   # 읽기 실패 시 오탐 방지
+        out.append(("idle_buying", f"매수 활동(최근 {days}거래일)", bought > 0,
+                    f"{dates[0]}~{dates[-1]} 매수 0건 — 강도 임계가 시장 대비 높거나 "
+                    f"신호/예산 이상일 수 있음(현금 보유 상태). 의도한 것이면 무시"))
+    except Exception:
+        pass
+    return out
+
+
 def check_trading():
     """매매 작업 — 평일 09:10 이후, 오늘 kis/kiwoom 트레이더 로그가 있나.
 
@@ -308,6 +347,7 @@ def run_all_checks():
     results += check_signals()
     results += check_trading()
     results += check_snapshots()
+    results += check_idle_buying()     # 연속 매수 0건(2026-08-09 신설)
     return results
 
 

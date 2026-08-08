@@ -619,8 +619,11 @@ def verify_strength(sigs, strength, account="kiwoom_안C"):
 
     still = {k for k in need if k not in strength}
     if still:
-        msg = (f"⚠ [{account}] 강도 재확인 실패 {len(still)}건 — 해당 후보 매수 차단"
-               f"(fail-closed). 강도 로깅 점검 요망")
+        # [2026-08-09 문구 개선] 이건 '고장'이 아니라 안전장치가 의도대로 작동한 것 —
+        # 종전 문구("재확인 실패…점검 요망")가 사고처럼 읽혀 불필요한 불안을 줬다.
+        # 무슨 일이 있었고 조치가 필요한지를 분명히 쓴다.
+        msg = (f"ℹ️ [{account}] 강도 확인 안 된 후보 {len(still)}건은 안전하게 매수 제외했습니다"
+               f"(나머지 후보는 정상 진행). 매매 이상 아님 — 며칠 반복되면 강도 로깅 점검")
         print(f"[verify] {msg}")
         try:
             import notifier
@@ -1077,8 +1080,13 @@ def ensure_kiwoom_ledger(pos):
         if blind:   # '조용한 실패' 격상 — 빈 메타데이터 행은 만기·전략 추적이 안 됨(2026-07-11)
             try:
                 import notifier
-                notifier.safe_send(f"⚠ [키움 원장] 매수기록 없는 보유 치유 {blind} — "
-                                   f"신호일/전략 미상, 만기 추적 불가. 원장 수동 확인 필요")
+                # [2026-08-09 문구 개선] '치유'는 내부 용어라 사용자에겐 의미가 없다.
+                # 실제로 사람이 해야 할 일(수동 매도)이 있는 건이라 ⚠️ 유지하되 이유를 명시.
+                notifier.safe_send(
+                    f"⚠️ [키움] 매수 기록이 없는 보유 종목 발견: {blind}\n"
+                    f"  원장에 자동 등록했지만 진입일/전략을 몰라 **만기 자동매도가 안 됩니다**.\n"
+                    f"  조치: 대시보드에서 확인 후 직접 매도하거나 그대로 두셔도 됩니다"
+                    f"(다른 종목 매매엔 영향 없음).")
             except Exception:
                 pass
         if changed:
@@ -1537,9 +1545,11 @@ def cmd_daily(mode=None):
             cmd_status()
             print("    [ok] 잔고 스냅샷 재시도 성공")
         except Exception as _e2:
-            msg = (f"⚠ [키움] 매매는 완료됐으나 잔고 스냅샷 실패(재시도 포함 2회): "
-                   f"{type(_e2).__name__}: {str(_e2)[:120]} "
-                   "— 대시보드 표시만 지연(매매 영향 없음)")
+            # [2026-08-09 문구 개선] 매매는 끝난 뒤의 '표시용 조회' 실패다. 종전 문구가
+            # ⚠+"실패"로 시작해 매매 사고처럼 읽혔다 → 조치 불필요임을 앞에 명시.
+            msg = ("ℹ️ [키움] 매매는 정상 완료됐고, 잔고 화면 갱신만 실패했습니다"
+                   "(조치 불필요 — 다음 실행 때 자동으로 맞춰집니다).\n"
+                   f"  참고 원인: {type(_e2).__name__}: {str(_e2)[:100]}")
             print(msg)
             try:
                 import notifier

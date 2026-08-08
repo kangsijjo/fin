@@ -587,8 +587,11 @@ def ensure_kis_ledger(positions):
         if blind:   # '조용한 실패' 격상 — 빈 메타데이터 행은 stop_pct=None·만기 판정불가(2026-07-11)
             try:
                 import notifier
-                notifier.safe_send(f"⚠ [KIS 원장] 매수기록 없는 보유 치유 {blind} — "
-                                   f"전략/신호일 미상이라 손절·만기 추적 불가. 원장 수동 확인 필요")
+                notifier.safe_send(
+                    f"⚠️ [KIS] 매수 기록이 없는 보유 종목 발견: {blind}\n"
+                    f"  원장에 자동 등록했지만 진입일/전략을 몰라 **손절·만기 자동매도가 안 됩니다**.\n"
+                    f"  조치: 대시보드에서 확인 후 직접 매도하거나 그대로 두셔도 됩니다"
+                    f"(다른 종목 매매엔 영향 없음).")
             except Exception:
                 pass
         if changed:
@@ -936,8 +939,9 @@ def verify_strength(sigs, strength, account="KIS_안D"):
 
     still = {k for k in need if k not in strength}
     if still:
-        msg = (f"⚠ [{account}] 강도 재확인 실패 {len(still)}건 — 해당 후보 매수 차단"
-               f"(fail-closed). 강도 로깅 점검 요망")
+        # [2026-08-09 문구 개선] 키움과 동일 — 안전장치 정상 작동이지 고장이 아니다.
+        msg = (f"ℹ️ [{account}] 강도 확인 안 된 후보 {len(still)}건은 안전하게 매수 제외했습니다"
+               f"(나머지 후보는 정상 진행). 매매 이상 아님 — 며칠 반복되면 강도 로깅 점검")
         print(f"[verify] {msg}")
         try:
             import notifier
