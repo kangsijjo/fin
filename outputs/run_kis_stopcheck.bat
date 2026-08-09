@@ -8,7 +8,7 @@ set PYTHONIOENCODING=utf-8
 
 cd /d "%~dp0"
 
-REM -- 주말 스킵 --
+REM -- skip weekends --
 for /f %%I in ('powershell -NoProfile -Command "(Get-Date).DayOfWeek.value__"') do set "DOW=%%I"
 if "!DOW!"=="0" echo [SKIP] Sunday & endlocal & exit /b 0
 if "!DOW!"=="6" echo [SKIP] Saturday & endlocal & exit /b 0
@@ -21,7 +21,7 @@ for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format HHmm"') do set 
 if 1!HM! LSS 10900 echo [SKIP] before open & endlocal & exit /b 0
 if 1!HM! GTR 11530 echo [SKIP] after close & endlocal & exit /b 0
 
-REM -- 로그 --
+REM -- log --
 if not exist "C:\fin\logs" mkdir "C:\fin\logs"
 for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd"') do set "DT=%%I"
 set "LOGFILE=C:\fin\logs\kis_stop_%DT%.log"

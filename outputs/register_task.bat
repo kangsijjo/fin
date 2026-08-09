@@ -1,13 +1,13 @@
 @echo off
 REM ============================================================
-REM  Windows 작업 스케줄러에 자동 수집 작업 등록
+REM  Register the auto-collection task in Windows Task Scheduler
 REM
-REM  ★ 관리자 권한 cmd에서 실행하세요 ★
-REM     (이 파일 우클릭 → "관리자 권한으로 실행")
+REM  *** Run this from an ADMINISTRATOR cmd prompt ***
+REM     (right-click this file -> Run as administrator)
 REM
-REM  등록되는 작업:
-REM   1) 평일(월~금) 15:35에 자동 실행
-REM   2) 시스템 시작 후 3분 뒤 자동 실행
+REM  Tasks registered:
+REM   1) weekdays (Mon-Fri) at 15:35
+REM   2) 3 minutes after system startup
 REM ============================================================
 
 setlocal
@@ -16,7 +16,7 @@ set TASK_DAILY=KISDataCollector_Daily
 set TASK_STARTUP=KISDataCollector_Startup
 set BATPATH=%~dp0run_collector.bat
 
-REM 배치 파일 존재 확인
+REM verify the batch file exists
 if not exist "%BATPATH%" (
     echo [ERROR] run_collector.bat not found: %BATPATH%
     pause
@@ -29,7 +29,7 @@ echo  Batch file: %BATPATH%
 echo ============================================================
 echo.
 
-REM ---- 평일 15:35 트리거 ----
+REM ---- weekday 15:35 trigger ----
 echo [1/2] Registering weekday 15:35 task...
 schtasks /create /f ^
   /tn "%TASK_DAILY%" ^
@@ -44,7 +44,7 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 
-REM ---- 시스템 시작 시 트리거 (3분 지연) ----
+REM ---- at-startup trigger (3 min delay) ----
 echo.
 echo [2/2] Registering on-startup task...
 schtasks /create /f ^

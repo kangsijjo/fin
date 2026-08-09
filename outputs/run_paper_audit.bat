@@ -1,6 +1,6 @@
 @echo off
 :: run_paper_audit.bat
-:: 일요일 09:00 주간 수익 리포트 자동 실행 (작업 스케줄러 호출)
+:: Sunday 09:00 weekly P&L report (called by Task Scheduler)
 setlocal
 set PYTHONIOENCODING=utf-8
 if not exist C:\fin\logs mkdir C:\fin\logs

@@ -1,7 +1,7 @@
 @echo off
-REM run_watchdog.bat [--daily] - 조용한 실패 감지 → 텔레그램.
-REM   인자(--daily 등)는 watchdog.py 로 그대로 전달. --daily = 하루 마감 하트비트(정상이어도 전송).
-REM   예약: 평상시 3회(인자없음) + 23:00 1회(--daily). 자세한 설명은 watchdog.py 상단.
+REM run_watchdog.bat [--daily] - silent-failure detector -> Telegram.
+REM   Args pass through to watchdog.py. --daily = end-of-day heartbeat (sent even when healthy).
+REM   Schedule: 3x daily (no args) + 23:00 (--daily). See the watchdog.py header for details.
 setlocal EnableExtensions
 set PYTHONIOENCODING=utf-8
 cd /d "%~dp0"

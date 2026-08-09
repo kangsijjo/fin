@@ -1,21 +1,26 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
-REM [2026-07-21] Force UTF-8 for Python output. Without this the collector logs
-REM were written in CP949 and the dashboard tail (byte-sliced) could not decode
-REM them, showing thousands of replacement chars instead of Korean.
+REM ============================================================
+REM  Data collection batch (KIS_EOD 15:40 / KIS_Ranking 14:30)
+REM  Runs data_collector.py and appends output to logs\collect_YYYYMMDD.log
+REM
+REM  [2026-07-21] PYTHONIOENCODING: without it the collector wrote CP949 logs
+REM  and the dashboard tail (byte-sliced) could not decode them.
+REM  [2026-08-09] ASCII-ONLY. This file previously carried Korean REM comments
+REM  stored as CP949; re-saving it as UTF-8 made cmd.exe mis-parse whole lines
+REM  ("'ate).DayOfWeek...' is not recognized") so the weekend guard and the log
+REM  redirect silently broke. Keep every line ASCII - no Korean in .bat files.
+REM ============================================================
 set PYTHONIOENCODING=utf-8
-REM ============================================================
-REM  단타 박스권 매매 - 데이터 자동 수집 배치 (최적화 버전)
-REM ============================================================
 
 cd /d "%~dp0"
 set "EXITCODE=0"
 
-REM --- 요일과 날짜를 PowerShell 두 번 호출로 가져오기 (escape 안전) ---
+REM --- day-of-week and date via two PowerShell calls (escape-safe) ---
 for /f %%I in ('powershell -NoProfile -Command "(Get-Date).DayOfWeek.value__"') do set "DOW=%%I"
 for /f %%I in ('powershell -NoProfile -Command "(Get-Date).ToString('yyyyMMdd')"') do set "TODAY=%%I"
 
-REM --- 주말(토=6, 일=0) 차단 ---
+REM --- skip weekends (Sat=6, Sun=0) ---
 if "!DOW!"=="0" goto :weekend
 if "!DOW!"=="6" goto :weekend
 goto :weekday
@@ -31,7 +36,7 @@ set "LOGDIR=logs"
 if not exist "!LOGDIR!" mkdir "!LOGDIR!"
 set "LOGFILE=!LOGDIR!\collect_!TODAY!.log"
 
-REM --- 30일이 지난 오래된 로그 파일 자동 삭제 (유지보수 프리) ---
+REM --- delete log files older than 30 days (maintenance-free) ---
 Forfiles /P "!LOGDIR!" /M *.log /D -30 /C "cmd /c del @file" 2>nul
 
 echo. >> "!LOGFILE!"

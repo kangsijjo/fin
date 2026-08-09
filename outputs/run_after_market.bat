@@ -1,6 +1,6 @@
 @echo off
-REM run_after_market.bat [--probe] - 시간외 단일가 등락률 순위 수집 -> stock.db after_market 누적.
-REM 시간외 단일가(16:00~18:00) 종료 후 ~18:10 실행. 인자는 after_market.py 로 그대로 전달(--probe 등).
+REM run_after_market.bat [--probe] - after-hours single-price movers -> stock.db after_market.
+REM Runs ~18:10, after the 16:00-18:00 after-hours session. Args pass through to after_market.py.
 setlocal EnableExtensions
 set PYTHONIOENCODING=utf-8
 cd /d "%~dp0"

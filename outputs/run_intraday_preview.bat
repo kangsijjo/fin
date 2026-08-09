@@ -1,12 +1,12 @@
 @echo off
 :: run_intraday_preview.bat
-:: 장중 매시간 '잠정 예비후보' 미리보기 갱신(정보용, 매매 아님).
-:: intraday_preview.py -> pykrx 장중 잠정 OHLCV 로 신호조건 평가 -> db/kiwoom/intraday_preview.json
+:: Hourly intraday preview of provisional candidates (informational only, not trading).
+:: intraday_preview.py -> evaluates signal rules on provisional pykrx OHLCV -> db/kiwoom/intraday_preview.json
 setlocal EnableExtensions EnableDelayedExpansion
 set PYTHONIOENCODING=utf-8
 cd /d "%~dp0"
 
-REM -- 주말 스킵 --
+REM -- skip weekends --
 for /f %%I in ('powershell -NoProfile -Command "(Get-Date).DayOfWeek.value__"') do set "DOW=%%I"
 if "!DOW!"=="0" endlocal & exit /b 0
 if "!DOW!"=="6" endlocal & exit /b 0
@@ -28,7 +28,7 @@ echo [ERROR] python not found >> "%LOGFILE%"
 endlocal & exit /b 1
 
 :run
-REM 장중시황 2x6 그리드(키움 순위, 별도 프로세스) + 예비후보(pykrx) 순차 실행
+REM Market grid 2x6 (Kiwoom ranking, separate process) then the pykrx preview, in sequence
 !PYEXE! -u market_grid.py >> "%LOGFILE%" 2>&1
 !PYEXE! -u intraday_preview.py >> "%LOGFILE%" 2>&1
 set "EC=!ERRORLEVEL!"
