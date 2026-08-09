@@ -20,32 +20,43 @@ set "LOG=C:\fin\logs\ai_pipeline_%DT%.log"
 echo [%date% %time%] AI pipeline start >> "%LOG%"
 
 REM ---- single-instance guard: prevent concurrent collectors on the same DB/API ----
-REM [2026-07-12] stale-lock handling added: if a previous run was killed hard
-REM (3h ExecutionTimeLimit tree-kill, power loss), the lock survived forever and
-REM every Sunday 03:00 run skipped with exit 0 and NO alert -> model silently
-REM stale for weeks. Now: lock older than 6h = stale (delete + proceed); a real
-REM concurrent-run skip alerts via ci_gate notify-fail and exits 1 (visible).
+REM [2026-07-12] stale-lock handling added: a hard-killed run left the lock forever
+REM and every Sunday run skipped with exit 0 and NO alert -> model silently stale.
+REM [2026-08-09] ownership check added. The old version could not tell "another run
+REM is genuinely working" from "dead leftover", so ANY fresh lock was treated as a
+REM failure: exit 1 + a scary telegram, which also triggered the retry path and sent
+REM the alert twice (observed 08-09 08:56 while the 07:43 run was still collecting).
+REM Now the lock stores the owner PID:
+REM   owner alive      -> normal skip, exit 0, no alert (the work IS being done)
+REM   owner gone       -> reclaim the lock and proceed
+REM   older than 6h    -> reclaim regardless (guards against PID reuse)
+REM "training never ran" is detected by watchdog (last DONE age), not by this path.
 set "LOCK=C:\fin\logs\ai_pipeline.lock"
 set "PYEXE=%OUT%\.venv\Scripts\python.exe"
 if not exist "%PYEXE%" set "PYEXE=python"
+
+REM own PID = parent of the powershell we spawn (this cmd instance)
+set "MYPID="
+for /f %%P in ('powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter ('ProcessId=' + $PID)).ParentProcessId"') do set "MYPID=%%P"
+
 if exist "%LOCK%" (
-    set "STALE="
-    for /f "usebackq" %%S in (`powershell -NoProfile -Command "if ((New-TimeSpan -Start (Get-Item $env:LOCK).LastWriteTime -End (Get-Date)).TotalHours -gt 6) { 1 } else { 0 }"`) do set "STALE=%%S"
-    if "!STALE!"=="1" (
-        echo [WARN] stale lock ^(older than 6h^) - previous run died hard. Removing and proceeding. >> "%LOG%"
-        del "%LOCK%" 2>nul
-    ) else (
-        echo [SKIP] An AI pipeline run is already in progress.
-        echo        If you are SURE none is running, delete this file and retry:
-        echo        %LOCK%
-        echo [%date% %time%] SKIP - lock exists ^(fresh^) >> "%LOG%"
-        "%PYEXE%" "%OUT%\ci_gate.py" notify-fail "lock-skip" >> "%LOG%" 2>&1
+    REM HOLD=1 -> a live owner holds it (skip) / HOLD=0 -> reclaimable
+    set "HOLD="
+    for /f "usebackq" %%A in (`powershell -NoProfile -Command "$f=$env:LOCK; $age=(New-TimeSpan -Start (Get-Item $f).LastWriteTime -End (Get-Date)).TotalHours; $first=(Get-Content $f -TotalCount 1 -ErrorAction SilentlyContinue); if ($age -gt 6) { 0 } elseif ($first -match '^\d+$') { if (Get-Process -Id ([int]$first) -ErrorAction SilentlyContinue) { 1 } else { 0 } } else { 1 }"`) do set "HOLD=%%A"
+    if "!HOLD!"=="1" (
+        echo [SKIP] An AI pipeline run is already in progress - nothing to do.
+        echo        This is normal when a scheduled run overlaps a manual one.
+        echo [%date% %time%] SKIP - another run is active ^(owner alive^) >> "%LOG%"
         if /i not "%1"=="auto" pause
         endlocal
-        exit /b 1
+        exit /b 0
+    ) else (
+        echo [WARN] reclaiming lock - previous owner is gone or lock is stale. >> "%LOG%"
+        del "%LOCK%" 2>nul
     )
 )
-echo %DT% %time% > "%LOCK%"
+echo !MYPID!> "%LOCK%"
+echo %DT% %time%>> "%LOCK%"
 
 echo ============================================================
 echo  AI PIPELINE - detailed output goes to the LOG file below.

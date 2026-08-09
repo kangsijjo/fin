@@ -296,6 +296,38 @@ def check_idle_buying(days=5):
     return out
 
 
+def check_ai_pipeline(max_days=9):
+    """[2026-08-09 신설] AI 파이프라인이 '실제로 완주한 지' 며칠 됐나.
+
+    배경: 종전엔 락 스킵을 실패로 보고 매번 경보했는데, 정작 중요한 건 '스킵됐다'가
+    아니라 **학습이 오랫동안 완주하지 못하고 있다**는 사실이다. 스킵은 정상 상황
+    (정기 실행이 수동 실행과 겹침)에서도 나므로 경보로 쓰면 양치기 소년이 된다.
+    → 스킵은 조용히 넘기고(run_ai_pipeline.bat, exit 0), 여기서 '완주 이력'만 본다.
+    주간 실행(일요일 03:00)이므로 9일이면 한 주를 통째로 건너뛴 것.
+    """
+    out = []
+    try:
+        logs = sorted(glob.glob(os.path.join(_LOGS, "ai_pipeline_*.log")))
+        last_done = None
+        for f in reversed(logs):                 # 최신 로그부터 'DONE' 을 찾는다
+            try:
+                with open(f, encoding="utf-8", errors="replace") as fh:
+                    if "AI pipeline DONE" in fh.read():
+                        base = os.path.basename(f)          # ai_pipeline_YYYYMMDD_HHMM.log
+                        last_done = base[12:20]
+                        break
+            except Exception:
+                continue
+        if not last_done or not last_done.isdigit():
+            return out                            # 이력 없음 — 판정 보류(오탐 방지)
+        age = (TODAY - date(int(last_done[:4]), int(last_done[4:6]), int(last_done[6:8]))).days
+        out.append(("ai_pipeline", "AI 파이프라인 완주", age <= max_days,
+                    f"마지막 완주 {last_done} ({age}일 전) — 주간 학습이 건너뛰어지고 있음"))
+    except Exception:
+        pass
+    return out
+
+
 def check_trading():
     """매매 작업 — 평일 09:10 이후, 오늘 kis/kiwoom 트레이더 로그가 있나.
 
@@ -348,6 +380,7 @@ def run_all_checks():
     results += check_trading()
     results += check_snapshots()
     results += check_idle_buying()     # 연속 매수 0건(2026-08-09 신설)
+    results += check_ai_pipeline()     # 주간 학습 완주 이력(2026-08-09 신설)
     return results
 
 
