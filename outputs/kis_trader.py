@@ -370,7 +370,7 @@ class KISMockClient:
         r.raise_for_status()
         data = r.json()
         if data.get("rt_cd") != "0":
-            raise RuntimeError(f"매수 오류: {data.get('msg1','')}")
+            _raise_order_error("매수", data)
         return data.get("output", {}).get("odno", "")
 
     def order_sell(self, code: str, qty: int) -> str:
@@ -388,8 +388,61 @@ class KISMockClient:
         r.raise_for_status()
         data = r.json()
         if data.get("rt_cd") != "0":
-            raise RuntimeError(f"매도 오류: {data.get('msg1','')}")
+            _raise_order_error("매도", data)
         return data.get("output", {}).get("odno", "")
+
+
+class AccountBlocked(RuntimeError):
+    """계좌 자체가 주문을 받지 못하는 상태(모의계좌 만료·정지 등).
+
+    [2026-08-20 신설] 08-10 이후 모의계좌가 모든 주문을 msg_cd=40910000
+    '모의투자 주문이 불가한 계좌입니다' 로 거부했는데, 종목 단위 주문 실패와
+    똑같이 '[실패] …' 한 줄만 찍히고 exit 0 으로 끝나 열흘 동안 아무도 몰랐다.
+    그 사이 만기가 지난 017890 한국알콜이 청산되지 못하고 계속 보유됐다.
+    '이 종목이 안 되는 것'과 '계좌가 죽은 것'은 완전히 다른 사건이므로 타입을
+    분리해 긴급 경보로 승격한다.
+    """
+
+
+# 계좌 단위 치명 오류 판별 — 종목/가격/수량 사유(정상 거부)와 구분한다.
+#   msg_cd 40910000 : 모의투자 주문이 불가한 계좌입니다 (계좌 만료/정지)
+#   그 외 문구 매칭  : 코드 체계가 바뀌어도 잡히도록 보조
+_BLOCKED_MSG_CODES = {"40910000"}
+_BLOCKED_MSG_WORDS = ("주문이 불가한 계좌", "사용할 수 없는 계좌", "해지된 계좌",
+                      "정지된 계좌", "계좌가 없습니다")
+
+
+def _is_account_blocked(msg_cd: str, msg1: str) -> bool:
+    if str(msg_cd or "").strip() in _BLOCKED_MSG_CODES:
+        return True
+    m = str(msg1 or "")
+    return any(w in m for w in _BLOCKED_MSG_WORDS)
+
+
+def _raise_order_error(side: str, data: dict):
+    """주문 응답(rt_cd != 0)을 적절한 예외로 승격. 반드시 예외를 던진다."""
+    msg_cd = data.get("msg_cd", "")
+    msg1 = data.get("msg1", "")
+    if _is_account_blocked(msg_cd, msg1):
+        raise AccountBlocked(f"{side} 불가 — 계좌 상태 이상 [{msg_cd}] {msg1}")
+    raise RuntimeError(f"{side} 오류: {msg1}")
+
+
+def _alert_account_blocked(where: str, detail: str):
+    """계좌 주문불가를 긴급 등급으로 1회 통지(같은 실행 안에서는 중복 억제)."""
+    if getattr(_alert_account_blocked, "_sent", False):
+        return
+    _alert_account_blocked._sent = True
+    print(f"🚨 [KIS 계좌 주문불가] {where}: {detail}")
+    try:
+        import notifier
+        notifier.safe_send(
+            f"🚨 [KIS 안D] 계좌가 주문을 받지 못합니다 — {where}\n"
+            f"  {detail}\n"
+            f"  매수·매도 전부 거부됩니다(만기 청산 포함). 모의투자 계좌 기간만료/재발급 여부를\n"
+            f"  한국투자증권 오픈API 포털에서 확인해 주세요. 확인 전까지 KIS 매매는 사실상 정지 상태입니다.")
+    except Exception:
+        pass
 
 
 def _to_int(v, default=0):
@@ -883,7 +936,30 @@ def todays_signals():
     if target_raw == today_raw:
         return []
     print(f"[buy] 신호 기준일: {target}")
+    if not _signals_fresh(target_raw, "KIS 안D"):
+        return []
     return s[s["signal_date"] == target].to_dict("records")
+
+
+def _signals_fresh(latest_date, label):
+    """유니버스 신선도 게이트(키움과 동일 규약). 상세는 market_calendar 참조.
+
+    판정 실패 시 종전대로 진행(fail-open) — 달력 오류가 매매를 멈추면 안 된다.
+    """
+    try:
+        import market_calendar as mc
+        allowed, msg = mc.check_signal_freshness(latest_date, label)
+    except Exception as e:
+        print(f"[buy][warn] 유니버스 신선도 판정 생략({type(e).__name__}: {e})")
+        return True
+    if msg:
+        print(msg)
+        try:
+            import notifier
+            notifier.safe_send(msg)
+        except Exception:
+            pass
+    return allowed
 
 
 def _strength_map(sigs):
@@ -1046,12 +1122,16 @@ def cmd_buy():
     # daily-am 은 앞단 손절매도 체결이 뒤늦게 반영되므로 초기 조회값이 낡을 수 있다.
     # 실패 시 기존 조회값 유지(보수적).
     try:
-        _fresh = client.get_balance()
+        # [2026-08-20 버그수정] get_balance() 는 (예수금, 보유dict) 튜플을 반환하는데
+        # 종전엔 튜플 자체에 len() 을 씌워 **보유 종목 수가 항상 '2'로 찍혔다**
+        # (실보유 1종목인 날에도 "보유 2종목"). 아래 [보유 종목] 표시와 어긋나
+        # 로그를 읽는 사람이 잔고 불일치로 오해하던 원인.
+        _d2, _fresh_pos = client.get_balance()
         _sum = getattr(client, "last_summary", {}) or {}
-        _d2 = _to_int(_sum.get("deposit", deposit))
+        _d2 = _to_int(_sum.get("deposit", _d2 or deposit))
         if _d2:
             deposit = _d2
-        print(f"[verify] 잔고 재확인 OK — 예수금 {deposit:,}원 / 보유 {len(_fresh)}종목")
+        print(f"[verify] 잔고 재확인 OK — 예수금 {deposit:,}원 / 보유 {len(_fresh_pos)}종목")
     except Exception as e:
         print(f"[verify] 잔고 재조회 실패({e}) — 직전 조회값으로 진행")
 
@@ -1189,6 +1269,8 @@ def cmd_buy():
                 already.add(code)
             except Exception as e:
                 print(f"    [실패] {code} {name}: {e}")
+                if isinstance(e, AccountBlocked):
+                    _alert_account_blocked("신규 매수", str(e)[:160])
                 log_order({
                     "time": datetime.now().strftime("%H:%M:%S"), "side": "buy",
                     "code": code, "name": name, "strategy": strat,
@@ -1232,6 +1314,7 @@ def cmd_sell(reasons=("expire", "stop")):
     print(f"[sell] 청산 대상: 만기 {expire_n}건  stop발동 {stop_n}건  실제보유 {len(targets)}건")
 
     n_placed = 0
+    failures = []      # [(code, name, reason, msg)] — 청산 실패는 리스크 사건이라 집계
     for code in sorted(targets):
         qty    = positions[code]["qty"]
         name   = positions[code]["name"]
@@ -1259,6 +1342,9 @@ def cmd_sell(reasons=("expire", "stop")):
             n_placed += 1
         except Exception as e:
             print(f"  [실패] {code} {name}: {e}")
+            failures.append((code, name, reason, str(e)[:120]))
+            if isinstance(e, AccountBlocked):
+                _alert_account_blocked("만기/손절 청산", str(e)[:160])
             log_order({
                 "time": datetime.now().strftime("%H:%M:%S"), "side": "sell",
                 "code": code, "name": name, "strategy": strat,
@@ -1269,7 +1355,30 @@ def cmd_sell(reasons=("expire", "stop")):
         time.sleep(0.6)   # 주문 간 간격 — 초당한도 예방(2026-07-14, 키움 07-13 429 실사례 계열)
 
     print(f"[sell] 주문 {n_placed}건 완료")
+    # [2026-08-20] 청산 실패는 '보유가 계획 밖으로 연장되는' 리스크 사건이다.
+    # 종전엔 [실패] 한 줄만 찍고 exit 0 이라 08-11~08-19 만기 청산 실패가 조용히
+    # 반복됐다(한국알콜, 만기 초과 보유). 실패가 하나라도 있으면 반드시 알린다.
+    if failures:
+        _alert_sell_failures(failures)
     return sold_ok
+
+
+def _alert_sell_failures(failures):
+    """청산(만기·손절) 실패 통지. 계좌불가 경보가 이미 나갔으면 중복 발송하지 않는다."""
+    lines = [f"  {c} {n} — {r} 실패: {m}" for c, n, r, m in failures[:5]]
+    if len(failures) > 5:
+        lines.append(f"  … 외 {len(failures) - 5}건")
+    body = "\n".join(lines)
+    print(f"⚠ [KIS] 청산 실패 {len(failures)}건 — 계획 밖 보유 연장")
+    if getattr(_alert_account_blocked, "_sent", False):
+        return   # 원인(계좌불가)을 이미 긴급으로 알림 — 같은 사건 반복 알림 방지
+    try:
+        import notifier
+        notifier.safe_send(
+            f"🚨 [KIS 안D] 청산 실패 {len(failures)}건 — 만기/손절이 집행되지 않았습니다\n"
+            f"{body}\n  해당 종목은 계획보다 오래 보유 중입니다. 원인 확인 필요.")
+    except Exception:
+        pass
 
 
 def _wait_positions_clear(codes, max_wait=30, interval=4):

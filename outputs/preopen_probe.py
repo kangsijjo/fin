@@ -90,6 +90,30 @@ def probe_kiwoom(price, code):
         return False, str(e)[:200]
 
 
+def _is_fatal(label, msg):
+    """'시간대라서 거부'(정상 결과)와 '계좌/인증이 죽어서 거부'(사고)를 구분한다.
+
+    [2026-08-20 신설] 08-10 탐침에서 KIS 가
+      "거부: 40910000 모의투자 주문이 불가한 계좌입니다"
+    를 돌려줬는데, 탐침은 애초에 '거부되는 것이 정상'인 주문을 넣기 때문에 이걸
+    평범한 거부로 취급해 판정문을 '장전 동시호가 주문 수용: kiwoom' 으로 적고
+    끝냈다. 실제로는 그날부터 KIS 계좌가 매수·매도 전부를 거부하는 상태였고,
+    만기가 지난 보유 1종목이 열흘 동안 청산되지 못했다. 계좌 단위 사유는 별도로
+    분류해 긴급 경보로 올리고, 캐시도 무효화해 매일 다시 확인한다.
+    """
+    m = str(msg or "")
+    if label == "kis":
+        try:
+            import kis_trader as kx
+            return kx._is_account_blocked("", m)
+        except Exception:
+            pass
+    # 아래 문구 목록은 kis_trader._BLOCKED_MSG_WORDS 와 의도적으로 중복이다 —
+    # 탐침은 kis_trader 를 못 읽는 상황(자격증명 누락 등)에서도 판정해야 한다.
+    return any(w in m for w in ("주문이 불가한 계좌", "사용할 수 없는 계좌",
+                                "해지된 계좌", "정지된 계좌", "계좌가 없습니다"))
+
+
 def probe_kis(price, code):
     """KIS: 지정가(ORD_DVSN=00) 1주 매수 시도 → (수용여부, 메시지)."""
     import requests
@@ -119,9 +143,17 @@ def main():
     if os.path.exists(RESULT_PATH) and not force:
         with open(RESULT_PATH, encoding="utf-8") as f:
             prev = json.load(f)
-        print(f"[probe] 이미 실측됨({prev.get('probed_at')}) — 재탐침 생략. "
-              f"결과: {prev.get('verdict')}")
-        return
+        # 계좌 단위 사고가 기록돼 있으면 캐시를 신뢰하지 않는다 — 해소 여부를
+        # 매일 다시 확인해야 하고, 해소 전까지는 매일 다시 알려야 한다.
+        # fatal 키는 2026-08-20 신설 — 그 전 기록은 msg 를 다시 판정해 준다.
+        stale_fatal = [k for k in ("kiwoom", "kis")
+                       if prev.get(k, {}).get("fatal")
+                       or _is_fatal(k, prev.get(k, {}).get("msg", ""))]
+        if not stale_fatal:
+            print(f"[probe] 이미 실측됨({prev.get('probed_at')}) — 재탐침 생략. "
+                  f"결과: {prev.get('verdict')}")
+            return
+        print(f"[probe] 직전 기록에 계좌 이상({', '.join(stale_fatal)}) — 캐시 무시하고 재탐침")
 
     now = datetime.now()
     hm = now.strftime("%H:%M")
@@ -136,17 +168,24 @@ def main():
     print(f"[probe] {code} 전일종가 {close:,.0f} → 지정가 {price:,}원(약 −29%, 체결불가) 1주로 탐침")
 
     res = {"probed_at": now.strftime("%Y-%m-%d %H:%M:%S"), "code": code, "price": price}
+    fatal = []
     for label, fn in (("kiwoom", probe_kiwoom), ("kis", probe_kis)):
         try:
             ok, msg = fn(price, code)
         except Exception as e:
             ok, msg = False, f"탐침 예외: {type(e).__name__}: {e}"[:200]
-        res[label] = {"accepted": ok, "msg": msg}
-        print(f"[probe][{label}] {'수용' if ok else '거부'} — {msg}")
+        is_fatal = (not ok) and _is_fatal(label, msg)
+        res[label] = {"accepted": ok, "msg": msg, "fatal": is_fatal}
+        if is_fatal:
+            fatal.append(label)
+        mark = "계좌이상" if is_fatal else ("수용" if ok else "거부")
+        print(f"[probe][{label}] {mark} — {msg}")
 
     accepted = [k for k in ("kiwoom", "kis") if res.get(k, {}).get("accepted")]
     res["verdict"] = (f"장전 동시호가 주문 수용: {', '.join(accepted)}" if accepted
                       else "양 계좌 모두 장전 주문 거부 — 09:00 트리거 유지가 정답")
+    if fatal:
+        res["verdict"] += f"  ※ 계좌 주문불가: {', '.join(fatal)}"
     os.makedirs(os.path.dirname(RESULT_PATH), exist_ok=True)
     with open(RESULT_PATH, "w", encoding="utf-8") as f:
         json.dump(res, f, ensure_ascii=False, indent=2)
@@ -154,10 +193,17 @@ def main():
 
     try:
         import notifier
-        notifier.safe_send(
-            f"🔬 [장전 동시호가 탐침] {res['verdict']}\n"
-            f"  키움: {res['kiwoom']['msg'][:60]}\n  KIS: {res['kis']['msg'][:60]}\n"
-            f"  (체결불가 지정가 1주 — 미체결분은 장 마감 시 자동 실효)")
+        if fatal:
+            det = "\n".join(f"  {k}: {res[k]['msg'][:80]}" for k in fatal)
+            notifier.safe_send(
+                f"🚨 [탐침] 계좌가 주문을 받지 못합니다 — {', '.join(fatal)}\n{det}\n"
+                f"  이 계좌는 매수·매도 전부 거부됩니다(만기 청산 포함).\n"
+                f"  증권사 오픈API 포털에서 모의투자 계좌 기간만료/재발급을 확인해 주세요.")
+        else:
+            notifier.safe_send(
+                f"🔬 [장전 동시호가 탐침] {res['verdict']}\n"
+                f"  키움: {res['kiwoom']['msg'][:60]}\n  KIS: {res['kis']['msg'][:60]}\n"
+                f"  (체결불가 지정가 1주 — 미체결분은 장 마감 시 자동 실효)")
     except Exception:
         pass
 

@@ -436,8 +436,11 @@ def main():
                 con_db = _open_stock_db()
                 db_feats = scorer.prepare_db_features(con_db, last_date_str) if con_db else {}
                 for s in sig1[:15]:
+                    # strategy 전달 필수 — 빠지면 기본값(h500_40_MKT) 원-핫이 찍혀
+                    # 리포트의 AI 근거가 다른 전략 기준으로 계산된다(2026-08-20).
                     feats  = scorer.build_feature_vec(
-                        s["code"], price_feats, macro_feats, db_feats)
+                        s["code"], price_feats, macro_feats, db_feats,
+                        strategy=s.get("strategy") or "h500_40_MKT")
                     result = scorer.score(s["code"], s["name"], feats)
                     print(scorer.format_report(result))
                 if con_db:

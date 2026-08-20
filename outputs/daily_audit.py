@@ -161,7 +161,12 @@ if sig_logs:
     exit0 = "ExitCode=0" in txt
     m = re.search(r"합계\s+총\s+(\d+)건", txt)
     cnt = m.group(1) if m else "?"
-    chk(exit0, "오늘 live_signal 실행", f"신호 {cnt}건, " + ("정상종료" if exit0 else "비정상/미완료"))
+    # [2026-08-20 문구 수정] 이 숫자는 '전략이 뽑은 후보 수'이고, 하루요약의
+    # "오늘 신호 N건"은 '중복 제외 후 CSV 에 새로 저장된 수'다. 같은 메시지 안에서
+    # "신호 6건 정상종료" 와 "오늘 신호 0건" 이 나란히 찍혀 모순으로 읽혔다(08-14 실측).
+    saved = "저장 0건(전부 중복)" if "모두 중복 신호" in txt else "신규 저장분은 하루요약 참조"
+    chk(exit0, "오늘 live_signal 실행",
+        f"후보 {cnt}건 / {saved}, " + ("정상종료" if exit0 else "비정상/미완료"))
 else:
     chk(False, "오늘 live_signal 실행", "오늘 로그 없음 (18:30 전이거나 미실행)")
 

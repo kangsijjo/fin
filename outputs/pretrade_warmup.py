@@ -96,6 +96,24 @@ def warm_kis():
     return " / ".join(problems) if problems else None
 
 
+def _blocked_accounts():
+    """탐침 결과 파일에서 '계좌 주문불가' 로 판정된 계좌 라벨 목록."""
+    import json
+    import os
+    try:
+        import preopen_probe as pp
+        if not os.path.exists(pp.RESULT_PATH):
+            return []
+        with open(pp.RESULT_PATH, encoding="utf-8") as f:
+            res = json.load(f)
+        label = {"kiwoom": "키움 안C", "kis": "KIS 안D"}
+        return [label[k] for k in ("kiwoom", "kis")
+                if res.get(k, {}).get("fatal")
+                or pp._is_fatal(k, res.get(k, {}).get("msg", ""))]
+    except Exception:
+        return []
+
+
 def main():
     which = (sys.argv[1].lower() if len(sys.argv) > 1 else "both")
     print(f"=== 매매 사전 예열 {datetime.now():%Y-%m-%d %H:%M:%S} ({which}) ===")
@@ -127,6 +145,11 @@ def main():
         preopen_probe.main()
     except Exception as e:
         print(f"[warmup] 장전 탐침 생략({type(e).__name__}: {e})")
+
+    # [2026-08-20] 탐침이 계좌 주문불가를 잡아도 예열 요약은 '정상'이라고 찍혔다.
+    # 08-10 KIS 계좌 정지가 열흘간 '사전 예열 정상' 아래 묻힌 실사고 → 요약에 반영.
+    for acct in _blocked_accounts():
+        problems.append(f"{acct} 계좌 주문불가(매수·매도·만기청산 전부 거부)")
 
     if problems:
         msg = "⚠ [사전예열 08:50] " + " / ".join(problems) + " — 장 시작 전 점검 요망"

@@ -35,8 +35,12 @@ if not exist "!LOGDIR!" mkdir "!LOGDIR!"
 set "LOGFILE=!LOGDIR!\kiwoom_!TODAY!.log"
 Forfiles /P "!LOGDIR!" /M kiwoom_*.log /D -30 /C "cmd /c del @file" 2>nul
 
+REM [2026-08-20] AM and PM append to the SAME daily log. A delayed AM recovery can
+REM overlap the PM run, so "attempt 2" from one instance appeared right after
+REM "attempt 1 exit=0" of the other and read like a broken retry (08-14 confusion).
+REM Stamping the mode on every marker line makes interleaved runs readable.
 echo ============================================================ >> "!LOGFILE!"
-echo  Kiwoom start: %DATE% %TIME% >> "!LOGFILE!"
+echo  Kiwoom start [!CMD!]: %DATE% %TIME% >> "!LOGFILE!"
 echo ============================================================ >> "!LOGFILE!"
 
 if exist ".venv\Scripts\python.exe" (
@@ -62,15 +66,15 @@ set "TRIES=0"
 set /a TRIES+=1
 !PYEXE! kiwoom_trader.py !CMD! >> "!LOGFILE!" 2>&1
 set "EXITCODE=!ERRORLEVEL!"
-echo  attempt !TRIES! exit=!EXITCODE! (time: %TIME%) >> "!LOGFILE!"
+echo  [!CMD!] attempt !TRIES! exit=!EXITCODE! (time: %TIME%) >> "!LOGFILE!"
 if !EXITCODE! NEQ 0 if !TRIES! LSS 3 (
-    echo  retry in 300s >> "!LOGFILE!"
+    echo  [!CMD!] retry in 300s >> "!LOGFILE!"
     ping 127.0.0.1 -n 301 > nul
     goto :attempt
 )
 
 :report
-echo  Exit code: !EXITCODE! (time: %TIME%) >> "!LOGFILE!"
+echo  [!CMD!] Exit code: !EXITCODE! (time: %TIME%) >> "!LOGFILE!"
 echo Exit code: !EXITCODE!
 echo Log file: !LOGFILE!
 if /i not "%1"=="auto" pause

@@ -226,13 +226,18 @@ def _scheduler_process_alive():
 
 
 def check_data():
-    """데이터 신선도 — stock.db 6종. (주기별 임계: 일일 5~6, 뉴스 6, 신용 10)"""
+    """데이터 신선도 — stock.db 7종. (주기별 임계: 일일 5~6, 뉴스 6, 신용 10)"""
     con = _open_db()
     if con is None:
         return [("db_open", "stock.db", False, "DB 열기 실패")]
     out = []
     # (table, col, threshold, busday 기준 여부) — 일일 갱신 테이블은 영업일 기준(연휴 오탐 방지)
+    # [2026-08-20] korea_indicators 추가. 강도(score_ic) IC 상위 5개 중 3개
+    # (bb_pct_db 10.2% / rsi_db 9.4% / macd_hist_db 7.9% = 합계 27.5% 질량)가
+    # 오직 이 테이블에서 나오는데 감시 목록에 빠져 있어, 08-14 이후 정체된 것을
+    # 아무도 몰랐다. 이 테이블이 멎으면 강도가 통째로 눌려 매수가 조용히 멈춘다.
     specs = [("korea_stocks", "date", 5, True), ("supply_demand", "date", 5, True),
+             ("korea_indicators", "date", 5, True),
              ("usa_stocks", "date", 6, False), ("macro_indicators", "date", 6, False),
              ("credit_balance", "date", 10, False), ("news", "pubDate", 6, False)]
     for tbl, col, thr, use_bday in specs:
@@ -293,6 +298,41 @@ def check_idle_buying(days=5):
                     f"신호/예산 이상일 수 있음(현금 보유 상태). 의도한 것이면 무시"))
     except Exception:
         pass
+    return out
+
+
+def check_account_blocked(days=3):
+    """[2026-08-20 신설] '계좌 자체가 주문을 못 받는' 상태를 잡는다.
+
+    실사고: 08-10 부터 KIS 모의계좌가 msg_cd=40910000 '모의투자 주문이 불가한
+    계좌입니다' 로 매수·매도를 전부 거부했다. 종목 단위 주문 실패와 같은 모양의
+    '[실패] …' 한 줄만 남고 exit 0 이라 열흘간 감지되지 않았고, 그 사이 만기가
+    지난 보유 1종목이 청산되지 못한 채 남았다. 매수 0건(idle_buying)만으로는
+    '살 게 없어서'와 '살 수가 없어서'를 구분하지 못하므로 별도 감시가 필요하다.
+
+    판정: 최근 days 일치 트레이더 로그에 계좌 단위 거부 문구가 있으면 이상.
+    """
+    out = []
+    words = ("주문이 불가한 계좌", "사용할 수 없는 계좌", "해지된 계좌",
+             "정지된 계좌", "계좌가 없습니다")
+    recent = sorted(glob.glob(os.path.join(_LOGS, "kis_trader_*.log"))
+                    + glob.glob(os.path.join(_LOGS, "kis_stop_*.log"))
+                    + glob.glob(os.path.join(_HERE, "logs", "kiwoom_*.log")),
+                    key=os.path.getmtime)[-(days * 4):]
+    hits = []
+    for p in recent:
+        try:
+            txt = open(p, encoding="utf-8", errors="replace").read()
+        except Exception:
+            continue
+        if any(w in txt for w in words):
+            hits.append(os.path.basename(p))
+    if hits:
+        out.append(("account_blocked", "계좌 주문 가능 여부", False,
+                    f"주문 거부(계좌 단위) 로그 {len(hits)}건: {', '.join(hits[:3])} — "
+                    f"모의투자 계좌 기간만료/재발급 확인 필요. 매수·매도·만기청산 전부 불가"))
+    else:
+        out.append(("account_blocked", "계좌 주문 가능 여부", True, ""))
     return out
 
 
@@ -380,6 +420,7 @@ def run_all_checks():
     results += check_trading()
     results += check_snapshots()
     results += check_idle_buying()     # 연속 매수 0건(2026-08-09 신설)
+    results += check_account_blocked() # 계좌 자체 주문불가(2026-08-20 신설)
     results += check_ai_pipeline()     # 주간 학습 완주 이력(2026-08-09 신설)
     return results
 

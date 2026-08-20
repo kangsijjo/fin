@@ -664,7 +664,32 @@ def todays_signals():
     if target_raw == today_raw:
         return []
     print(f"[buy] 신호 기준일: {target}")
+    if not _signals_fresh(target_raw, "키움 안C"):
+        return []
     return s[s["signal_date"] == target].to_dict("records")
+
+
+def _signals_fresh(latest_date, label):
+    """유니버스 신선도 게이트. 밀렸으면 알리고, 심하면 매수를 막는다(2026-08-20).
+
+    latest_macro_date() 는 '폴더의 마지막 파일'일 뿐이라 수집이 밀리면 며칠 묵은
+    신호로 조용히 매수하게 된다. 상세 근거는 market_calendar 모듈 독스트링 참조.
+    판정 자체가 실패하면 종전대로 진행한다(fail-open — 달력 오류로 매매를 멈추지 않음).
+    """
+    try:
+        import market_calendar as mc
+        allowed, msg = mc.check_signal_freshness(latest_date, label)
+    except Exception as e:
+        print(f"[buy][warn] 유니버스 신선도 판정 생략({type(e).__name__}: {e})")
+        return True
+    if msg:
+        print(msg)
+        try:
+            import notifier
+            notifier.safe_send(msg)
+        except Exception:
+            pass
+    return allowed
 
 
 def cmd_buy():
@@ -1420,7 +1445,11 @@ def cmd_sell():
         # 오늘 산 물량까지 당일 청산해버림(2026-07-06 CJ ENM 실사례) → 당일 매수 코드는
         # 만기매도에서 제외(내일 이후 만기 로직이 다시 처리).
         print(f"[sell] 당일 매수 코드 만기매도 보류: {sorted((due | set(cb)) & bought_today)}")
-    print(f"[sell] 만기 {len(due)}종목 + 서킷브레이커 {len(cb)}종목 | 실제 보유 대상: {len(targets)}종목")
+    # [2026-08-20 문구 수정] 종전 "만기 680종목"은 '전 신호이력 중 만기가 지난 코드 수'
+    # 였는데 보유가 0인 날에도 680 이 찍혀 "680종목을 청산해야 하는데 못 했다"로 읽혔다.
+    # 실제 의미(청산 후보 목록 vs 실보유 교집합)를 문구에 드러낸다.
+    print(f"[sell] 만기 경과 코드 {len(due)}개(신호이력 누계) + 서킷브레이커 {len(cb)}개 "
+          f"→ 그중 실제 보유 = 청산 대상 {len(targets)}종목")
     if cb:
         try:
             import notifier
@@ -1431,6 +1460,7 @@ def cmd_sell():
         except Exception:
             pass
     n_placed = 0
+    failures = []      # [(code, name, msg)] — 청산 실패 집계(아래에서 긴급 통지)
     for code in sorted(targets):
         qty = pos[code]["qty"]
         name = pos[code]["name"]
@@ -1474,6 +1504,7 @@ def cmd_sell():
             n_placed += 1
         except Exception as e:
             print(f"  [실패] {code} {name}: {e}")
+            failures.append((code, name, str(e)[:120]))
             log_order({"time": datetime.now().strftime("%H:%M:%S"), "side": "sell",
                        "code": code, "name": name, "strategy": strat,
                        "qty": qty, "price": ref_px,
@@ -1481,6 +1512,20 @@ def cmd_sell():
                        "msg": (reason + " | " if reason else "") + str(e)[:180]})
         time.sleep(0.7)   # 주문 간 간격 — 연속 발사 시 429 예방(2026-07-14, 실사례 07-13)
     print(f"[sell] 주문 {n_placed}건 완료")
+    # [2026-08-20] 청산 실패 = 계획 밖 보유 연장(리스크 사건). 종전엔 [실패] 한 줄만
+    # 찍고 exit 0 이라 조용히 반복됐다(KIS 안D 에서 08-11~08-19 실사고). 반드시 알린다.
+    if failures:
+        _lines = [f"  {c} {n} — {m}" for c, n, m in failures[:5]]
+        if len(failures) > 5:
+            _lines.append(f"  … 외 {len(failures) - 5}건")
+        try:
+            import notifier
+            notifier.safe_send(
+                f"🚨 [키움 안C] 청산 실패 {len(failures)}건 — 만기/서킷브레이커 매도가 "
+                f"집행되지 않았습니다\n" + "\n".join(_lines) +
+                "\n  해당 종목은 계획보다 오래 보유 중입니다. 원인 확인 필요.")
+        except Exception:
+            pass
 
 
 def cmd_daily(mode=None):

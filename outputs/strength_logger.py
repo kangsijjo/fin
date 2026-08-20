@@ -194,8 +194,14 @@ def _build_rows(account, df, last_date, signals, *, verbose=True):
         feats = {}
         if scorer is not None:
             try:
+                # [2026-08-20 버그수정] strategy 를 넘기지 않아 build_feature_vec 이
+                # 기본값(h500_40_MKT) 원-핫을 찍었다 — rsi_vol 신호인데 factors_json 에
+                # strat_h500_40_MKT=1 이 들어가 model_proba(ai_prob)가 항상 '엉뚱한
+                # 전략'으로 추론됐다. score_ic 는 IC_FEATURES 만 쓰므로 강도는 무관하고,
+                # ai_prob(포워드 분석용 기록)만 오염돼 있었다.
                 feats = scorer.build_feature_vec(
-                    code, price_feats, macro_feats, db_feats) or {}
+                    code, price_feats, macro_feats, db_feats,
+                    strategy=strat or "h500_40_MKT") or {}
                 result = scorer.score(code, name, feats)
                 ic = result.get("ic", {}) or {}
                 score_ic = _clean(ic.get("total"))

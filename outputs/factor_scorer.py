@@ -45,6 +45,11 @@ MODEL_JSON     = os.path.join(_HERE, "ai_data", "meta_model_v4.json")
 FEATURES_CSV   = os.path.join(_HERE, "ai_data", "meta_model_v4.features.csv")
 MACRO_IND_CSV  = os.path.join(_HERE, "macro_data", "indicators.csv")
 
+# score_ic 의 available-only 정규화 하한(가용 IC 질량 비율).
+# 이 아래로 떨어지면 소수 피처가 점수 전체를 좌우하므로 전체 분모로 되돌린다
+# (= 점수가 5.0 쪽으로 눌려 매수가 막히는 안전한 방향). 상세는 score_ic 독스트링.
+MIN_IC_COVERAGE = 0.40
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 인간 친화적 피처 레이블 & IC 방향 힌트
 # (direction: +1이면 높을수록 유리, -1이면 높을수록 불리)
@@ -494,18 +499,40 @@ class FactorScorer:
         반환: {
           'total': float (0-10),
           'contributions': [(label, contrib_pts, pct_rank), ...]  # 절댓값 내림차순
-          'n_available': int  # 값 있는 피처 수
+          'n_available': int    # 값 있는 피처 수
+          'coverage': float     # 가용 IC 질량 / 전체 IC 질량 (0~1)
+          'normalized_on': 'available' | 'full'   # 실제 사용한 분모
         }
+
+        [2026-08-20] 분모를 '전체 IC 질량' → '해당 신호에서 실제로 값이 있는
+        피처의 IC 질량'으로 변경(available-only 정규화).
+
+          종전 분모는 IC_FEATURES 20개 전부를 기준으로 잡았는데, 라이브에서는
+          prm_net_5d_ratio(IC +0.141, 질량 10.7%)가 program_trading 테이블 부재로
+          항상 결측이고 rsi_db/macd_hist_db/bb_pct_db(합계 27.5%)도 korea_indicators
+          커버리지(1,345종목)에 걸려 절반 넘게 비었다. 결측 피처는 분자에 0을
+          기여하면서 분모만 키우므로 모든 라이브 강도가 5.0 쪽으로 눌렸다
+          (실측: 6~8월 1,405건 커버리지 평균 73.2%, std 0.57 / ≥5.7 통과 8.7%).
+          가용 질량으로 나누면 "아는 것만으로 판단한" 점수가 되어 왜곡이 사라진다
+          (동일 표본 std 0.76 / ≥5.7 통과 14.8%). 백테스트 최적 임계는 5.7 유지.
+
+          MIN_COVERAGE 가드: 가용 질량이 너무 적으면 소수 피처가 ±5점을 좌우해
+          과증폭된다. 그 경우엔 종전(전체 분모)으로 되돌려 점수를 5.0 쪽에 눌러
+          둔다 = 매수를 막는 안전한 방향. 실측 최소 커버리지가 48.6%이므로
+          평상시엔 발동하지 않는 안전망이다.
         """
         if not self.ic_weights:
-            return {"total": 5.0, "contributions": [], "n_available": 0}
+            return {"total": 5.0, "contributions": [], "n_available": 0,
+                    "coverage": 0.0, "normalized_on": "full"}
 
-        max_possible = sum(abs(ic) * 0.5 for ic in self.ic_weights.values())
-        if max_possible == 0:
-            return {"total": 5.0, "contributions": [], "n_available": 0}
+        full_mass = sum(abs(ic) * 0.5 for ic in self.ic_weights.values())
+        if full_mass == 0:
+            return {"total": 5.0, "contributions": [], "n_available": 0,
+                    "coverage": 0.0, "normalized_on": "full"}
 
-        contributions = []
-        n_avail = 0
+        # 1차 패스: 값이 있는 피처만 모으고 그 IC 질량을 누적
+        raw_parts = []          # (label, raw_contrib, pct_rank)
+        avail_mass = 0.0
 
         for feat, ic in self.ic_weights.items():
             val = feats.get(feat)
@@ -519,13 +546,19 @@ class FactorScorer:
 
             pct_rank = bisect.bisect_left(sorted_vals, val) / len(sorted_vals)
             # IC × (pct_rank - 0.5) : IC>0이고 상위 pct이면 양수 기여
-            raw_contrib = ic * (pct_rank - 0.5)
-            # 10점 척도로 변환
-            contrib_pts = raw_contrib / max_possible * 5.0
+            raw_parts.append((FEATURE_META.get(feat, (feat, 0))[0],
+                              ic * (pct_rank - 0.5), pct_rank))
+            avail_mass += abs(ic) * 0.5
 
-            label = FEATURE_META.get(feat, (feat, 0))[0]
-            contributions.append((label, contrib_pts, pct_rank))
-            n_avail += 1
+        coverage = avail_mass / full_mass
+        if avail_mass > 0 and coverage >= MIN_IC_COVERAGE:
+            denom, mode = avail_mass, "available"
+        else:
+            denom, mode = full_mass, "full"
+
+        # 2차 패스: 확정된 분모로 10점 척도 변환
+        contributions = [(label, raw / denom * 5.0, pct)
+                         for label, raw, pct in raw_parts]
 
         # 기여도 절댓값 내림차순 정렬
         contributions.sort(key=lambda x: abs(x[1]), reverse=True)
@@ -537,7 +570,9 @@ class FactorScorer:
         return {
             "total": round(total, 2),
             "contributions": contributions,
-            "n_available": n_avail,
+            "n_available": len(raw_parts),
+            "coverage": round(coverage, 4),
+            "normalized_on": mode,
         }
 
     # ─────────────────────────────────────────────────────────────────────

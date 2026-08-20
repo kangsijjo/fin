@@ -29,6 +29,20 @@ if "!DOW!"=="6" (
     exit /b 0
 )
 
+REM -- [2026-08-20] log rotation. This was the ONLY daily log with no cleanup:
+REM    a single tick_collector.log had grown to 229 MB ("[DB] 1 tick stored" per
+REM    line, every trading day since June, never rotated). Every other runner
+REM    uses dated files + Forfiles. Roll over past 20 MB, keep 5 generations.
+if exist "logs\tick_collector.log" (
+    for /f %%S in ('powershell -NoProfile -Command "(Get-Item 'logs\tick_collector.log').Length"') do set "LOGSZ=%%S"
+    if !LOGSZ! GTR 20971520 (
+        for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmm"') do set "RSTAMP=%%I"
+        move /y "logs\tick_collector.log" "logs\tick_collector_!RSTAMP!.log" >nul 2>&1
+        echo [%date% %time%] [rotate] previous log archived as tick_collector_!RSTAMP!.log >> logs\tick_collector.log
+    )
+)
+Forfiles /P "logs" /M tick_collector_*.log /D -14 /C "cmd /c del @file" 2>nul
+
 echo [%date% %time%] tick collector scheduler start >> logs\tick_collector.log
 
 if exist ".venv\Scripts\python.exe" (

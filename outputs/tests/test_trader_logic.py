@@ -677,3 +677,110 @@ def test_realized_pnl_fifo_and_close_backfill(monkeypatch):
     assert tp["pnl"] == "" and tp["pnl_pct"] == ""     # 발주 행은 손익 미부여
     for _, b in out[out["side"] == "buy"].iterrows():
         assert b["pnl"] == ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 유니버스 신선도 게이트 (market_calendar) — 2026-08-20 신설
+#   실사고: latest_macro_date() 는 '폴더의 마지막 파일'일 뿐이라 수집이 밀리면
+#   며칠 묵은 신호로 조용히 매수한다. 주말·휴장일을 stale 로 오판하면 반대로
+#   멀쩡한 매매를 막으므로 두 방향 모두 못박는다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_universe_gap_ignores_weekend_and_holiday_marker(tmp_path):
+    import market_calendar as mc
+    d = str(tmp_path)
+    (tmp_path / "20260814.csv").write_text("x", encoding="utf-8")       # 금
+    (tmp_path / "20260817.csv.holiday").write_text("", encoding="utf-8")  # 대체휴일
+
+    # 금 → 화(주말 + 휴장일 마커) = 빠진 거래일 없음
+    assert mc.universe_gap("20260814", "20260818", d) == (0, [])
+    assert mc.check_signal_freshness("20260814", "T", "20260818", d) == (True, None)
+
+    # 마커가 없으면 그 평일은 '빠진 거래일'
+    (tmp_path / "20260817.csv.holiday").unlink()
+    n, missing = mc.universe_gap("20260814", "20260818", d)
+    assert (n, missing) == (1, ["20260817"])
+
+
+def test_signal_freshness_warns_then_blocks(tmp_path):
+    import market_calendar as mc
+    d = str(tmp_path)
+    (tmp_path / "20260814.csv").write_text("x", encoding="utf-8")
+    (tmp_path / "20260817.csv.holiday").write_text("", encoding="utf-8")
+
+    # 1거래일 지연 → 경고하되 매수는 진행
+    ok, msg = mc.check_signal_freshness("20260814", "T", "20260819", d)
+    assert ok is True and msg and "1거래일" in msg
+
+    # 2거래일 지연 → 매수 차단
+    ok, msg = mc.check_signal_freshness("20260814", "T", "20260820", d)
+    assert ok is False and msg and "차단" in msg
+
+
+def test_signal_freshness_fails_open_on_bad_input(tmp_path):
+    """달력 판정 실패가 매매를 멈추면 안 된다(fail-open)."""
+    import market_calendar as mc
+    assert mc.universe_gap("bad-date", "20260820", str(tmp_path)) == (0, [])
+    assert mc.check_signal_freshness("bad-date", "T", "20260820", str(tmp_path)) \
+        == (True, None)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# KIS 계좌 주문불가 분류 — 2026-08-20 신설
+#   실사고: 08-10 이후 모의계좌가 msg_cd=40910000 으로 모든 주문을 거부했는데
+#   종목 단위 실패와 동일 취급돼 열흘간 아무도 몰랐다(만기 청산 실패 누적).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_kis_account_blocked_is_distinguished_from_order_error():
+    import kis_trader as kx
+
+    assert kx._is_account_blocked("40910000", "") is True
+    assert kx._is_account_blocked("", "모의투자 주문이 불가한 계좌입니다.") is True
+    assert kx._is_account_blocked("40580000", "주문가능금액이 부족합니다") is False
+
+    with pytest.raises(kx.AccountBlocked):
+        kx._raise_order_error("매도", {"msg_cd": "40910000",
+                                       "msg1": "모의투자 주문이 불가한 계좌입니다."})
+
+    # 평범한 주문 거부는 AccountBlocked 가 아니어야 한다(긴급 경보 오발 방지)
+    with pytest.raises(RuntimeError) as ei:
+        kx._raise_order_error("매수", {"msg_cd": "40580000",
+                                       "msg1": "주문가능금액이 부족합니다"})
+    assert not isinstance(ei.value, kx.AccountBlocked)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# score_ic available-only 정규화 — 2026-08-20
+#   결측 피처가 분모만 키워 라이브 강도를 5.0 쪽으로 누르던 것 수정.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_score_ic_normalizes_on_available_features_only():
+    import factor_scorer as fs
+
+    sc = fs.FactorScorer.__new__(fs.FactorScorer)      # __init__(IC 계산) 우회
+    sc.ic_weights = {"a": 0.2, "b": 0.2, "c": 0.2, "d": 0.2}
+    sc.feat_stats = {k: [0.0, 1.0] for k in "abcd"}    # 값 1.0 → pct_rank = 0.5
+
+    # 전부 최상위(값 2.0 → pct_rank 1.0): 가용 피처만으로 정규화하면 만점 쪽
+    full = sc.score_ic({k: 2.0 for k in "abcd"})
+    assert full["coverage"] == 1.0 and full["normalized_on"] == "available"
+    assert full["total"] == 10.0
+
+    # 절반만 존재해도 '아는 것 기준'으로는 동일한 만점이어야 한다
+    half = sc.score_ic({"a": 2.0, "b": 2.0})
+    assert half["n_available"] == 2 and half["coverage"] == 0.5
+    assert half["normalized_on"] == "available"
+    assert half["total"] == 10.0, "결측 피처가 분모를 키워 점수를 누르면 안 된다"
+
+
+def test_score_ic_falls_back_to_full_denominator_when_coverage_too_low():
+    """가용 질량이 하한 미만이면 소수 피처의 과증폭 대신 보수적(=5.0 쪽) 판정."""
+    import factor_scorer as fs
+
+    sc = fs.FactorScorer.__new__(fs.FactorScorer)
+    sc.ic_weights = {k: 0.2 for k in "abcde"}          # 5개 균등 → 1개면 커버리지 0.2
+    sc.feat_stats = {k: [0.0, 1.0] for k in "abcde"}
+
+    r = sc.score_ic({"a": 2.0})
+    assert r["coverage"] == 0.2 and r["normalized_on"] == "full"
+    assert r["total"] == 6.0        # 5.0 + (0.2*0.5)/(0.5) * 5 * (1/5)
