@@ -189,15 +189,61 @@ if os.path.exists(_meta):
 else:
     chk(False, "meta_model", "meta_model_v4.json 없음")
 
-# 6) 오늘 로그 에러 스캔
-err = 0
-for lg in glob.glob(os.path.join(LOGS, f"*{TODAY}*.log")):
-    try:
-        t = open(lg, encoding="utf-8", errors="replace").read()
-        err += t.count("Traceback (most recent call last)")
-    except Exception:
-        pass
-chk(err == 0, "오늘 로그 에러(Traceback)", f"{err}건")
+
+
+# ── 오늘 로그 에러 집계 헬퍼 (2026-08-26 신설) ────────────────────────────────
+def _scan_today_errors(log_dir, today8, exclude_prefix=()):
+    """오늘 로그의 '실제 크래시 사건 수'와 회복 여부를 센다.
+
+    반환: (사건수, 회복된 사건수, [(파일명, 건수, 회복여부), ...])
+
+    파이썬의 chained exception 은 사건 하나에
+      Traceback ... / The above exception was the direct cause ... /
+      During handling of the above exception ...
+    처럼 Traceback 헤더를 여러 번 찍는다. 헤더 수를 그대로 세면 사건 수가
+    3배로 부풀려져 알림이 실제보다 훨씬 심각해 보인다(08-26: 6건 -> 18건).
+    체인 연결 문구 수를 빼서 최상위 사건만 남긴다.
+
+    '회복'은 그 실행의 마지막 ExitCode 가 0 인 경우 — bat 재시도 루프가
+    성공했다는 뜻이라 사람이 손댈 일이 없다(08-26 15:21 PM 실사례).
+    """
+    import glob as _g
+    import os as _o
+    import re as _re
+
+    total = recovered = 0
+    detail = []
+    for lg in _g.glob(_o.path.join(log_dir, f"*{today8}*.log")):
+        base = _o.path.basename(lg)
+        if any(base.startswith(p) for p in exclude_prefix):
+            continue          # 자기 리포트를 세지 않는다(리포트 본문에 단어가 들어감)
+        try:
+            t = open(lg, encoding="utf-8", errors="replace").read()
+        except Exception:
+            continue
+        tb = t.count("Traceback (most recent call last)")
+        if not tb:
+            continue
+        chained = (t.count("The above exception was the direct cause")
+                   + t.count("During handling of the above exception"))
+        n = max(1, tb - chained)
+        ecs = _re.findall(r"ExitCode=(\d+)", t)
+        ok = bool(ecs) and ecs[-1] == "0"
+        total += n
+        if ok:
+            recovered += n
+        detail.append((base, n, ok))
+    detail.sort(key=lambda x: -x[1])
+    return total, recovered, detail
+
+
+# 6) 오늘 로그 에러 스캔 — 체인 제외 실제 사건 수, 재시도 회복분은 정상으로 본다
+_err, _rec, _detail = _scan_today_errors(LOGS, TODAY, exclude_prefix=("daily_audit",))
+_unresolved = _err - _rec
+chk(_unresolved == 0, "오늘 로그 에러(크래시)",
+    (f"{_err}건 전부 재시도로 회복" if _err and not _unresolved else
+     f"{_err}건(미회복 {_unresolved}) — "
+     + ", ".join(f"{b} {n}{'✓' if ok else ''}" for b, n, ok in _detail[:3])))
 
 # ── 리포트 작성 ──
 verdict = "정상" if warn_n == 0 else ("주의" if warn_n <= 2 else "점검필요")

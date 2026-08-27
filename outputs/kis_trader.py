@@ -48,6 +48,21 @@ from datetime import datetime
 import requests
 import pandas as pd
 
+
+import kill_switch
+
+def _retry_note():
+    """크래시 알림에 붙일 '이후 어떻게 되는지' 안내.
+
+    [2026-08-21 수정] 종전 문구는 "실행 중단(자동 재시도 없음)" 이었는데, 사실과
+    다르다 — 2026-07-21 에 run_kis_trader.bat 에 재시도 루프(5분 간격 2회)를 넣고
+    이 문구를 안 고쳤다. 사용자가 '완전히 멈췄다'고 오해하게 만든다
+    (08-21 15:22 PM ReadTimeout 크래시 때 실제로 그렇게 읽혔다).
+    """
+    return ("run_kis_trader.bat 이 5분 뒤 재시도합니다(최대 2회). "
+            "재시도 시작/종료도 로그에 남으니, 로그에 attempt 2 가 없으면 "
+            "재시도 대기 중 프로세스가 죽은 것입니다.")
+
 # ── 상수 ──────────────────────────────────────────────────────────────────────
 # 콘솔 인코딩 방탄(2026-07-17) — bat 는 PYTHONIOENCODING=utf-8 을 세팅하지만 수동/타
 # 런처 실행은 cp949 콘솔이라 ⚠🚨 등 이모지 print 가 UnicodeEncodeError 로 즉사
@@ -213,12 +228,30 @@ class KISMockClient:
     def __init__(self):
         self._token = None
 
+    @staticmethod
+    def _key_fingerprint():
+        """현재 APP_KEY 의 짧은 지문 — 캐시가 '어느 키로 받은 토큰'인지 식별용.
+        키 원문을 파일에 남기지 않기 위해 해시 앞 12자만 쓴다."""
+        import hashlib
+        return hashlib.sha256(_APP_KEY.encode("utf-8")).hexdigest()[:12]
+
     def _load_cached_token(self):
+        """캐시된 토큰 재사용. 단 **발급에 쓴 앱키가 지금과 같을 때만**.
+
+        [2026-08-21 신설] 모의계좌를 재발급받으면 APP_KEY/SECRET 이 바뀌는데,
+        캐시 파일에는 어느 키로 받은 토큰인지 정보가 없어서 만료 전(최대 24시간)
+        까지 **옛 토큰을 새 자격증명과 섞어 계속 보냈다**. 증상은 인증 실패인데
+        원인은 캐시라, '재발급했는데도 안 된다'로 오진하기 딱 좋다.
+        지문이 다르면 캐시를 무시하고 새로 발급한다(구 형식 = 지문 없음도 무시).
+        """
         if not os.path.exists(TOKEN_CACHE):
             return None
         try:
             with open(TOKEN_CACHE) as f:
                 d = json.load(f)
+            if d.get("key_fp") != self._key_fingerprint():
+                print("[KIS 모의] 앱키가 바뀌었습니다 — 캐시된 토큰 폐기 후 재발급")
+                return None
             if d.get("expire", 0) - 300 > time.time():
                 return d["token"]
         except Exception:
@@ -238,7 +271,9 @@ class KISMockClient:
         token = d["access_token"]
         expire = time.time() + int(d.get("expires_in", 86400))
         with open(TOKEN_CACHE, "w") as f:
-            json.dump({"token": token, "expire": expire}, f)
+            # key_fp: 어느 앱키로 받은 토큰인지 — 재발급 후 옛 토큰 재사용 방지
+            json.dump({"token": token, "expire": expire,
+                       "key_fp": self._key_fingerprint()}, f)
         return token
 
     def get_token(self):
@@ -279,7 +314,7 @@ class KISMockClient:
             print(f"[warn] hashkey 실패(주문은 hashkey 없이 진행): {e}")
             return ""
 
-    def get_balance(self):
+    def get_balance(self, attempts: int = 3):
         """잔고 조회 → (deposit, positions).
 
         deposit   : int — 예수금(주문가능)
@@ -294,9 +329,15 @@ class KISMockClient:
         }
         # 5xx/네트워크 오류는 3회 지수백오프 재시도 — 07-01 KIS 모의서버 일시 500 으로
         # cmd_buy 가 통째 중단(신호 2건 미매수)된 재발 방지. 4xx 는 즉시 raise(2026-07-02).
+        # [2026-08-21] attempts 를 호출측이 정할 수 있게 했다. 08-21 15:21 PM 은
+        # 3회(15s×3 + 백오프 6s)가 전부 타임아웃되며 만기청산을 시도조차 못 하고
+        # 죽었다 — 그런데 마감 동시호가는 15:30 까지라 그 시점에 아직 8분이 남아
+        # 있었고, 실제로 15:40 조회는 정상이었다. 창이 넉넉한 청산 경로에서는
+        # 더 끈질기게 기다리는 편이 낫다(매수 경로는 시가 진입이 목적이라 3회 유지).
         r = None
         last_err = None
-        for _attempt in range(3):
+        _n = max(1, int(attempts))
+        for _attempt in range(_n):
             try:
                 r = requests.get(
                     f"{MOCK_URL}/uapi/domestic-stock/v1/trading/inquire-balance",
@@ -315,9 +356,10 @@ class KISMockClient:
                 if _st is not None and 400 <= _st < 500:
                     raise                       # 4xx = 요청 문제, 재시도 무의미
                 last_err = e
-                if _attempt < 2:
+                if _attempt < _n - 1:
                     wait_s = 2 * (_attempt + 1)
-                    print(f"[warn] 잔고조회 실패({e}) — {wait_s}초 후 재시도 {_attempt + 2}/3")
+                    print(f"[warn] 잔고조회 실패({e}) — {wait_s}초 후 재시도 "
+                          f"{_attempt + 2}/{_n}")
                     time.sleep(wait_s)
         else:
             raise last_err
@@ -1074,6 +1116,9 @@ def cmd_reconcile():
 
 
 def cmd_buy():
+    # [2026-08-27] 3층 안전장치 — 계좌 단위 정지 상태면 신규매수만 건너뛴다.
+    #   매도·만기청산·손절은 이 게이트를 타지 않는다.
+    kill_switch.guard_buy("KIS 안D")
     sigs = todays_signals()
     if not sigs:
         print("[buy] 오늘 신호 없음 — 종료")
@@ -1296,7 +1341,10 @@ def cmd_sell(reasons=("expire", "stop")):
         return sold_ok
 
     client = KISMockClient()
-    _, positions = client.get_balance()
+    # 만기 청산은 마감 동시호가(15:20~15:30) 안에서 끝내면 되므로 시간 여유가 있다.
+    # 손절(AM)은 시가 근처가 목적이라 종전대로 3회.
+    _bal_tries = 6 if "expire" in reasons else 3
+    _, positions = client.get_balance(attempts=_bal_tries)
     already = today_ordered_codes("sell")
     bought_today = today_ordered_codes("buy")
     strategy_map = get_signal_strategy_map()
@@ -1497,7 +1545,8 @@ if __name__ == "__main__":
         try:
             import notifier
             notifier.safe_send(f"🚨 [KIS] {cmd} 크래시: {_tp.__name__}: {_val}"
-                               " — 실행 중단(자동 재시도 없음), 로그 확인 요망")
+                               " — 이 시도는 중단. "
+                               f"{_retry_note()}")
         except Exception:
             pass
         sys.__excepthook__(_tp, _val, _tb)

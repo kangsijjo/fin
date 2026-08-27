@@ -1282,18 +1282,18 @@ def get_training_stats():
 
 
 # ── AI scoring constants ────────────────────────────────────────────────────
-# 추론 폴백 순서 — feature_spec 단일 출처에서 가져온다(2026-06-29 단일화).
-#   import 실패 시에만 쓰는 하드코딩 폴백을 except 에 둔다(대시보드 기동 복원력 유지).
+# 추론 피처 순서 — feature_spec 단일 출처에서만 가져온다(2026-06-29 단일화).
+#   사본을 두지 않는다: 사본은 반드시 표류하고, 표류한 사본은 조용한 오답을 만든다.
 try:
     from feature_spec import FALLBACK_MODEL_ORDER as _AI_FEAT_ORDER
 except Exception:
-    _AI_FEAT_ORDER = [
-        "rsi14","atr_pct","vol_ratio","tv_ratio","for_5d","ins_5d","mcap_class",
-        "score_tv","news_sent_7d","news_cnt_7d","vix","vix_chg_5d","sox_ret_5d",
-        "usdkrw_chg_5d","kospi_ret_20d","for_net5_db","ins_net5_db","rsi_db",
-        "macd_hist_db","bb_pct_db","prm_net_5d_ratio",
-        "strat_h252_40","strat_h500_20","strat_h500_40_MKT",
-    ]
+    # [2026-08-20] 하드코딩 사본을 제거했다. 종전 폴백은 정본(FALLBACK_MODEL_ORDER 32개)과
+    # 이미 어긋난 24개였고(for_hold_ratio/for_ratio_chg20 누락 + 전략 원-핫 9개 중 3개만),
+    # 하필 그 길이가 현재 학습 차원(24)과 같아 **차원은 맞는데 피처가 다른** 상태로 추론이
+    # 통과할 수 있었다 — 차원 불일치는 예외로 드러나지만 이건 조용한 오답이 된다.
+    # feature_spec 단일 출처를 못 읽으면 AI 점수를 포기하는 편이 안전하다.
+    # (2026-06-29 단일화의 취지가 바로 이 사본 표류를 없애는 것이었다.)
+    _AI_FEAT_ORDER = []
 _AI_FEAT_LABELS = {
     "vix":           ("서프라이즈안정", +1),  # VIX 낮음=좋음
     "vix_chg_5d":    ("공포지수상승",     -1),
@@ -1365,6 +1365,9 @@ def _ai_score_signals(codes):
         return {}
 
     feat_order = _load_ai_feat_order()   # 학습된 실제 피처 순서(그룹탐색으로 가변)
+    if not feat_order:
+        # 피처 계약을 확정하지 못하면 추론하지 않는다 — 틀린 확률보다 빈 값이 낫다.
+        return {}
     codes_q = ",".join(f"'{c}'" for c in codes)
 
     # ── OHLCV + 기술지표 계산 ─────────────────────────────────────────────
@@ -3131,7 +3134,7 @@ function _cellKey(td){
   const t=(td?td.textContent:'').trim();
   if(!t||t==='-') return {n:null,s:''};
   // "1,234" "+5.20%" "-12,345원" "6.11" 같은 표기를 숫자로 인식(빈칸·기호 제거)
-  const c=t.replace(/[,\s원주%]/g,'').replace(/^\+/,'');
+  const c=t.replace(/[,\\s원주%]/g,'').replace(/^\\+/,'');
   const n=Number(c);
   return (c!==''&&!isNaN(n))?{n:n,s:t}:{n:null,s:t};
 }

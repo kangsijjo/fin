@@ -784,3 +784,383 @@ def test_score_ic_falls_back_to_full_denominator_when_coverage_too_low():
     r = sc.score_ic({"a": 2.0})
     assert r["coverage"] == 0.2 and r["normalized_on"] == "full"
     assert r["total"] == 6.0        # 5.0 + (0.2*0.5)/(0.5) * 5 * (1/5)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 장전 탐침 재탐침 범위 — 2026-08-21
+#   실사고: 계좌 이상 시 캐시를 무시하고 재탐침하게 바꿨더니(08-20) 양 계좌를
+#   매일 다시 찔러, 이미 '수용'으로 확정된 키움에도 매일 실주문이 나갔다.
+#   탐침 주문(24.1만원)이 장중 내내 예수금을 묶었다(08-21 실측:
+#   9,158,011 -> 8,916,171, 미체결 1건). 이상이 있는 계좌만 찔러야 한다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_probe_reprobes_only_the_broken_account():
+    import preopen_probe as pp
+
+    prev = {
+        "kiwoom": {"accepted": True,  "msg": "접수됨(주문번호 0001240)", "fatal": False},
+        "kis":    {"accepted": False, "msg": "거부: 40910000 모의투자 주문이 불가한 계좌입니다.",
+                   "fatal": True},
+    }
+    assert pp.probe_targets(prev) == ["kis"], \
+        "정상 계좌까지 재탐침하면 실주문이 예수금을 묶는다"
+
+    # 양쪽 정상 → 재탐침 자체가 불필요
+    ok = {"kiwoom": {"accepted": True, "msg": "접수됨", "fatal": False},
+          "kis":    {"accepted": True, "msg": "접수됨", "fatal": False}}
+    assert pp.probe_targets(ok) == []
+
+    # fatal 키가 없던 옛 기록도 msg 로 판정된다(2026-08-20 이전 형식 호환)
+    legacy = {"kiwoom": {"accepted": True, "msg": "접수됨(주문번호 1)"},
+              "kis":    {"accepted": False,
+                         "msg": "거부: 40910000 모의투자 주문이 불가한 계좌입니다."}}
+    assert pp.probe_targets(legacy) == ["kis"]
+
+    # 시간대 거부(정상 결과)는 재탐침 대상이 아니다
+    timeband = {"kiwoom": {"accepted": False, "msg": "거부: RC4057 모의투자 장시작전"},
+                "kis":    {"accepted": False, "msg": "거부: RC4057 모의투자 장시작전"}}
+    assert pp.probe_targets(timeband) == []
+
+
+def test_probe_cancel_helper_parses_order_no():
+    """접수 메시지에서 주문번호를 못 뽑으면 취소를 시도하지 않아야 한다(오취소 방지)."""
+    import preopen_probe as pp
+    assert "취소 생략" in pp._cancel_kiwoom("", "005930")
+    assert "취소 생략" in pp._cancel_kiwoom("접수됨", "005930")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 크래시 알림 문구 ↔ bat 재시도 정책 정합 — 2026-08-21
+#   실사고: 08-21 15:22 KIS daily-pm 이 ReadTimeout 으로 죽으며
+#   "실행 중단(자동 재시도 없음)" 이라고 알렸는데, bat 에는 2026-07-21 부터
+#   5분 간격 2회 재시도 루프가 있었다. 문구만 옛 상태로 남아 사용자가
+#   '완전히 멈췄다'고 오해했다. 둘이 어긋나면 다시 같은 오해가 생긴다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("mod_name,bat_name", [
+    ("kis_trader", "run_kis_trader.bat"),
+    ("kiwoom_trader", "run_kiwoom.bat"),
+])
+def test_crash_notice_matches_bat_retry_policy(mod_name, bat_name):
+    import importlib
+    mod = importlib.import_module(mod_name)
+
+    note = mod._retry_note()
+    assert bat_name in note, "알림이 어느 러너가 재시도하는지 밝혀야 한다"
+    assert "재시도 없음" not in note, "bat 에 재시도 루프가 있는데 없다고 알리면 안 된다"
+
+    bat = open(os.path.join(OUTPUTS, bat_name), encoding="utf-8").read()
+    assert "goto :attempt" in bat and "TRIES" in bat, \
+        f"{bat_name} 의 재시도 루프가 사라졌다면 _retry_note 문구도 함께 고쳐야 한다"
+    # 대기 전/후 마커가 모두 있어야 '재시도 대기 중 사망'을 구분할 수 있다
+    assert "retry in 300s" in bat and "wait done - starting attempt" in bat, \
+        f"{bat_name}: 재시도 대기 전후 마커가 모두 있어야 진단이 가능하다"
+
+
+def test_expire_sell_gets_a_larger_balance_retry_budget():
+    """만기 청산은 마감 동시호가(15:20~15:30) 안에서 끝내면 되므로 더 끈질기게 기다린다.
+
+    08-21 실사고: 15:21:07 시작 → 잔고조회 3회 전부 타임아웃 → 15:22:18 크래시.
+    그 시점에 창이 8분 남아 있었고 15:40 조회는 정상이었다.
+    """
+    import inspect
+    import kis_trader as kx
+
+    sig = inspect.signature(kx.KISMockClient.get_balance)
+    assert "attempts" in sig.parameters
+    assert sig.parameters["attempts"].default == 3, "기본값(매수 경로)은 종전 유지"
+
+    src = inspect.getsource(kx.cmd_sell)
+    assert 'if "expire" in reasons else 3' in src, \
+        "만기 경로와 손절 경로의 재시도 예산이 분리돼 있어야 한다"
+
+
+def test_token_cache_is_bound_to_the_app_key():
+    """자격증명 재발급 후 옛 토큰이 재사용되면 안 된다.
+
+    [2026-08-21] 모의계좌 재발급 시 APP_KEY/SECRET 이 바뀌는데, 토큰 캐시에는
+    '어느 키로 받은 토큰인지' 정보가 없어서 만료 전(최대 24시간)까지 옛 토큰을
+    새 자격증명과 섞어 계속 보냈다. 증상은 인증 실패인데 원인은 캐시라
+    '재발급했는데도 안 된다'로 오진하기 쉽다.
+    """
+    import json
+    import time
+    import kis_trader as kx
+
+    cl = kx.KISMockClient.__new__(kx.KISMockClient)      # __init__ 우회(네트워크 무접촉)
+    fp = kx.KISMockClient._key_fingerprint()
+    assert fp and len(fp) == 12
+
+    import tempfile
+    import os as _os
+    d = tempfile.mkdtemp()
+    cache = _os.path.join(d, "tok.json")
+    orig = kx.TOKEN_CACHE
+    try:
+        kx.TOKEN_CACHE = cache
+
+        # 지문이 맞고 만료 전 → 재사용
+        json.dump({"token": "GOOD", "expire": time.time() + 3600, "key_fp": fp},
+                  open(cache, "w"))
+        assert cl._load_cached_token() == "GOOD"
+
+        # 지문이 다르면(=키 교체) 만료 전이어도 폐기
+        json.dump({"token": "OLD", "expire": time.time() + 3600, "key_fp": "deadbeef1234"},
+                  open(cache, "w"))
+        assert cl._load_cached_token() is None, "앱키가 바뀌었는데 옛 토큰을 재사용했다"
+
+        # 구 형식(지문 없음)도 폐기 — 교체 여부를 알 수 없으므로 안전한 쪽
+        json.dump({"token": "LEGACY", "expire": time.time() + 3600}, open(cache, "w"))
+        assert cl._load_cached_token() is None
+    finally:
+        kx.TOKEN_CACHE = orig
+
+
+def test_verify_kis_account_script_places_no_orders():
+    """점검 스크립트가 주문 API 를 건드리지 않는지 못박는다(조회 전용 보장)."""
+    src = open(os.path.join(OUTPUTS, "verify_kis_account.py"), encoding="utf-8").read()
+    for forbidden in ("order_buy", "order_sell", "order-cash", "probe_kis", "probe_kiwoom"):
+        assert forbidden not in src, f"점검 스크립트에 주문 경로({forbidden})가 들어갔다"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# bat 파일 위생 — 2026-08-26
+#   실사고 2건이 겹쳐 KIS 트레이더가 08-24~26 사흘간 로그조차 없이 죽었다.
+#   ① 08-21 에 넣은 REM 주석이 괄호 블록 안에서 따옴표 짝을 깨뜨려 cmd 가 닫는
+#      괄호를 잃고 파싱 붕괴 → '/b' is not recognized, 로그 0줄, exit 1.
+#   ② 파일 끝 NUL 패딩(수백 바이트)이 goto 레이블 탐색을 깨뜨려
+#      `goto :attempt` 가 "cannot find the batch label" 로 실패 → 재시도 루프가
+#      2026-07-21 도입 이후 한 번도 작동한 적이 없었다(08-21 PM 미스터리의 답).
+#   둘 다 파일을 열어보면 즉시 보이는 것이라 테스트로 고정한다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _bat_files():
+    import glob
+    return sorted(glob.glob(os.path.join(OUTPUTS, "*.bat")))
+
+
+def test_bats_have_no_nul_padding():
+    """NUL 이 하나라도 있으면 goto/레이블 탐색이 깨진다."""
+    bad = []
+    for p in _bat_files():
+        n = open(p, "rb").read().count(b"\x00")
+        if n:
+            bad.append(f"{os.path.basename(p)}({n})")
+    assert not bad, f"bat 에 NUL 패딩이 있다 — goto 가 실패한다: {', '.join(bad)}"
+
+
+def test_bats_end_with_newline():
+    """마지막 줄이 개행으로 끝나지 않으면 cmd 가 그 줄을 잃을 수 있다."""
+    bad = [os.path.basename(p) for p in _bat_files()
+           if not open(p, "rb").read().endswith(b"\n")]
+    assert not bad, f"bat 이 개행으로 끝나지 않는다: {', '.join(bad)}"
+
+
+def test_no_quoted_rem_inside_paren_block():
+    """괄호 블록 안 REM 에 홀수 개의 따옴표가 있으면 cmd 파싱이 붕괴한다.
+
+    2026-08-21 실사고 재발 방지. 블록 안에는 주석을 두지 말고 블록 밖에 쓴다.
+    """
+    import re
+    bad = []
+    for p in _bat_files():
+        text = open(p, encoding="utf-8", errors="replace").read()
+        depth = 0
+        for i, line in enumerate(text.split("\n"), 1):
+            st = line.strip()
+            if depth > 0 and re.match(r"(?i)^rem\b", st) and st.count('"') % 2:
+                bad.append(f"{os.path.basename(p)}:{i}")
+            depth = max(0, depth + st.count("(") - st.count(")"))
+    assert not bad, (
+        "괄호 블록 안 REM 에 홀수 따옴표가 있다(cmd 파싱 붕괴) — "
+        f"주석을 블록 밖으로 옮길 것: {', '.join(bad)}")
+
+
+def test_bats_are_ascii_only():
+    """한국어 Windows 의 cmd 는 UTF-8 한글 바이트열을 CP949 로 오독해 줄을 잘못 자른다."""
+    bad = []
+    for p in _bat_files():
+        n = sum(1 for c in open(p, "rb").read() if c > 127)
+        if n:
+            bad.append(f"{os.path.basename(p)}({n}bytes)")
+    assert not bad, f"bat 에 비ASCII 바이트가 있다: {', '.join(bad)}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 로그 에러 집계 — 2026-08-26
+#   실사고: 하루요약이 "파이프라인 에러 18건"이라고 알렸는데 실제 크래시는 6건,
+#   그중 1건은 재시도로 회복(최종 ExitCode=0), 5건은 손절 감시가 KIS 서버
+#   브라운아웃에 걸린 것으로 매매 영향 0 이었다. 부풀림 원인은 파이썬의
+#   chained exception 이 사건 하나에 Traceback 헤더를 3번 찍는 것.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _load_scan_helper():
+    """daily_summary 를 import 하면 텔레그램을 보내므로 헬퍼만 떼어내 평가한다."""
+    src = open(os.path.join(OUTPUTS, "daily_summary.py"), encoding="utf-8").read()
+    i = src.find("def _scan_today_errors")
+    j = src.find("\n\n# ── 파이프라인", i)
+    assert i != -1 and j != -1, "_scan_today_errors 헬퍼를 찾지 못했다"
+    ns = {}
+    exec(src[i:j], ns)
+    return ns["_scan_today_errors"]
+
+
+CHAINED = """Traceback (most recent call last):
+  File "x", line 1
+TimeoutError: read timed out
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "y", line 2
+ReadTimeoutError: pool
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "z", line 3
+ReadTimeout: boom
+"""
+
+
+def test_chained_exception_counts_as_one_event(tmp_path):
+    scan = _load_scan_helper()
+    (tmp_path / "kis_stop_20260826.log").write_text(CHAINED, encoding="utf-8")
+
+    total, rec, detail = scan(str(tmp_path), "20260826")
+    assert total == 1, f"체인 예외 1건이 {total}건으로 부풀려졌다"
+    assert rec == 0 and detail[0][1] == 1
+
+
+def test_retry_recovered_crash_is_reported_as_recovered(tmp_path):
+    scan = _load_scan_helper()
+    (tmp_path / "kis_trader_20260826_1521.log").write_text(
+        CHAINED + "\n[..] KIS trader attempt 1 done. ExitCode=1\n"
+                  "[..] retry in 300s\n"
+                  "[..] KIS trader attempt 2 done. ExitCode=0\n", encoding="utf-8")
+
+    total, rec, detail = scan(str(tmp_path), "20260826")
+    assert (total, rec) == (1, 1), "재시도로 회복된 크래시가 회복으로 분류되지 않았다"
+    assert detail[0][2] is True
+
+
+def test_audit_does_not_count_its_own_report(tmp_path):
+    """리포트 본문에 'Traceback' 이라는 단어가 들어가면 다음 실행이 자기를 센다."""
+    scan = _load_scan_helper()
+    (tmp_path / "daily_audit_20260826.log").write_text(
+        "  [!! ] 오늘 로그 에러(Traceback (most recent call last)) — 3건\n",
+        encoding="utf-8")
+
+    total, _, _ = scan(str(tmp_path), "20260826", exclude_prefix=("daily_audit",))
+    assert total == 0, "감사 리포트가 자기 자신을 에러로 셌다"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3층 안전장치 — 계좌 정지 스위치 (2026-08-27 신설)
+#   2026-08 실사고: bat 손상 3일 무실행 / KIS 계좌 12일 주문불가 / 청산 반복 실패가
+#   전부 '경보는 갔지만 매매는 계속'이었다. watchdog 이 알리기만 하고 멈추지 않았다.
+#   이 스위치의 계약을 못박는다 — 특히 '매도는 절대 막지 않는다'.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def ks_tmp(tmp_path, monkeypatch):
+    import kill_switch as ks
+    monkeypatch.setattr(ks, "STATE_PATH", str(tmp_path / "kill_switch.json"))
+    return ks
+
+
+def test_kill_switch_engage_release_cycle(ks_tmp):
+    ks = ks_tmp
+    assert ks.status()[0] is False, "초기 상태는 허용이어야 한다"
+
+    assert ks.engage("no_run", "테스트", notify=False) is True
+    assert ks.status()[0] is True
+
+    # 이미 걸려 있으면 재발동하지 않는다(알림 스팸 방지)
+    assert ks.engage("order_blocked", "다른 사유", notify=False) is False
+    assert ks.status()[1]["reason"] == "no_run", "최초 사유가 보존돼야 한다"
+
+    assert ks.release("확인함", notify=False) is True
+    assert ks.status()[0] is False
+    assert ks.release("또", notify=False) is False
+
+
+def test_kill_switch_blocks_buy_but_exits_zero(ks_tmp):
+    """의도된 정지는 exit 0 — exit 1 이면 bat 재시도 루프가 5분 뒤 또 시도한다."""
+    ks = ks_tmp
+    ks.engage("no_run", "테스트", notify=False)
+    with pytest.raises(SystemExit) as ei:
+        ks.guard_buy("테스트계좌")
+    assert ei.value.code == 0, "정지는 실패가 아니라 의도된 종료다"
+
+
+def test_kill_switch_fails_open_on_unreadable_state(ks_tmp, monkeypatch):
+    """상태를 못 읽었다고 매매를 멈추면, 막으려던 '조용한 실패'를 새로 만드는 셈이다."""
+    ks = ks_tmp
+    with open(ks.STATE_PATH, "w", encoding="utf-8") as f:
+        f.write("{ 깨진 json")
+    on, _, err = ks.status()
+    assert on is False and err, "읽기 실패는 fail-open 이어야 한다"
+    ks.guard_buy("테스트계좌")          # SystemExit 이 나면 안 된다
+
+
+def test_sell_paths_do_not_consult_kill_switch():
+    """매도·만기청산·손절은 스위치를 타지 않아야 한다(청산 중단 = 위험 증가)."""
+    import inspect
+    import kiwoom_trader as kt
+    import kis_trader as kx
+
+    for mod, name in ((kt, "kiwoom"), (kx, "kis")):
+        buy = inspect.getsource(mod.cmd_buy)
+        sell = inspect.getsource(mod.cmd_sell)
+        assert "kill_switch.guard_buy" in buy, f"{name}: cmd_buy 에 스위치가 없다"
+        assert "kill_switch" not in sell, \
+            f"{name}: cmd_sell 이 스위치를 참조한다 — 청산은 막으면 안 된다"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 일일 후보수 게이트 (2026-08-27 신설, 모니터 전용)
+#   슬롯 10 제약이 비대칭으로 작동해(후보 적은 날 전부 사고, 많은 날 10건만)
+#   per-trade +1.72% 우위가 실현 -0.75% 로 뒤집히는 것을 겨냥한 규칙.
+#   Phase 1 은 차단하지 않고 기록만 한다 — 그 계약을 못박는다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_gate_is_monitor_only_for_now():
+    """Phase 1 동안 GATE_ENFORCE 는 False 여야 한다(실수로 켜진 채 배포 방지)."""
+    import kiwoom_trader as kt
+    assert kt.GATE_ENFORCE is False, (
+        "게이트가 차단 모드로 켜져 있다. 모니터 2~4주 관찰 후 사용자 승인으로만 켠다.")
+    assert kt.GATE_MIN_CANDIDATES == 12
+
+
+def test_gate_monitor_never_blocks(tmp_path, monkeypatch):
+    import kiwoom_trader as kt
+    monkeypatch.setattr(kt, "GATE_LOG", str(tmp_path / "g.csv"))
+    monkeypatch.setattr(kt, "GATE_ENFORCE", False)
+    # 후보가 기준에 한참 못 미쳐도 모니터 모드면 매수를 막지 않는다
+    assert kt._gate_check(0, 5) is True
+    assert kt._gate_check(99, 120) is True
+
+
+def test_gate_enforce_blocks_only_below_threshold(tmp_path, monkeypatch):
+    import kiwoom_trader as kt
+    monkeypatch.setattr(kt, "GATE_LOG", str(tmp_path / "g.csv"))
+    monkeypatch.setattr(kt, "GATE_ENFORCE", True)
+    monkeypatch.setattr(kt, "GATE_MIN_CANDIDATES", 12)
+    assert kt._gate_check(11, 30) is False, "기준 미만이면 차단해야 한다"
+    assert kt._gate_check(12, 30) is True, "기준 이상이면 통과해야 한다"
+
+
+def test_gate_records_every_day(tmp_path, monkeypatch):
+    """차단하든 말든 매일 기록돼야 관찰 데이터가 쌓인다."""
+    import csv as _csv
+    import kiwoom_trader as kt
+    p = tmp_path / "g.csv"
+    monkeypatch.setattr(kt, "GATE_LOG", str(p))
+    monkeypatch.setattr(kt, "GATE_ENFORCE", False)
+    kt._gate_check(3, 20)
+    kt._gate_check(40, 60)
+    rows = list(_csv.DictReader(open(p, encoding="utf-8-sig")))
+    assert len(rows) == 2
+    assert rows[0]["blocked"] == "1" and rows[1]["blocked"] == "0"
+    assert rows[0]["enforced"] == "0", "모니터 모드가 기록에 남아야 사후 해석이 된다"

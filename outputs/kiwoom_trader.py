@@ -43,6 +43,22 @@ from datetime import datetime
 
 import pandas as pd
 
+
+import kill_switch
+
+def _retry_note():
+    """크래시 알림에 붙일 '이후 어떻게 되는지' 안내.
+
+    [2026-08-21 수정] 종전 문구는 "실행 중단(자동 재시도 없음)" 이었는데 사실과
+    다르다 — 2026-07-21 에 run_kiwoom.bat 에 재시도 루프(5분 간격 2회)를 넣고
+    이 문구를 안 고쳤다. 사용자가 '완전히 멈췄다'고 오해하게 만든다
+    (08-21 KIS 쪽에서 실제로 그렇게 읽혔다).
+    """
+    return ("run_kiwoom.bat 이 5분 뒤 재시도합니다(최대 2회). "
+            "재시도 시작/종료도 로그에 남으니, 로그에 attempt 2 가 없으면 "
+            "재시도 대기 중 프로세스가 죽은 것입니다.")
+
+
 # ── 키움 API 파일락 ──────────────────────────────────────────────────────────
 # 우리 시스템(kiwoom_trader)과 Stock_AI_Project(kiwoom_extra) 가
 # 동시에 키움 API에 접근하는 것을 방지하는 파일 기반 잠금.
@@ -692,8 +708,57 @@ def _signals_fresh(latest_date, label):
     return allowed
 
 
+
+# ── 일일 후보수 게이트 (2026-08-27 신설, **모니터 전용**) ─────────────────────
+# 발견: 슬롯 10개 제약이 비대칭으로 작동한다. 후보가 적은 날(약한 국면)은 전부 사고
+#   후보가 많은 날(강한 국면)은 10건만 산다 → 나쁜 날에 과대 가중된다.
+#   실측: 강도 >=5.7 신호의 per-trade 평균은 +1.72% 인데, 슬롯 10으로 실제로 살 수
+#   있는 것만 보면 -0.75% 다. 모의계좌 실적 -8.4% 와 일관된다.
+# 대책 후보: "그날 >=5.7 후보가 N건 미만이면 아예 사지 않는다."
+#   워크포워드(임계를 이전 연도로만 선택, 2021~2026 OOS): +1.30% vs 무게이트 -0.71%
+#   = +2.01%p. N>=12 는 8년 전부에서 무게이트를 이겼고 최악 연도에도 지지 않았다.
+# 다만 매수 가능일이 연 120일 -> 25일로 급감하므로, 손절/익절 때와 동일한 절차를 따른다:
+#   Phase 1 **모니터 전용 2~4주**(차단하지 않고 '걸렸을 것'만 기록) -> Phase 2 상수 1줄로 활성화.
+GATE_MIN_CANDIDATES = 12      # 후보가 이 수 미만이면 '게이트 걸림'으로 기록
+GATE_ENFORCE = False          # True 로 바꾸면 실제 차단. Phase 1 동안 False 유지.
+GATE_LOG = "./db/gate_monitor.csv"
+
+
+def _gate_check(n_pass: int, n_signals: int) -> bool:
+    """후보수 게이트 판정 + 기록. 반환: 매수 진행 여부(모니터 모드면 항상 True).
+
+    n_pass: 그날 강도 임계를 통과한 후보 수(중복 종목 제거 전 기준 — 라이브와 동일)
+    """
+    blocked = n_pass < GATE_MIN_CANDIDATES
+    mode = "ENFORCE" if GATE_ENFORCE else "MONITOR"
+    if blocked:
+        print(f"[gate][{mode}] 오늘 강도통과 후보 {n_pass}건 < 기준 {GATE_MIN_CANDIDATES}건 "
+              + ("— 신규매수 생략" if GATE_ENFORCE else "— 기록만(차단 안 함)"))
+    else:
+        print(f"[gate][{mode}] 오늘 강도통과 후보 {n_pass}건 ≥ 기준 {GATE_MIN_CANDIDATES}건 — 통과")
+    try:
+        import csv as _csv
+        new = not os.path.exists(GATE_LOG) or os.path.getsize(GATE_LOG) == 0
+        os.makedirs(os.path.dirname(GATE_LOG), exist_ok=True)
+        with open(GATE_LOG, "a", newline="", encoding="utf-8-sig") as f:
+            w = _csv.writer(f)
+            if new:
+                w.writerow(["date", "time", "n_signals", "n_pass",
+                            "threshold", "blocked", "enforced"])
+            w.writerow([datetime.now().strftime("%Y%m%d"),
+                        datetime.now().strftime("%H:%M:%S"),
+                        n_signals, n_pass, GATE_MIN_CANDIDATES,
+                        int(blocked), int(GATE_ENFORCE)])
+    except Exception as e:
+        print(f"[gate][warn] 기록 실패(무시): {e}")
+    return (not blocked) if GATE_ENFORCE else True
+
+
 def cmd_buy():
     guard_mock_only()
+    # [2026-08-27] 3층 안전장치 — 계좌 단위 정지 상태면 신규매수만 건너뛴다.
+    #   매도·만기청산·손절은 이 게이트를 타지 않는다.
+    kill_switch.guard_buy("키움 안C")
     sigs = todays_signals()
     if not sigs:
         print("[buy] 오늘 신호 없음 — 종료")
@@ -726,6 +791,16 @@ def cmd_buy():
         print("[buy] 강도 기록 없음 — 재확인 단계에서 재계산 시도")
     # 매매 전 사전점검 ①: 강도 재확인(무기록이면 즉석 재계산, 그래도 없으면 차단)
     strength, _unknown_strength = verify_strength(sigs, strength)
+
+    # 매매 전 사전점검 ③: 일일 후보수 게이트(2026-08-27, 현재 모니터 전용).
+    #   강도가 최종 확정된 이 시점에서만 '오늘 몇 건이 통과했나'를 정확히 셀 수 있다.
+    _n_pass = sum(1 for _sg in sigs
+                  if strength.get((str(_sg.get("code", "")).zfill(6),
+                                   str(_sg.get("strategy", ""))), -1)
+                  >= MIN_STRENGTH_SCORE)
+    if not _gate_check(_n_pass, len(sigs)):
+        print("[buy] 후보수 게이트로 오늘 신규매수 생략 — 종료")
+        return
 
     # ── 전략별 슬롯 현황 ──────────────────────────────────────────────────────
     # 원장(매수 당시 전략)으로 덮어씀 — '최신 신호' 전략맵은 보유 중 종목이 다른
@@ -1614,7 +1689,8 @@ if __name__ == "__main__":
         try:
             import notifier
             notifier.safe_send(f"🚨 [키움] {cmd} 크래시: {_tp.__name__}: {_val}"
-                               " — 실행 중단(자동 재시도 없음), 로그 확인 요망")
+                               " — 이 시도는 중단. "
+                               f"{_retry_note()}")
         except Exception:
             pass
         sys.__excepthook__(_tp, _val, _tb)

@@ -70,6 +70,9 @@ echo  [!CMD!] attempt !TRIES! exit=!EXITCODE! (time: %TIME%) >> "!LOGFILE!"
 if !EXITCODE! NEQ 0 if !TRIES! LSS 3 (
     echo  [!CMD!] retry in 300s >> "!LOGFILE!"
     ping 127.0.0.1 -n 301 > nul
+    REM [2026-08-21] log AFTER the wait too - see run_kis_trader.bat for the case
+    REM that motivated this (retry marker with no follow-up line).
+    echo  [!CMD!] wait done - starting attempt >> "!LOGFILE!"
     goto :attempt
 )
 

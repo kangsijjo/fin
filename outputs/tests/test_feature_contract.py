@@ -146,3 +146,26 @@ def test_paper_signals_header_contract(mod_name, fname):
     assert set(header) == set(mod.CSV_FIELDS), (
         f"{fname} 헤더가 {mod_name}.CSV_FIELDS 와 불일치(컬럼 drift!)\n"
         f"  file={header}\n  spec={mod.CSV_FIELDS}")
+
+
+def test_dashboard_has_no_hardcoded_feature_order_copy():
+    """대시보드에 학습 피처 목록의 하드코딩 사본이 없어야 한다.
+
+    [2026-08-20] 종전 대시보드는 feature_spec import 실패 시를 대비해 24개짜리
+    하드코딩 폴백을 갖고 있었는데, 정본(FALLBACK_MODEL_ORDER 32개)에서 이미
+    표류해 있었다(for_hold_ratio/for_ratio_chg20 누락, 전략 원-핫 9개 중 3개만).
+    하필 그 길이가 당시 학습 차원(24)과 같아 '차원은 맞는데 피처가 다른' 추론이
+    통과할 수 있었다 — 차원 불일치는 예외로 드러나지만 이건 조용한 오답이 된다.
+    feature_spec 단일화(2026-06-29)의 취지가 바로 이 사본 표류 제거였다.
+    """
+    import re
+    src = open(os.path.join(OUTPUTS, "integrated_dashboard_server.py"),
+               encoding="utf-8").read()
+    i = src.find("_AI_FEAT_ORDER = [")
+    if i == -1:
+        return                                  # 사본 자체가 없음 = 통과
+    blk = src[i:src.find("]", i) + 1]
+    copied = re.findall(r'"([A-Za-z0-9_]+)"', blk)
+    assert not copied, (
+        f"대시보드에 피처 목록 사본이 되살아났다({len(copied)}개). "
+        f"feature_spec 를 단일 출처로 쓰고, 못 읽으면 AI 점수를 비워라.")

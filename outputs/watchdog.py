@@ -315,6 +315,24 @@ def check_account_blocked(days=3):
     out = []
     words = ("주문이 불가한 계좌", "사용할 수 없는 계좌", "해지된 계좌",
              "정지된 계좌", "계좌가 없습니다")
+
+    # [2026-08-21] 1순위 증거는 당일 08:50 탐침 결과다. 로그 스캔만 하면 '가장 최근
+    # 주문을 시도한 날'(만기가 없으면 며칠 전)이 근거로 잡혀 경보가 낡아 보인다.
+    try:
+        with open(os.path.join(_HERE, "db", "preopen_probe_result.json"),
+                  encoding="utf-8") as f:
+            pr = json.load(f)
+        blocked = [k for k in ("kiwoom", "kis") if pr.get(k, {}).get("fatal")]
+        if blocked:
+            out.append(("account_blocked", "계좌 주문 가능 여부", False,
+                        f"{', '.join(blocked)} 계좌가 주문을 거부 "
+                        f"({pr.get('probed_at','?')} 장전 탐침 실측) — "
+                        f"모의투자 계좌 기간만료/재발급 확인 필요. "
+                        f"매수·매도·만기청산 전부 불가"))
+            return out
+    except Exception:
+        pass   # 탐침 기록이 없거나 깨졌으면 아래 로그 스캔으로 폴백
+
     recent = sorted(glob.glob(os.path.join(_LOGS, "kis_trader_*.log"))
                     + glob.glob(os.path.join(_LOGS, "kis_stop_*.log"))
                     + glob.glob(os.path.join(_HERE, "logs", "kiwoom_*.log")),
@@ -412,6 +430,101 @@ def check_snapshots():
     return out
 
 
+
+def check_kill_switch(results):
+    """[2026-08-27] 3층 안전장치 — 사고 조건이면 신규매수를 실제로 **정지**시킨다.
+
+    종전 watchdog 은 알리기만 했다. 2026-08 에 bat 손상 3일 무실행 / KIS 계좌
+    12일 주문불가 / 청산 반복 실패가 전부 '경보는 갔지만 매매는 계속'이었다.
+    여기서 다루는 세 조건은 임계 최적화가 필요 없다 — 발생 자체가 사고다.
+
+    results: run_all_checks() 결과. 이미 판정된 항목을 재활용해 이중 판정을 피한다.
+    반환: watchdog 리포트에 붙일 (key, label, ok, detail) 리스트.
+    """
+    out = []
+    try:
+        import kill_switch as ks
+    except Exception as e:
+        return [("kill_switch", "정지 스위치", False, f"모듈 로드 실패: {str(e)[:60]}")]
+
+    by = {k: (ok, det) for k, _lbl, ok, det in results}
+
+    trip = None
+    # ① 계좌가 주문을 거부 — check_account_blocked 결과 재사용
+    if by.get("account_blocked", (True, ""))[0] is False:
+        trip = ("order_blocked", by["account_blocked"][1][:200])
+    # ② 트레이더 무실행 — 오늘 매매 시각이 지났는데 실행 흔적이 없음
+    elif by.get("trade_kis", (True, ""))[0] is False and _no_run_days("kis_trader_*.log") >= 2:
+        trip = ("no_run", f"KIS 트레이더 {_no_run_days('kis_trader_*.log')}거래일 연속 무실행")
+    elif by.get("trade_kiwoom", (True, ""))[0] is False and _no_run_days("kiwoom_*.log") >= 2:
+        trip = ("no_run", f"키움 트레이더 {_no_run_days('kiwoom_*.log')}거래일 연속 무실행")
+    # ③ 청산 실패 반복 — 최근 로그에서 청산 실패 문구가 2일 이상
+    else:
+        n = _exit_fail_days()
+        if n >= 2:
+            trip = ("exit_failed", f"만기/손절 청산 실패가 {n}거래일에서 관측됨")
+
+    on, st, err = ks.status()
+    if trip and not on:
+        ks.engage(trip[0], trip[1])
+        out.append(("kill_switch", "정지 스위치", False,
+                    f"신규매수 정지 발동 — {trip[1]}"))
+    elif on:
+        out.append(("kill_switch", "정지 스위치", False,
+                    f"정지 중({st.get('reason_text','?')}, {st.get('engaged_at','?')}) — "
+                    f"원인 확인 후 kill_switch.py release"))
+    elif err:
+        out.append(("kill_switch", "정지 스위치", False, f"상태 읽기 실패: {err}"))
+    else:
+        out.append(("kill_switch", "정지 스위치", True, ""))
+    return out
+
+
+def _no_run_days(pattern, look=6):
+    """최근 거래일 중 해당 로그가 없는 연속 일수(오늘부터 거슬러)."""
+    import re as _re
+    days = sorted({_re.search(r"(\d{8})", os.path.basename(p)).group(1)
+                   for root in (_LOGS, _OUT_LOGS)
+                   for p in glob.glob(os.path.join(root, pattern))
+                   if _re.search(r"(\d{8})", os.path.basename(p))})
+    if not days:
+        return 0
+    # 달력 평일 기준으로 거슬러 올라가며 로그 없는 날을 센다
+    from datetime import timedelta
+    have = set(days)
+    n = 0
+    d = TODAY
+    for _ in range(look):
+        if d.weekday() < 5:
+            if d.strftime("%Y%m%d") in have:
+                break
+            n += 1
+        d -= timedelta(days=1)
+    return n
+
+
+def _exit_fail_days(look=4):
+    """최근 로그에서 '청산 실패'가 관측된 거래일 수."""
+    words = ("청산 실패", "만기/손절 청산", "[실패]")
+    days = set()
+    for root in (_LOGS, _OUT_LOGS):
+        for p in sorted(glob.glob(os.path.join(root, "*.log")),
+                        key=os.path.getmtime)[-40:]:
+            base = os.path.basename(p)
+            if not ("kis_trader" in base or "kiwoom_" in base):
+                continue
+            try:
+                t = open(p, encoding="utf-8", errors="replace").read()
+            except Exception:
+                continue
+            if any(w in t for w in words) and "매도 오류" in t:
+                import re as _re
+                m = _re.search(r"(\d{8})", base)
+                if m:
+                    days.add(m.group(1))
+    return len(days)
+
+
 def run_all_checks():
     results = []
     results.append(check_scheduler())
@@ -422,6 +535,9 @@ def run_all_checks():
     results += check_idle_buying()     # 연속 매수 0건(2026-08-09 신설)
     results += check_account_blocked() # 계좌 자체 주문불가(2026-08-20 신설)
     results += check_ai_pipeline()     # 주간 학습 완주 이력(2026-08-09 신설)
+    # 3층 안전장치 — 위 판정 결과를 받아 '사고'면 신규매수를 실제로 정지시킨다.
+    # (알리기만 하던 종전 동작의 공백. 2026-08-27 신설)
+    results += check_kill_switch(results)
     return results
 
 

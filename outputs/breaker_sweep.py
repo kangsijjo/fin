@@ -43,6 +43,7 @@ PRIORITY = {   # 라이브 STRATEGY_PRIORITY — 슬롯 경쟁 시 우선순위
     "kiwoom": ["star_high_52w_20_filt", "rsi_reversal", "rsi_vol"],
     "kis":    ["h52w_for3d_mkt", "for_high20_mkt", "gc_for3d"],
 }
+_HERE_DIR = os.path.dirname(os.path.abspath(__file__))
 SLOTS = 10
 CAPITAL0 = 10_000_000
 BREAKERS = [None, 10.0, 15.0, 20.0, 25.0]   # X (%); 재개 = X-5
@@ -50,7 +51,57 @@ DAILY_CAPS = [None, 3]                       # N (하루 신규진입 상한)
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--fwd-start", default=None, help="forward 시작일 YYYYMMDD (기본: 거래일 70% 지점)")
+ap.add_argument("--min-strength", type=float, default=5.7,
+                help="강도(score_ic) 필터. 0 이면 미적용(2026-07 구버전 동작 재현)")
 args = ap.parse_args()
+
+
+
+# ── 강도(score_ic) 조인 ──────────────────────────────────────────────────────
+# [2026-08-27] 이 도구의 무차단 기준선이 -99.3% 로 나와 7월부터 해석 불가 상태였다.
+#   원인은 코드 버그가 아니라 **낡은 기준선**이었다 — 강도 필터가 아예 없어서
+#   '강도 도입 이전의 시스템'을 재현하고 있었다(라이브는 2026-07 부터 >=5.7 적용).
+#   무필터 시스템은 실제로 파산한다: 슬롯 실현 평균 약 -0.93% x 약 3,100 라운드트립
+#   -> (1+0.1*-0.0093)^3100 ~ 0.045 = -95%. 즉 -99.3% 는 산술적으로 맞는 값이었고,
+#   파산하는 기준선 위에서는 어떤 차단기도 '개선'으로 보인다(과대평가).
+# 강도는 trades_history_v3 기반 워크포워드 채점본에서 (진입일, 종목, 전략)으로 조인한다.
+#   실측 매칭률: high_52w_filt 99.9% / rsi_reversal 91.3% / rsi_vol 90.7%.
+#   무기록은 **매수하지 않는다(fail-closed)** — 라이브 verify_strength 와 동일 규약.
+_ENGINE_TO_LIVE = {"star_high_52w_20_filt": "high_52w_filt"}
+_SCORED_PKL = os.path.join(
+    os.path.expanduser("~"), "AppData", "Local", "Temp", "claude",
+    "C--fin", "_scored_walkforward.pkl")
+
+
+def _load_scores():
+    """{(entry_date, code, live_strategy): score_ic} 또는 None(파일 없음)."""
+    import pickle
+    for p in (_SCORED_PKL, os.path.join(_HERE_DIR, "ai_data", "scored_walkforward.pkl")):
+        if p and os.path.exists(p):
+            try:
+                A = pickle.load(open(p, "rb"))
+            except Exception:
+                continue
+            A = A.reset_index(drop=True)
+            A["code"] = A["code"].astype(str).str.zfill(6)
+            # itertuples 는 밑줄로 시작하는 컬럼명을 _1/_2 로 바꿔버린다 → zip 사용
+            return dict(zip(zip(A["_sd"], A["code"], A["strategy"]), A["_s"]))
+    return None
+
+
+def apply_strength(tdf, scores, min_strength):
+    """강도 필터 적용 + 커버리지 보고. 반환: (필터된 df, 리포트 문자열)."""
+    if min_strength <= 0 or scores is None:
+        why = "미적용(--min-strength 0)" if min_strength <= 0 else "채점 데이터 없음 — 미적용"
+        return tdf, f"강도 필터 {why}  ※ 기준선이 '강도 도입 이전 시스템'이 됨"
+    key = tdf.apply(lambda r: (r["entry_date"], r["code"],
+                               _ENGINE_TO_LIVE.get(r["strategy"], r["strategy"])), axis=1)
+    sc = key.map(scores)
+    matched = sc.notna().sum()
+    keep = tdf[sc >= min_strength]
+    return keep, (f"강도 >= {min_strength} 적용 — 채점매칭 {matched:,}/{len(tdf):,}"
+                  f" ({matched/max(1,len(tdf))*100:.1f}%), 통과 {len(keep):,}건"
+                  f" (무기록은 fail-closed 로 제외)")
 
 
 def simulate(trades_df, price_map, trading_dates, slot_caps, priority,
@@ -208,8 +259,14 @@ def main():
         trades_by_acct[acct] = pd.DataFrame(rows)
 
     print("[3/3] 스윕...")
+    _scores = _load_scores()
+    if _scores is None and args.min_strength > 0:
+        print("  [warn] 워크포워드 채점 데이터를 찾지 못했습니다 — 강도 필터 미적용으로 진행합니다.")
+        print("         기준선이 '강도 도입 이전 시스템'이 되어 차단기 효과가 과대평가됩니다.")
     out_rows = []
     for acct, tdf in trades_by_acct.items():
+        tdf, _rep = apply_strength(tdf, _scores, args.min_strength)
+        print(f"  [{acct}] {_rep}")
         tdf_fwd = tdf[tdf["entry_date"] >= fwd_start]
         for bx in BREAKERS:
             for cap in DAILY_CAPS:
