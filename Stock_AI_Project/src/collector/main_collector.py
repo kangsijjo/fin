@@ -121,6 +121,26 @@ def get_latest_dates():
     finally:
         conn.close()
 
+
+# ── 야후 티커 표기 교정 (2026-08-29) ─────────────────────────────────────────
+# fdr.StockListing('S&P500') 은 클래스주를 구분자 없이 준다(BRKB, BFB).
+# 야후 차트 API 는 하이픈 표기를 쓴다(BRK-B, BF-B) → 404 로 영구 실패한다.
+# 실측: ai_pipeline 로그에 매일 3회 재시도 x 2종목 = 6회 헛호출 + 크래시 2건.
+# 한국 매매엔 무관하지만, 매일 뜨는 이 2건이 알림에서 **진짜 에러를 가린다**.
+# S&P500 의 클래스주는 소수라 명시 매핑이 가장 안전하다(무작정 하이픈 삽입 금지).
+_YAHOO_TICKER_FIX = {
+    "BRKB": "BRK-B",   # Berkshire Hathaway Class B
+    "BFB":  "BF-B",    # Brown-Forman Class B
+}
+
+
+def _fetch_symbol(ticker, market=None):
+    """가격 조회에 쓸 심볼. 저장은 원래 ticker 로 하고 조회만 교정한다."""
+    if market == "korea":
+        return ticker
+    return _YAHOO_TICKER_FIX.get(ticker, ticker)
+
+
 def collect_all():
     """전체 종목 증분 업데이트"""
     end = datetime.today().strftime('%Y-%m-%d')
@@ -189,7 +209,7 @@ def collect_all():
         for attempt in range(3):
             try:
                 logger.debug(f"[{seq}/{total}] [{sector}] {name} ({ticker}) | {fetch_start} ~ {end}")
-                df = fdr.DataReader(ticker, fetch_start, end)
+                df = fdr.DataReader(_fetch_symbol(ticker, market), fetch_start, end)
 
                 if df is None or len(df) == 0:
                     logger.debug(f"새로운 데이터 없음: {ticker}")

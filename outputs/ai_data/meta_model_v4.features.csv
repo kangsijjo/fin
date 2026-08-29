@@ -5,6 +5,10 @@ vol_ratio
 tv_ratio
 score_tv
 mcap_class
+for_5d
+ins_5d
+news_sent_7d
+news_cnt_7d
 vix
 vix_chg_5d
 sox_ret_5d

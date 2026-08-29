@@ -1262,3 +1262,49 @@ def test_conftest_seals_without_per_test_optin():
         "알림 봉인이 autouse/session 이 아니면 새 테스트에서 또 새어 나간다"
     assert "notifier.safe_send" in src and "notifier.send" in src, \
         "safe_send 와 send 를 모두 막아야 한다"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# import 부수효과 봉인 — 2026-08-29 (전수 점검에서 발견)
+#   daily_audit.py 가 모듈 레벨에서 전체 감사를 실행하고 텔레그램까지 보냈다.
+#   즉 **import 만 해도** 감사가 돌고 알림이 나갔다(점검 스크립트가 실제로 유발).
+#   부수효과가 있는 코드는 import 시점이 아니라 호출 시점에 돌아야 한다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_importing_modules_sends_no_notification(captured_notifications):
+    """주요 모듈을 import 하는 것만으로 알림이 나가면 안 된다."""
+    import importlib
+    for m in ("daily_audit", "watchdog", "kill_switch", "market_calendar",
+              "factor_scorer", "strength_logger"):
+        importlib.import_module(m)
+    assert not captured_notifications, (
+        f"import 만으로 알림이 발생했다: {captured_notifications[:2]}")
+
+
+def test_daily_audit_has_main_guard():
+    """감사 본문은 main() 안에 있고 __main__ 가드로만 실행돼야 한다."""
+    import daily_audit
+    assert hasattr(daily_audit, "main"), "daily_audit.main() 이 없다"
+    src = open(os.path.join(OUTPUTS, "daily_audit.py"), encoding="utf-8").read()
+    assert '__name__ == "__main__"' in src, "__main__ 가드가 없다"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 야후 티커 표기 — 2026-08-29
+#   fdr.StockListing('S&P500') 이 클래스주를 구분자 없이 준다(BRKB, BFB).
+#   야후 차트 API 는 하이픈 표기를 써서 404 로 영구 실패했다 —
+#   매일 3회 재시도 x 2종목 = 6회 헛호출 + 크래시 2건이 알림에서 진짜 에러를 가렸다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_us_class_share_tickers_are_normalized():
+    import importlib.util
+    p = os.path.join(os.path.dirname(OUTPUTS), "Stock_AI_Project",
+                     "src", "collector", "main_collector.py")
+    src = open(p, encoding="utf-8").read()
+    assert '"BRKB": "BRK-B"' in src and '"BFB":  "BF-B"' in src, \
+        "클래스주 티커 매핑이 사라졌다 — 야후 404 가 재발한다"
+    assert "_fetch_symbol(ticker, market)" in src, \
+        "조회 시점에 교정이 적용되지 않는다"
+    # 저장은 원래 ticker 로 해야 한다(교정은 조회에만)
+    assert "df['ticker'] = ticker" in src, \
+        "교정된 심볼로 저장하면 DB 티커가 어긋난다"

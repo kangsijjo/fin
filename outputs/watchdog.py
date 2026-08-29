@@ -382,8 +382,13 @@ def check_ai_pipeline(max_days=9):
         if not last_done or not last_done.isdigit():
             return out                            # 이력 없음 — 판정 보류(오탐 방지)
         age = (TODAY - date(int(last_done[:4]), int(last_done[4:6]), int(last_done[6:8]))).days
-        out.append(("ai_pipeline", "AI 파이프라인 완주", age <= max_days,
-                    f"마지막 완주 {last_done} ({age}일 전) — 주간 학습이 건너뛰어지고 있음"))
+        # [2026-08-29] 문구를 판정에 맞춘다. 종전엔 정상일 때도 "건너뛰어지고
+        # 있음"이라고 말했다 — 0일 전 완주인데 경고문이 붙으니 앞뒤가 안 맞고,
+        # 알림으로 상태를 판단하는 시스템에서 이런 문구는 신뢰를 갉아먹는다.
+        ok = age <= max_days
+        note = "정상" if ok else "주간 학습이 건너뛰어지고 있음"
+        out.append(("ai_pipeline", "AI 파이프라인 완주", ok,
+                    f"마지막 완주 {last_done} ({age}일 전) — {note}"))
     except Exception:
         pass
     return out

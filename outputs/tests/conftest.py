@@ -55,7 +55,13 @@ def _block_outbound_notifications():
 
 @pytest.fixture
 def captured_notifications():
-    """이 테스트 동안 발생한 알림 목록. 발송은 되지 않는다."""
-    start = len(_sent)
+    """이 테스트 동안 발생한 알림 목록. 발송은 되지 않는다.
+
+    [2026-08-29] 앞뒤로 비운다. 종전엔 시작 위치만 기억하고 리스트 **전체**를
+    넘겨줘서, 세션 앞쪽 테스트가 쌓아둔 알림까지 보였다.
+    "포함되는가"(any) 검증은 통과하지만 **"아무것도 안 나갔는가"(not) 검증이
+    항상 실패**한다 — 부수효과 없음을 증명할 수 없는 fixture 였다.
+    """
+    del _sent[:]
     yield _sent
-    del _sent[start:]
+    del _sent[:]
