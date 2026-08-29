@@ -226,7 +226,7 @@ def _scheduler_process_alive():
 
 
 def check_data():
-    """데이터 신선도 — stock.db 7종. (주기별 임계: 일일 5~6, 뉴스 6, 신용 10)"""
+    """데이터 신선도 — stock.db 8종. (주기별 임계: 일일 5~6, 뉴스 6, 신용 10)"""
     con = _open_db()
     if con is None:
         return [("db_open", "stock.db", False, "DB 열기 실패")]
@@ -236,8 +236,11 @@ def check_data():
     # (bb_pct_db 10.2% / rsi_db 9.4% / macd_hist_db 7.9% = 합계 27.5% 질량)가
     # 오직 이 테이블에서 나오는데 감시 목록에 빠져 있어, 08-14 이후 정체된 것을
     # 아무도 몰랐다. 이 테이블이 멎으면 강도가 통째로 눌려 매수가 조용히 멈춘다.
+    # [2026-08-29] foreign_ratio 추가. 매일 수집(daily_data_job)하는데 감시 목록에
+    # 없어, 정체돼도 아무도 몰랐다 — korea_indicators 가 빠져 있던 것(08-20)과 같은 구멍.
+    # 수집 작업 8개 중 감시되지 않던 유일한 테이블이었다.
     specs = [("korea_stocks", "date", 5, True), ("supply_demand", "date", 5, True),
-             ("korea_indicators", "date", 5, True),
+             ("korea_indicators", "date", 5, True), ("foreign_ratio", "date", 5, True),
              ("usa_stocks", "date", 6, False), ("macro_indicators", "date", 6, False),
              ("credit_balance", "date", 10, False), ("news", "pubDate", 6, False)]
     for tbl, col, thr, use_bday in specs:

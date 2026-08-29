@@ -23,7 +23,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 from tqdm import tqdm
 
-from src.collector.gaps import missing_range
+from src.collector.gaps import missing_range, assert_fresh
 
 from src.config_db import get_connection
 from src.logger import get_logger
@@ -159,15 +159,11 @@ def run(mock=True, max_tickers=None):
 
     logger.info(f"완료. 신규 {total}행 추가 (공백 없어 스킵 {skipped}종목).")
 
-
-def _parse_args():
-    p = argparse.ArgumentParser(description="KIS API 기반 수급 수집")
-    p.add_argument('--real', dest='mock', action='store_false', default=True,
-                   help='실전 계정 사용 (기본: 모의)')
-    p.add_argument('--limit', type=int, default=None, help='테스트용 종목 수 제한')
-    return p.parse_args()
-
-
-if __name__ == "__main__":
-    args = _parse_args()
-    run(mock=args.mock, max_tickers=args.limit)
+    # [2026-08-29] 정체 감지 — '전량 스킵 + 0행' 을 성공으로 보고하던 조용한 실패 차단.
+    #   실사고: 08-24~28 닷새 동안 매일 이 잡이 1초 만에 끝나며 스케줄러에 '완료'로
+    #   기록됐고, supply_demand 는 08-21 에 고착됐다(korea_indicators 도 파생이라 동반 정체).
+    #   watchdog 의 테이블 신선도 점검이 6영업일 뒤에야 잡아냈다.
+    #   여기서 '기준 달력(korea_stocks) 최신일 > 내 테이블 최신일' 이면 실패로 종료해
+    #   스케줄러가 다음날 아침 곧바로 ✗ 실패를 남기게 한다.
+    with closing(get_connection()) as conn:
+        assert_fresh(conn, 'supply_demand', logger=logger)

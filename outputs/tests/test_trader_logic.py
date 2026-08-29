@@ -1164,3 +1164,74 @@ def test_gate_records_every_day(tmp_path, monkeypatch):
     assert len(rows) == 2
     assert rows[0]["blocked"] == "1" and rows[1]["blocked"] == "0"
     assert rows[0]["enforced"] == "0", "모니터 모드가 기록에 남아야 사후 해석이 된다"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 수집 자기검증 — 2026-08-29
+#   실사고: KRX 수급 수집이 08-24~28 닷새간 매일 1초 만에 끝나며 '완료'로 기록됐다.
+#   전량 '공백 없음' 판정 후 0행 삽입 + exit 0 → 스케줄러 로그에서 정상과 구분 불가.
+#   watchdog 의 테이블 신선도 점검이 6영업일 뒤에야 잡았다.
+#   교훈: 이 시스템의 실패 모드는 '안 도는 것'이 아니라 '돌았다는데 결과가 없는 것'.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _mk_db(tmp_path, cal_max, mine_max):
+    import sqlite3
+    p = tmp_path / "t.db"
+    con = sqlite3.connect(str(p))
+    con.execute("CREATE TABLE korea_stocks (date TEXT)")
+    con.execute("CREATE TABLE supply_demand (date TEXT)")
+    con.execute("INSERT INTO korea_stocks VALUES (?)", [cal_max])
+    if mine_max:
+        con.execute("INSERT INTO supply_demand VALUES (?)", [mine_max])
+    con.commit()
+    return con
+
+
+def _gaps():
+    import importlib.util
+    p = os.path.join(os.path.dirname(OUTPUTS), "Stock_AI_Project",
+                     "src", "collector", "gaps.py")
+    spec = importlib.util.spec_from_file_location("gaps_mod", p)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def test_assert_fresh_passes_when_current(tmp_path):
+    g = _gaps()
+    con = _mk_db(tmp_path, "2026-08-28", "2026-08-28")
+    assert g.assert_fresh(con, "supply_demand") is True
+
+
+def test_assert_fresh_exits_nonzero_when_stale(tmp_path):
+    """정체를 성공으로 보고하면 스케줄러가 사고를 못 본다 — exit 1 이어야 한다."""
+    g = _gaps()
+    con = _mk_db(tmp_path, "2026-08-28", "2026-08-21")
+    with pytest.raises(SystemExit) as ei:
+        g.assert_fresh(con, "supply_demand")
+    assert ei.value.code == 1
+
+
+def test_assert_fresh_fails_open_on_query_error(tmp_path):
+    """감시 로직이 수집을 막아선 안 된다 — 판정 불가는 통과."""
+    import sqlite3
+    g = _gaps()
+    con = sqlite3.connect(":memory:")          # 테이블 자체가 없음
+    assert g.assert_fresh(con, "supply_demand") is True
+
+
+def test_every_collected_table_is_watched():
+    """매일 수집하는 테이블은 전부 watchdog 감시 목록에 있어야 한다.
+
+    foreign_ratio 가 수집 작업 8개 중 유일하게 빠져 있었다(2026-08-29 발견).
+    korea_indicators 가 빠져 있던 것(08-20)과 같은 구멍이다.
+    """
+    import inspect
+    import re
+    import watchdog as wd
+
+    watched = set(re.findall(r'\("(\w+)", "\w+", \d+',
+                             inspect.getsource(wd.check_data)))
+    for t in ("korea_stocks", "supply_demand", "korea_indicators",
+              "foreign_ratio", "credit_balance", "macro_indicators", "news"):
+        assert t in watched, f"{t} 이 watchdog 데이터 신선도 감시에서 빠졌다"
