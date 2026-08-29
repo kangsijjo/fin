@@ -1235,3 +1235,30 @@ def test_every_collected_table_is_watched():
     for t in ("korea_stocks", "supply_demand", "korea_indicators",
               "foreign_ratio", "credit_balance", "macro_indicators", "news"):
         assert t in watched, f"{t} 이 watchdog 데이터 신선도 감시에서 빠졌다"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 테스트가 바깥으로 알림을 보내지 않는다 — 2026-08-29
+#   실사고: AI 파이프라인(ci_gate → pytest)이 돌 때마다 테스트가 만든 가짜 상황
+#   3건이 텔레그램으로 발송됐다(가짜 종목 444444, 일부러 깨뜨린 kill_switch.json 등).
+#   사용자가 진짜 사고와 구분할 수 없었고, 알림 피로를 만들었다.
+#   conftest.py 의 autouse fixture 로 세션 전체를 봉인했고, 여기서 그 계약을 못박는다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_notifications_are_sealed_during_tests(captured_notifications):
+    """테스트 중 알림은 포착만 되고 밖으로 나가지 않아야 한다."""
+    import notifier
+    notifier.safe_send("테스트 발송 시도")
+    assert captured_notifications and "테스트 발송 시도" in captured_notifications[-1]
+    # 실제 전송 함수가 아니라 봉인된 대체 함수여야 한다
+    assert notifier.safe_send.__name__ == "<lambda>", \
+        "notifier 가 봉인되지 않았다 — conftest 의 autouse fixture 확인"
+
+
+def test_conftest_seals_without_per_test_optin():
+    """봉인은 autouse 여야 한다 — '테스트마다 막기'는 반드시 하나를 빠뜨린다."""
+    src = open(os.path.join(OUTPUTS, "tests", "conftest.py"), encoding="utf-8").read()
+    assert "autouse=True" in src and 'scope="session"' in src, \
+        "알림 봉인이 autouse/session 이 아니면 새 테스트에서 또 새어 나간다"
+    assert "notifier.safe_send" in src and "notifier.send" in src, \
+        "safe_send 와 send 를 모두 막아야 한다"
