@@ -1308,3 +1308,113 @@ def test_us_class_share_tickers_are_normalized():
     # 저장은 원래 ticker 로 해야 한다(교정은 조회에만)
     assert "df['ticker'] = ticker" in src, \
         "교정된 심볼로 저장하면 DB 티커가 어긋난다"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 작업 스케줄러 결과 감시 — 2026-08-30 신설
+#   실사고: \KIS_Monthly 가 존재하지 않는 monthly_xlsx_builder.py 를 실행하도록
+#   등록돼 3개월간 실패만 반복했는데 아무도 몰랐다. 종전 감시는 전부 '결과물'을
+#   봤기 때문에, 결과물이 없는 작업은 감시 자체가 불가능했다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_BS = chr(92)
+
+
+def _task(path, state="Ready", result=0, exec_line="", core=None, last="2026-08-29 09:00"):
+    return {"path": path, "state": state, "result": result, "exec": exec_line,
+            "core": (path.startswith(_BS + "StockAI") if core is None else core),
+            "last": last}
+
+
+def test_task_missing_targets_finds_ghost_in_arguments():
+    """실행 파일이 아니라 **인자 쪽** 경로가 없는 경우까지 잡아야 한다.
+
+    \KIS_Monthly 의 실행 파일은 cmd 였다. 실행 파일만 봤으면 사고를 놓쳤다.
+    """
+    import watchdog as w
+    d = _BS
+    ghost = f"cmd /c cd /d C:{d}fin{d}outputs && py -3.11 C:{d}fin{d}nope_xyz.py"
+    assert w._task_missing_targets(ghost) == [f"C:{d}fin{d}nope_xyz.py"]
+
+
+def test_task_missing_targets_accepts_existing_and_quoted():
+    import watchdog as w
+    d = _BS
+    real = os.path.join(OUTPUTS, "watchdog.py")
+    assert w._task_missing_targets(real + " --daily") == []
+    # 따옴표로 감싼 공백 포함 경로도 인식해야 한다
+    assert w._task_missing_targets(f'"C:{d}No Such Dir{d}x.exe" arg') == [
+        f"C:{d}No Such Dir{d}x.exe"]
+    assert w._task_missing_targets("") == []
+    assert w._task_missing_targets(None) == []
+
+
+def test_task_check_is_quiet_when_everything_is_healthy(monkeypatch):
+    import watchdog as w
+    real = os.path.join(OUTPUTS, "watchdog.py")
+    tasks = [_task(_BS + "StockAI" + _BS + "Watchdog", exec_line=real),
+             _task(_BS + "KIS_EOD", exec_line=real)]
+    monkeypatch.setattr(w, "_query_scheduled_tasks", lambda: (tasks, None))
+    rs = w.check_scheduled_tasks()
+    assert len(rs) == 1 and rs[0][2] is True, rs
+
+
+def test_task_check_flags_disabled_core_but_not_legacy(monkeypatch):
+    """StockAI 폴더 작업이 꺼지면 경보. 루트 KIS_* 에는 의도적으로 꺼둔 레거시가 있다."""
+    import watchdog as w
+    real = os.path.join(OUTPUTS, "watchdog.py")
+    monkeypatch.setattr(w, "_query_scheduled_tasks", lambda: ([
+        _task(_BS + "KIS_KiwoomSell", state="Disabled", result=1, exec_line=real),
+    ], None))
+    assert all(r[2] for r in w.check_scheduled_tasks()), "레거시 비활성은 경보 대상이 아니다"
+
+    monkeypatch.setattr(w, "_query_scheduled_tasks", lambda: ([
+        _task(_BS + "StockAI" + _BS + "KiwoomTraderAM", state="Disabled", exec_line=real),
+    ], None))
+    bad = [r for r in w.check_scheduled_tasks() if not r[2]]
+    assert len(bad) == 1 and "KiwoomTraderAM" in bad[0][3], bad
+
+
+def test_task_check_benign_result_codes_are_not_failures(monkeypatch):
+    """실행 중/미실행/중복방지는 실패가 아니다 — 좁게 잡으면 매일 오탐이 뜬다."""
+    import watchdog as w
+    real = os.path.join(OUTPUTS, "watchdog.py")
+    for rc in (0, 267009, 267011, 267014, 2147750687):
+        monkeypatch.setattr(w, "_query_scheduled_tasks", lambda: (
+            [_task(_BS + "StockAI" + _BS + "X", result=rc, exec_line=real)], None))
+        assert all(r[2] for r in w.check_scheduled_tasks()), f"rc={rc} 를 실패로 오판"
+    for rc in (1, 2, 2147943467):
+        monkeypatch.setattr(w, "_query_scheduled_tasks", lambda: (
+            [_task(_BS + "StockAI" + _BS + "X", result=rc, exec_line=real)], None))
+        bad = [r for r in w.check_scheduled_tasks() if not r[2]]
+        assert bad and str(rc) in bad[0][3], f"rc={rc} 를 놓침"
+
+
+def test_task_check_never_fails_silently(monkeypatch):
+    """조회 자체가 실패하면 **조용히 넘어가면 안 된다**.
+
+    이 점검이 침묵하면 이 점검을 만든 이유가 그대로 사라진다.
+    """
+    import watchdog as w
+    monkeypatch.setattr(w, "_query_scheduled_tasks", lambda: (None, "rc=1 Access is denied"))
+    bad = [r for r in w.check_scheduled_tasks() if not r[2]]
+    assert len(bad) == 1 and "읽지 못" in bad[0][3], bad
+
+    monkeypatch.setattr(w, "_query_scheduled_tasks", lambda: ([], None))
+    bad = [r for r in w.check_scheduled_tasks() if not r[2]]
+    assert len(bad) == 1 and "하나도 없" in bad[0][3], bad
+
+
+def test_task_query_is_locale_independent():
+    """schtasks CSV 헤더는 로캘에 따라 번역된다 — 헤더 이름에 의존하면 안 된다.
+
+    2026-10-28 PC 이관 후 언어팩이 다르면 조용히 깨질 자리다.
+    감시 코드가 조용히 깨지는 건 감시가 없는 것보다 나쁘다.
+    """
+    src = open(os.path.join(OUTPUTS, "watchdog.py"), encoding="utf-8").read()
+    i = src.find("def _query_scheduled_tasks")
+    j = src.find("def _task_missing_targets")
+    body = src[i:j]
+    assert "Get-ScheduledTask" in body, "로캘 독립 API 를 쓰지 않는다"
+    for banned in ("마지막 결과", "실행할 작업", "Last Result", "Task To Run", "/fo", "csv"):
+        assert banned not in body, f"로캘 의존 CSV 헤더에 기대고 있다: {banned}"

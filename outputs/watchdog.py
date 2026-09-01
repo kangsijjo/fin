@@ -394,6 +394,183 @@ def check_ai_pipeline(max_days=9):
     return out
 
 
+# ── 작업 스케줄러 결과 감시 (2026-08-30 신설) ────────────────────────────────
+# 종전 감시는 전부 '결과물'을 봤다 — 데이터 최신성·신호·매매·스냅샷.
+# 그래서 **결과물이 없는 작업은 감시 자체가 불가능**했다.
+# 실제 사고: \KIS_Monthly 가 존재하지도 않는 monthly_xlsx_builder.py 를 실행하도록
+# 등록돼 있었고, 2026-06-12 등록 이후 3회 전부 실패(rc=2, 파일 없음)했는데
+# 아무도 몰랐다. exit 0 도 아니고 예외도 아니다 — 작업 스케줄러 안에서만 실패한다.
+#
+# 왜 schtasks /fo csv 가 아니라 Get-ScheduledTask 인가:
+#   schtasks 의 CSV 헤더는 **로캘에 따라 번역된다**(한국어 Windows 에선 '마지막 결과',
+#   '실행할 작업'). 헤더 이름을 박아두면 PC 를 바꾸거나 언어팩이 달라지는 순간
+#   조용히 깨진다 — 감시 코드가 조용히 깨지는 건 감시가 없는 것보다 나쁘다.
+#   Get-ScheduledTask 는 속성명이 로캘과 무관하다. (2026-10-28 PC 이관 대비)
+
+# 대상 범위 — 운영 작업 전부. 루트 \KIS_* 11개는 종전에 통째로 감시 밖이었다.
+_TASK_SCOPE_PS = r"$_.TaskPath -like '\StockAI\*' -or $_.TaskName -like 'KIS_*'"
+
+# 실패가 아닌 결과 코드. 좁게 잡으면 매일 오탐이 뜨고, 넓게 잡으면 감시가 무의미해진다.
+_TASK_OK_RESULTS = {
+    0:          "성공",
+    267009:     "실행 중",                 # 0x41301
+    267011:     "아직 실행된 적 없음",       # 0x41303
+    267014:     "사용자가 종료",             # 0x41306
+    2147750687: "이미 실행 중(중복 방지)",    # 0x8004131F
+}
+
+# 자주 보는 실패 코드는 뜻을 붙여준다(숫자만 보면 아무도 조치하지 않는다).
+_TASK_ERR_HINT = {
+    1:          "실행 대상이 비정상 종료",
+    2:          "실행할 파일을 찾을 수 없음",
+    267010:     "작업이 사용 안 함 상태",
+    2147943467: "프로세스가 예기치 않게 종료됨",   # 0x8007042B
+    2147942402: "지정한 파일을 찾을 수 없음",       # 0x80070002
+}
+
+
+def _query_scheduled_tasks():
+    """작업 스케줄러 상태를 로캘 독립적으로 읽는다. → (목록, 오류메시지)."""
+    import json as _json
+    import subprocess
+    if os.name != "nt":
+        return [], None
+    ps = (
+        "$ErrorActionPreference='Stop';"
+        "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
+        "@(Get-ScheduledTask | Where-Object { " + _TASK_SCOPE_PS + " } | ForEach-Object {"
+        "  $i = $_ | Get-ScheduledTaskInfo;"
+        "  [PSCustomObject]@{"
+        "    path   = $_.TaskPath + $_.TaskName;"
+        "    core   = [bool]($_.TaskPath -like '\StockAI\*');"
+        "    state  = [string]$_.State;"
+        "    result = $i.LastTaskResult;"
+        "    last   = if ($i.LastRunTime) { $i.LastRunTime.ToString('yyyy-MM-dd HH:mm') } else { '' };"
+        "    exec   = (($_.Actions | ForEach-Object { ($_.Execute + ' ' + $_.Arguments).Trim() }) -join ' ;; ')"
+        "  }"
+        "}) | ConvertTo-Json -Compress -Depth 3"
+    )
+    # PATH 에 powershell 이 없는 환경(작업 스케줄러 세션·이관 직후 PC)에서
+    # FileNotFoundError 로 매일 오탐이 나지 않도록 절대경로를 예비로 둔다.
+    root = os.environ.get("SystemRoot", "C:" + chr(92) + "Windows")
+    exes = ["powershell",
+            os.path.join(root, "System32", "WindowsPowerShell", "v1.0",
+                         "powershell.exe")]
+    r, last = None, "실행 파일 없음"
+    for exe in exes:
+        try:
+            r = subprocess.run([exe, "-NoProfile", "-NonInteractive", "-Command", ps],
+                               capture_output=True, timeout=120)
+            break
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            return None, f"{type(e).__name__}: {str(e)[:80]}"
+    if r is None:
+        return None, f"PowerShell 을 찾지 못했습니다({last})"
+    if r.returncode != 0:
+        err = r.stderr.decode("utf-8", errors="replace").strip().replace("\n", " ")
+        return None, f"rc={r.returncode} {err[:100]}"
+    out = r.stdout.decode("utf-8", errors="replace").strip()
+    if not out:
+        return None, "응답이 비어 있음"
+    try:
+        data = _json.loads(out)
+    except Exception as e:
+        return None, f"응답 해석 실패: {str(e)[:80]}"
+    return ([data] if isinstance(data, dict) else data), None
+
+
+def _task_missing_targets(exec_line):
+    """실행 명령에서 파일 경로를 뽑아 '없는 것'만 돌려준다.
+
+    인자에 섞인 경로까지 본다 — KIS_Monthly 는 실행 파일이 cmd 였고 정작 없는 건
+    인자 쪽 .py 였다. 실행 파일만 보면 바로 그 사고를 놓친다.
+    """
+    import re as _re
+    exts = (".bat", ".cmd", ".py", ".ps1", ".exe")
+    # 경로에 올 수 없는 구분 문자들. 정규식에 역슬래시를 한 글자도 쓰지 않는다 —
+    # 경로 자체가 역슬래시투성이라 이스케이프가 한 번만 어긋나도 조용히 0건이 된다
+    # (실제로 첫 구현이 그렇게 실패했다: 유령 작업을 결과코드로만 잡고 경로로는 못 잡음).
+    delims = '"' + "'" + chr(9) + " &|<>;"
+    line = exec_line or ""
+    # 따옴표로 감싼 경로(공백 포함 가능)를 먼저 떼어낸 뒤, 남은 곳에서 공백 없는 경로를 찾는다
+    cands = _re.findall('"([^"]+)"', line)
+    cands += _re.findall("[A-Za-z]:[^" + delims + "]+",
+                         _re.sub('"[^"]*"', " ", line))
+    seen, miss = set(), []
+    for p in cands:
+        p = p.strip().strip(",")
+        low = p.lower()
+        if len(p) < 4 or p[1:2] != ":" or not low.endswith(exts) or low in seen:
+            continue
+        seen.add(low)
+        if not os.path.exists(p):
+            miss.append(p)
+    return miss
+
+
+def check_scheduled_tasks():
+    """작업 스케줄러가 '실제로 무엇을 반환했는가'를 직접 읽는다.
+
+    세 가지를 본다:
+      (a) StockAI 폴더의 작업이 '사용 안 함' 으로 꺼져 있는가 — 운영 작업은 전부 켜져 있어야 한다.
+          (루트 KIS_* 에는 의도적으로 꺼둔 레거시가 있어 대상에서 뺀다)
+      (b) 실행 대상 파일이 실제로 존재하는가 — '등록은 됐는데 실행 대상이 없다' 유형.
+      (c) 마지막 결과 코드가 실패인가 — 실행 중/미실행/중복방지는 실패가 아니다.
+
+    조회 자체가 실패하면 **조용히 넘기지 않고 알린다**. 이 점검이 침묵하면
+    이 점검을 만든 이유가 그대로 사라지기 때문이다.
+    """
+    out = []
+    if os.name != "nt":
+        return out
+    tasks, err = _query_scheduled_tasks()
+    if err:
+        return [("sched_tasks", "작업 스케줄러", False,
+                 f"작업 목록을 읽지 못했습니다 — {err} (감시 공백 상태)")]
+    if not tasks:
+        return [("sched_tasks", "작업 스케줄러", False,
+                 "등록된 StockAI/KIS 작업이 하나도 없습니다 — 작업이 통째로 사라졌을 수 있습니다")]
+
+    disabled, missing, failed = [], [], []
+    for t in tasks:
+        path = str(t.get("path", "?"))
+        state = str(t.get("state", "")).lower()
+        if state == "disabled":
+            if t.get("core"):        # StockAI 폴더 = 운영 필수 작업
+                disabled.append(path)
+            continue                      # 꺼진 작업은 실행되지 않으므로 결과 판정 제외
+        for p in _task_missing_targets(t.get("exec", "")):
+            missing.append((path, p))
+        rc = t.get("result")
+        if isinstance(rc, int) and rc not in _TASK_OK_RESULTS:
+            hint = _TASK_ERR_HINT.get(rc, "")
+            when = t.get("last") or "실행 이력 없음"
+            failed.append(f"{path} rc={rc}"
+                          + (f"({hint})" if hint else "")
+                          + f" — 마지막 {when}")
+
+    n = len(tasks)
+    if disabled:
+        out.append(("sched_disabled", "운영 작업 켜짐", False,
+                    "꺼져 있음: " + ", ".join(disabled[:5])
+                    + " — 해당 작업은 이제 아예 실행되지 않습니다"))
+    if missing:
+        out.append(("sched_target", "작업 실행 대상", False,
+                    "실행 대상 파일 없음: "
+                    + "; ".join(f"{tn} → {fp}" for tn, fp in missing[:4])
+                    + " — 이 작업은 매번 실패만 반복합니다(삭제하거나 파일을 만드세요)"))
+    if failed:
+        out.append(("sched_result", "작업 실행 결과", False,
+                    "마지막 실행 실패: " + " / ".join(failed[:4])))
+    if not (disabled or missing or failed):
+        out.append(("sched_tasks", "작업 스케줄러", True,
+                    f"정상(작업 {n}개 — 켜짐 상태·실행 대상·마지막 결과 모두 이상 없음)"))
+    return out
+
+
+
 def check_trading():
     """매매 작업 — 평일 09:10 이후, 오늘 kis/kiwoom 트레이더 로그가 있나.
 
@@ -543,6 +720,10 @@ def run_all_checks():
     results += check_idle_buying()     # 연속 매수 0건(2026-08-09 신설)
     results += check_account_blocked() # 계좌 자체 주문불가(2026-08-20 신설)
     results += check_ai_pipeline()     # 주간 학습 완주 이력(2026-08-09 신설)
+    # 작업 스케줄러가 '무엇을 반환했는가'를 직접 읽는다.
+    # 종전 감시는 결과물만 봐서, 결과물이 없는 작업은 감시할 수 없었다.
+    # (\KIS_Monthly 가 없는 스크립트를 3개월간 실패 — 2026-08-30 신설)
+    results += check_scheduled_tasks()
     # 3층 안전장치 — 위 판정 결과를 받아 '사고'면 신규매수를 실제로 정지시킨다.
     # (알리기만 하던 종전 동작의 공백. 2026-08-27 신설)
     results += check_kill_switch(results)
