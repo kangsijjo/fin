@@ -862,6 +862,11 @@ def test_expire_sell_gets_a_larger_balance_retry_budget():
 
     08-21 실사고: 15:21:07 시작 → 잔고조회 3회 전부 타임아웃 → 15:22:18 크래시.
     그 시점에 창이 8분 남아 있었고 15:40 조회는 정상이었다.
+
+    [2026-09-04] '끈질김'의 측정 방식을 바꿨다. 종전엔 **시도 횟수**(6회)로 봤는데,
+    서버가 느린 것이지 죽은 게 아니라면 짧은 시도를 여러 번 하는 건 전부 헛되다
+    (15초씩 6번 = 전부 타임아웃). 이제 **한 번의 시도가 기다리는 시간**으로 본다:
+    15초 x 6 = 90초 대기 → 40초 x 3 = 120초 대기. 총 소요는 비슷, 성공률은 상승.
     """
     import inspect
     import kis_trader as kx
@@ -871,8 +876,9 @@ def test_expire_sell_gets_a_larger_balance_retry_budget():
     assert sig.parameters["attempts"].default == 3, "기본값(매수 경로)은 종전 유지"
 
     src = inspect.getsource(kx.cmd_sell)
-    assert 'if "expire" in reasons else 3' in src, \
-        "만기 경로와 손절 경로의 재시도 예산이 분리돼 있어야 한다"
+    assert "BALANCE_TIMEOUT_EXPIRE if _expire else BALANCE_TIMEOUT" in src, (
+        "만기 경로와 손절 경로의 대기 예산이 분리돼 있어야 한다")
+    assert kx.BALANCE_TIMEOUT_EXPIRE > kx.BALANCE_TIMEOUT
 
 
 def test_token_cache_is_bound_to_the_app_key():
@@ -1541,3 +1547,49 @@ def test_token_cache_lifetime_is_capped():
     src = open(os.path.join(OUTPUTS, "kis_trader.py"), encoding="utf-8").read()
     assert "12 * 3600" in src, "토큰 신뢰 수명 상한이 사라졌다"
     assert "def invalidate_token" in src, "토큰 폐기 경로가 없다"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 잔고조회 타임아웃 — 2026-09-04
+#   실측: 한산한 장중 응답 평균 5.73초 / 최대 6.49초. 종전 timeout=15 는 2.6배뿐이라
+#   마감 동시호가에 그대로 넘겼다(08-11/12/14/21/26, 09-01/03 ReadTimeout 대부분 15:21).
+#   만기청산은 15:30 마감시한이 있어 '총 대기 예산'이 늘어나면 안 된다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_expire_path_waits_longer_per_attempt():
+    import kis_trader as kt
+    assert kt.BALANCE_TIMEOUT >= 20, "기본 타임아웃이 측정 기준선(5.7초) 대비 너무 얇다"
+    assert kt.BALANCE_TIMEOUT_EXPIRE > kt.BALANCE_TIMEOUT, \
+        "만기청산 경로가 기본보다 오래 기다리지 않는다"
+
+
+def test_expire_path_total_budget_stays_within_close_deadline():
+    """마감시한 방어 — 시도횟수 x 타임아웃 + 백오프가 커지면 15:30 을 놓친다.
+
+    종전(15s x 6 + 백오프 30s = 120초)과 비슷한 예산을 유지해야 한다.
+    누군가 나중에 '더 끈질기게' 하려고 횟수를 늘리면 이 테스트가 막는다.
+    """
+    import inspect
+    import re as _re
+    import kis_trader as kt
+    src = inspect.getsource(kt.cmd_sell)
+    m = _re.search(r"_bal_tries\s*=\s*(\d+)", src)
+    assert m, "_bal_tries 를 찾지 못했다"
+    tries = int(m.group(1))
+    backoff = sum(2 * (i + 1) for i in range(tries - 1))
+    worst = tries * kt.BALANCE_TIMEOUT_EXPIRE + backoff
+    assert worst <= 140, (
+        f"만기청산 최악 소요 {worst}초 — 15:21 시작 시 재시도 여유가 사라진다")
+    # 실제 대기시간(타임아웃 합)은 종전 90초(15x6)보다 늘어야 한다
+    assert tries * kt.BALANCE_TIMEOUT_EXPIRE >= 120, \
+        "느린 서버를 기다리는 총 시간이 종전보다 줄었다"
+
+
+def test_get_balance_accepts_timeout_override():
+    import inspect
+    import kis_trader as kt
+    sig = inspect.signature(kt.KISMockClient.get_balance)
+    assert "timeout" in sig.parameters, "호출측이 타임아웃을 정할 수 없다"
+    src = inspect.getsource(kt.KISMockClient.get_balance)
+    assert "timeout or BALANCE_TIMEOUT" in src, "기본값이 상수에서 오지 않는다"
+    assert "timeout=15" not in src, "하드코딩된 15초가 남아 있다"

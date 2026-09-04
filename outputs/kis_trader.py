@@ -222,6 +222,21 @@ def kis_lock(timeout: int = 60):
 
 
 # ── KIS 모의투자 클라이언트 ────────────────────────────────────────────────────
+# ── 잔고조회 타임아웃 (2026-09-04 실측 기반) ────────────────────────────────
+# 한산한 장중(11시대)에 잰 잔고조회 응답시간: 평균 5.73초 / 최대 6.49초.
+# 종전 timeout=15 는 기준선의 2.6배밖에 안 됐다 — 마감 동시호가(15:20~15:30)에
+# 부하가 조금만 올라도 그대로 넘긴다. 실제로 08-11/12/14/21/26, 09-01/03 의
+# ReadTimeout 이 거의 전부 15:21 PM 실행이었다.
+#
+# 만기청산은 **15:30 이라는 마감시한**이 있는 경로다. 종전 구조는 15s x 6회로
+# 잘게 끊어 시도했는데, 서버가 느린 것이지 죽은 게 아니라면 짧은 시도를 여러 번
+# 하는 건 전부 헛되다. 총 대기 예산은 비슷하게 두고 **한 번의 시도가 서버를
+# 기다리는 시간**을 늘린다: 15s x 6 = 90초 대기 → 40s x 3 = 120초 대기.
+# (최악 소요는 backoff 포함 약 126초로 종전 120초와 거의 같다)
+BALANCE_TIMEOUT = 20          # 기본 — 측정 기준선의 3.5배
+BALANCE_TIMEOUT_EXPIRE = 40   # 만기청산 경로 — 마감시한이 있어 '느린 서버'를 더 기다린다
+
+
 # ── KIS 토큰 오류 판정 (2026-09-04 신설) ────────────────────────────────────
 # KIS 는 **만료된 토큰에 401 이 아니라 HTTP 500** 을 준다. 원인은 본문에만 있다.
 #   {"rt_cd":"1","msg1":"기간이 만료된 token 입니다.","msg_cd":"EGW00123"}
@@ -364,7 +379,7 @@ class KISMockClient:
             print(f"[warn] hashkey 실패(주문은 hashkey 없이 진행): {e}")
             return ""
 
-    def get_balance(self, attempts: int = 3):
+    def get_balance(self, attempts: int = 3, timeout: int | None = None):
         """잔고 조회 → (deposit, positions).
 
         deposit   : int — 예수금(주문가능)
@@ -393,7 +408,7 @@ class KISMockClient:
                 r = requests.get(
                     f"{MOCK_URL}/uapi/domestic-stock/v1/trading/inquire-balance",
                     headers=self._hdrs("VTTC8434R"),
-                    params=params, timeout=15,
+                    params=params, timeout=(timeout or BALANCE_TIMEOUT),
                 )
                 if r.status_code >= 500:
                     # 만료 토큰도 500 으로 온다 — 재시도가 아니라 재발급이 답이다.
@@ -1412,8 +1427,13 @@ def cmd_sell(reasons=("expire", "stop")):
     client = KISMockClient()
     # 만기 청산은 마감 동시호가(15:20~15:30) 안에서 끝내면 되므로 시간 여유가 있다.
     # 손절(AM)은 시가 근처가 목적이라 종전대로 3회.
-    _bal_tries = 6 if "expire" in reasons else 3
-    _, positions = client.get_balance(attempts=_bal_tries)
+    # 만기청산은 마감시한(15:30)이 있다 — 짧게 여러 번보다 길게 몇 번이 낫다.
+    # (2026-09-04: 15s x 6 → 40s x 3. 총 예산 유지, 실제 대기시간은 90→120초)
+    _expire = "expire" in reasons
+    _bal_tries = 3
+    _, positions = client.get_balance(
+        attempts=_bal_tries,
+        timeout=(BALANCE_TIMEOUT_EXPIRE if _expire else BALANCE_TIMEOUT))
     already = today_ordered_codes("sell")
     bought_today = today_ordered_codes("buy")
     strategy_map = get_signal_strategy_map()
