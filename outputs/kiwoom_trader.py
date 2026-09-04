@@ -32,6 +32,7 @@
 """
 
 import os
+from fin_paths import KIWOOM_LOCK as _FIN_KIWOOM_LOCK   # 절대경로 단일 출처(2026-09-04)
 import re as _re
 import sys
 import csv
@@ -66,7 +67,7 @@ def _retry_note():
 _LOCK_CANDIDATES = [
     os.getenv("KIWOOM_LOCK", ""),
     "../Stock_AI_Project/data/.kiwoom.lock",
-    "C:/fin/Stock_AI_Project/data/.kiwoom.lock",
+    str(_FIN_KIWOOM_LOCK),                    # FIN_ROOT 기반(fin_paths) — 이관 시 자동 추적
 ]
 _LOCK_PATH = next((p for p in _LOCK_CANDIDATES if p and os.path.dirname(p)
                    and os.path.isdir(os.path.dirname(p))), None)

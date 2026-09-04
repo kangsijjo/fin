@@ -38,6 +38,7 @@ strength_logger.py — 신호 강도(IC가중 팩터점수) 백데이터 로거 
 from __future__ import annotations
 
 import os
+from fin_paths import STOCK_DB as _FIN_STOCK_DB   # 절대경로 단일 출처(2026-09-04)
 import csv
 import json
 import math
@@ -56,7 +57,7 @@ _FIELDS = [
 _STOCK_DB_PATHS = [
     os.path.join(_HERE, "..", "Stock_AI_Project", "data", "stock.db"),
     "../Stock_AI_Project/data/stock.db",
-    "C:/fin/Stock_AI_Project/data/stock.db",
+    str(_FIN_STOCK_DB),                       # FIN_ROOT 기반(fin_paths) — 이관 시 자동 추적
 ]
 
 

@@ -36,6 +36,7 @@ KIS 모의 TR ID:
 """
 
 import os
+from fin_paths import KIWOOM_LOCK as _FIN_KIWOOM_LOCK   # 절대경로 단일 출처(2026-09-04)
 import re as _re
 import sys
 import csv
@@ -150,7 +151,7 @@ _ACNT_PRDT_CD = _ACCOUNT[8:] if len(_ACCOUNT) > 8 else "01"
 _LOCK_CANDIDATES = [
     os.getenv("KIWOOM_LOCK", ""),
     "../Stock_AI_Project/data/.kiwoom.lock",
-    "C:/fin/Stock_AI_Project/data/.kiwoom.lock",
+    str(_FIN_KIWOOM_LOCK),                    # FIN_ROOT 기반(fin_paths) — 이관 시 자동 추적
 ]
 _LOCK_PATH = next(
     (p for p in _LOCK_CANDIDATES

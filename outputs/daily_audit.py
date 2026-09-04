@@ -9,6 +9,7 @@ daily_audit.py — 매일 자동화 자가점검. 2026-06-20 신설.
 수동: python daily_audit.py
 """
 import os
+from fin_paths import STOCK_DB as _FIN_STOCK_DB   # 절대경로 단일 출처(2026-09-04)
 import re
 import sys
 import glob
@@ -28,7 +29,7 @@ TODAY = NOW.strftime("%Y%m%d")
 _DB_CANDIDATES = [
     os.environ.get("STOCK_DB_PATH", ""),
     os.path.join(BASE, "..", "Stock_AI_Project", "data", "stock.db"),
-    r"C:/fin/Stock_AI_Project/data/stock.db",
+    str(_FIN_STOCK_DB),                       # FIN_ROOT 기반(fin_paths) — 이관 시 자동 추적
 ]
 
 # (테이블, 날짜컬럼, 최대허용일) — get_health 와 동일 기준

@@ -14,7 +14,7 @@ import argparse
 import os
 import sys
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -100,8 +100,19 @@ ALL_STRATEGIES = [
 
 
 def _stats(trades, start_date, end_date):
+    """매매 목록 기준 요약 통계 — **스크리닝용 근사치**다.
+
+    [2026-09-04] sharpe → sharpe_proxy, mdd_roll → mdd_proxy_10t 로 이름을 바꿨다.
+      · sharpe_proxy  = 매매별 수익률 평균/표준편차 x sqrt(연간 매매수). 자본곡선이 아니라
+        매매 목록 기준이라 동시보유·미체결 기간을 무시한다. 진짜 Sharpe 가 아니다.
+      · mdd_proxy_10t = 연속 10매매 합의 최소값. 진짜 MDD 가 아니다 — README 에서
+        -8% → -42.6% 로 교정했던 그 함정과 같은 종류다.
+    이름이 'sharpe', 'mdd' 면 읽는 사람이 진짜라고 믿는다. 진짜 값은 --verify 가
+    capital_simulator 로 계산한다(real_sharpe / real_mdd_pct).
+    """
     NULL_KEYS = ["n_trades","annual_trades","win_rate","avg_net","avg_win",
-                 "avg_loss","profit_factor","avg_hold","ev_1slot","ev_10slot","mdd_roll","sharpe","worst_trade"]
+                 "avg_loss","profit_factor","avg_hold","ev_1slot","ev_10slot",
+                 "mdd_proxy_10t","sharpe_proxy","worst_trade"]
     if not trades:
         return {k: None for k in NULL_KEYS}
     df = pd.DataFrame([t.__dict__ for t in trades])
@@ -129,14 +140,15 @@ def _stats(trades, start_date, end_date):
     ev_1slot  = min(annual_trades, slot_cap)       * avg_net
     ev_10slot = min(annual_trades, slot_cap * 10.) * avg_net
     roll10 = df["net_pct"].rolling(10, min_periods=1).sum()
-    mdd_roll = roll10.min()
+    mdd_proxy_10t = roll10.min()
     rets = df["net_pct"]
-    sharpe = (rets.mean() / (rets.std() + 1e-9)) * math.sqrt(annual_trades)
+    sharpe_proxy = (rets.mean() / (rets.std() + 1e-9)) * math.sqrt(annual_trades)
     return {"n_trades": n, "annual_trades": round(annual_trades,1), "win_rate": round(win_rate,1),
             "avg_net": round(avg_net,2), "avg_win": round(avg_win,2), "avg_loss": round(avg_loss,2),
             "profit_factor": round(profit_factor,2), "avg_hold": round(avg_hold,1),
             "ev_1slot": round(ev_1slot,1), "ev_10slot": round(ev_10slot,1),
-            "mdd_roll": round(mdd_roll,2), "sharpe": round(sharpe,2), "worst_trade": round(rets.min(),2)}
+            "mdd_proxy_10t": round(mdd_proxy_10t,2), "sharpe_proxy": round(sharpe_proxy,2),
+            "worst_trade": round(rets.min(),2)}
 
 
 def _equity_curve(trades, strategy_name):
@@ -149,6 +161,56 @@ def _equity_curve(trades, strategy_name):
     return df[["strategy","entry_date","exit_date","cum_pct","net_pct","code"]]
 
 
+def verify_top(df_res, trades_by_name, top_n, oos_years, d_max):
+    """비교표 상위 N개를 **진짜 지표**로 재검증한다. (2026-09-04 신설)
+
+    왜 필요한가 — 다중검정 선택편향
+      ALL_STRATEGIES 에 47개를 등록하고 ev_10slot 내림차순 1등을 뽑으면, 47개 중엔
+      **우연히** 좋아 보이는 게 반드시 나온다. 비교표의 sharpe_proxy/mdd_proxy_10t 는
+      매매 목록 기준 근사치라 이 편향을 걸러주지 못한다.
+      실무에선 '비교표 스크리닝 → 상위 소수만 capital_simulator + 표본외' 2단계를
+      손으로 하고 있었는데, 코드가 이를 강제하지 않았다. 이제 --verify 가 강제한다.
+
+    재검증 두 가지
+      · capital_simulator.simulate_capital — 자본곡선 기준 진짜 MDD/Sharpe/CAGR.
+      · 최근 oos_years 년 표본외(OOS) — 규칙 고정 전략이라 재적합할 파라미터가 없으므로,
+        '가장 최근 구간에서도 성과가 유지되는가' 가 walk-forward 의 실질적 등가물이다.
+        표본내(IS) 대비 OOS 평균수익이 크게 꺾이면 과거 우연에 맞춘 전략일 가능성이 크다.
+    """
+    from capital_simulator import simulate_capital
+    d1 = datetime.strptime(str(d_max), "%Y%m%d")
+    cutoff = (d1 - timedelta(days=int(oos_years * 365.25))).strftime("%Y%m%d")
+
+    def _avg(ts):
+        return round(sum(t.net_pct for t in ts) / len(ts), 2) if ts else None
+
+    def _wr(ts):
+        return round(sum(1 for t in ts if t.net_pct > 0) / len(ts) * 100, 1) if ts else None
+
+    rows = []
+    for name in df_res["strategy"].head(top_n):
+        trades = trades_by_name.get(name) or []
+        oos = [t for t in trades if str(t.entry_date) >= cutoff]
+        ins = [t for t in trades if str(t.entry_date) <  cutoff]
+        sim_all = simulate_capital(trades) or {}
+        sim_oos = simulate_capital(oos) or {}
+        rows.append({
+            "strategy":      name,
+            "n_trades":      len(trades),
+            "real_cagr_pct": sim_all.get("cagr_pct"),
+            "real_mdd_pct":  sim_all.get("real_mdd_pct"),
+            "real_sharpe":   sim_all.get("real_sharpe"),
+            "is_avg_net":    _avg(ins),
+            "oos_avg_net":   _avg(oos),
+            "is_win_rate":   _wr(ins),
+            "oos_win_rate":  _wr(oos),
+            "oos_n":         len(oos),
+            "oos_real_mdd":  sim_oos.get("real_mdd_pct"),
+            "oos_cutoff":    cutoff,
+        })
+    return pd.DataFrame(rows)
+
+
 def main():
     parser = argparse.ArgumentParser(description="전략 비교 백테스트 엔진")
     parser.add_argument("--start",    type=str, default=None)
@@ -156,6 +218,11 @@ def main():
     parser.add_argument("--strategy", type=str, default=None)
     parser.add_argument("--out",      type=str, default=None)
     parser.add_argument("--no-equity", action="store_true")
+    parser.add_argument("--verify", type=int, default=0, metavar="TOP_N",
+                        help="ev_10slot 상위 N개를 capital_simulator(진짜 MDD/Sharpe) + "
+                             "최근 N년 표본외(OOS) 로 재검증해 별도 표로 출력")
+    parser.add_argument("--oos-years", type=float, default=2.0,
+                        help="--verify 의 표본외 구간 길이(년). 기본 2")
     args = parser.parse_args()
 
     strategies = ALL_STRATEGIES
@@ -181,6 +248,7 @@ def main():
 
     results   = []
     eq_frames = []
+    trades_by_name = {}          # --verify 용
 
     print("\n[2/2] 전략 백테스트 실행...")
     for strat in strategies:
@@ -190,11 +258,13 @@ def main():
             stats  = _stats(trades, args.start, args.end)
             stats["strategy"] = strat.name
             results.append(stats)
+            if args.verify:
+                trades_by_name[strat.name] = trades
             if not args.no_equity:
                 eq_frames.append(_equity_curve(trades, strat.name))
             print(f"{stats['n_trades']:,}건  승률 {stats['win_rate']}%  "
                   f"평균수익 {stats['avg_net']}%  EV/yr(10slot) {stats['ev_10slot']}%p  "
-                  f"MDD(10연속) {stats['mdd_roll']}%")
+                  f"10매매근사MDD {stats['mdd_proxy_10t']}%")
         except Exception as e:
             print(f"ERROR: {e}")
             import traceback; traceback.print_exc()
@@ -202,7 +272,7 @@ def main():
 
     df_res = pd.DataFrame(results)
     cols_order = ["strategy","n_trades","annual_trades","win_rate","avg_net","avg_win","avg_loss",
-                  "profit_factor","avg_hold","ev_1slot","ev_10slot","mdd_roll","sharpe","worst_trade"]
+                  "profit_factor","avg_hold","ev_1slot","ev_10slot","mdd_proxy_10t","sharpe_proxy","worst_trade"]
     df_res = df_res.reindex(columns=[c for c in cols_order if c in df_res.columns])
     df_res = df_res.sort_values("ev_10slot", ascending=False).reset_index(drop=True)
 
@@ -224,6 +294,17 @@ def main():
         eq_path = f"results/strategy_equity_{today}.csv"
         pd.concat(eq_frames).to_csv(eq_path, index=False, encoding="utf-8-sig")
         print(f"  -> 수익곡선 저장: {eq_path}")
+
+    if args.verify:
+        df_ver = verify_top(df_res, trades_by_name, args.verify, args.oos_years, d_max)
+        print()
+        print("=" * 60)
+        print(f"  상위 {args.verify}개 재검증 — 진짜 지표(capital_simulator) + 최근 {args.oos_years:g}년 표본외")
+        print("=" * 60)
+        print(df_ver.to_string(index=False))
+        ver_path = f"results/strategy_verify_{today}.csv"
+        df_ver.to_csv(ver_path, index=False, encoding="utf-8-sig")
+        print(f"  -> 재검증표 저장: {ver_path}")
 
     print("\n완료.\n")
     return df_res

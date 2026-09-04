@@ -81,7 +81,7 @@ git clone <repo>
 cd Stock_AI_Project
 python -m venv venv
 venv\Scripts\activate              # Windows
-pip install -r requirements-minimal.txt
+pip install -r requirements.txt
 ```
 
 ### `.env` 설정

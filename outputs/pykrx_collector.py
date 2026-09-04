@@ -18,6 +18,7 @@ import config  # noqa: F401
 from pykrx import stock
 import pandas as pd
 import os
+from fin_paths import STOCK_DB as _FIN_STOCK_DB   # 절대경로 단일 출처(2026-09-04)
 import sqlite3
 import time
 import random
@@ -32,7 +33,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 _STOCK_DB_CANDIDATES = [
     os.getenv("STOCK_DB", ""),
     "../Stock_AI_Project/data/stock.db",
-    "C:/fin/Stock_AI_Project/data/stock.db",
+    str(_FIN_STOCK_DB),                       # FIN_ROOT 기반(fin_paths) — 이관 시 자동 추적
 ]
 
 

@@ -130,6 +130,8 @@ def _dash_secret_key():
 
 app.secret_key = _dash_secret_key()
 app.permanent_session_lifetime = timedelta(days=30)
+# 타 사이트발 요청에는 세션 쿠키가 실리지 않게(Lax) — CSRF 4번째 겹. JS 에서 쿠키 접근 금지.
+app.config.update(SESSION_COOKIE_SAMESITE="Lax", SESSION_COOKIE_HTTPONLY=True)
 
 
 def _via_proxy(req):
@@ -146,6 +148,41 @@ def _via_proxy(req):
 
 def _is_local(req):
     return (req.remote_addr in _LOCAL_ADDRS) and not _via_proxy(req)
+
+
+# 상태를 바꾸는 POST 가 '대시보드 페이지 자신'에서 왔는지 확인한다.
+_ACTION_HEADER = "X-Dashboard-Action"
+
+
+def _same_origin_action(req):
+    """CSRF 방어 — 세 겹이고 각각 단독으로도 충분하다.
+
+    배경(2026-09-04, 외부 평가에서 지적 → 재현 확인): /api/run 은 remote_addr 이
+    127.0.0.1 이면 통과했다. 그런데 사용자가 악성 페이지를 열어두면 그 페이지의 JS 가
+      fetch("http://127.0.0.1:5050/api/run/kiwoom_buy", {method:"POST", mode:"no-cors"})
+    를 보낼 수 있고, 브라우저 입장에서 이건 **내 PC 에서 나가는 요청**이라 remote_addr 이
+    127.0.0.1 로 찍힌다. 가드를 통과해 kiwoom_trader.py buy 가 실행된다. 응답은 못 읽지만
+    주문은 이미 나갔다. 같은 날 붙인 인증 계층도 로컬은 면제라 소용이 없다.
+    (Flask 테스트 클라이언트 재현: 타 출처 POST → 400 '알 수 없는 작업' = 실행기 도달)
+
+    ① 커스텀 헤더 필수 — 타 출처는 이 헤더를 붙일 수 없다. no-cors 모드와 HTML form 은
+       커스텀 헤더 자체가 불가능하고, 일반 fetch 는 preflight 를 거치는데 우리는 CORS 를
+       허용하지 않으므로 브라우저가 막는다. **값은 비밀이 아니어도 된다** — 방어의 핵심은
+       값이 아니라 '커스텀 헤더가 존재한다'는 사실이다(시크릿 토큰은 관리 부담만 늘린다).
+    ② Origin 이 있으면 우리 호스트와 같아야 한다.
+    ③ Sec-Fetch-Site 가 있으면 same-origin 이어야 한다.
+    """
+    if req.headers.get(_ACTION_HEADER) != "1":
+        return False
+    origin = req.headers.get("Origin")
+    if origin:
+        from urllib.parse import urlparse
+        if urlparse(origin).netloc != req.host:
+            return False
+    sfs = req.headers.get("Sec-Fetch-Site")
+    if sfs and sfs not in ("same-origin", "none"):
+        return False
+    return True
 
 
 def _page(title, body, code=200):
@@ -175,7 +212,7 @@ def _require_auth():
     if not DASH_PASSWORD:
         return _page("설정 필요",
                      "<h1>원격 접속이 설정되지 않았습니다</h1>"
-                     "<p>C:\fin\outputs\.env 에 <b>DASH_PASSWORD=원하는비밀번호</b> 를 "
+                     f"<p>{BASE / '.env'} 에 <b>DASH_PASSWORD=원하는비밀번호</b> 를 "
                      "추가하고 대시보드를 재시작하세요.</p>", 403)
     if session.get("ok") is True:
         return None
@@ -1917,6 +1954,8 @@ def api_intraday():
 @app.route("/api/intraday/refresh", methods=["POST"])
 def api_intraday_refresh():
     """intraday_monitor.run() 즉시 실행 후 최신 캐시 반환."""
+    if not _same_origin_action(request):          # CSRF 차단(2026-09-04)
+        return jsonify({"error": "대시보드 페이지에서만 실행할 수 있습니다"}), 403
     try:
         import intraday_monitor
         intraday_monitor.run()
@@ -2015,11 +2054,17 @@ _AI_GROUP = {"ai_dataset", "ai_train", "ai_pipeline"}
 
 
 @app.after_request
-def _add_cors(resp):
-    """dashboard.html(file://)에서 fetch 가능하도록 CORS 허용."""
-    resp.headers["Access-Control-Allow-Origin"]  = "*"
-    resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+def _security_headers(resp):
+    """[2026-09-04] CORS 와일드카드 제거 — CSRF 의 문을 닫는다.
+
+    종전엔 "dashboard.html(file://)에서 fetch 가능하도록" Access-Control-Allow-Origin: *
+    를 붙였다. 그런데 / 가 HTML 을 직접 서빙하므로 file:// 경로는 이미 쓰이지 않는다.
+    남은 효과는 하나 — **아무 사이트의 JS 가 이 서버의 응답을 읽을 수 있게** 해주는 것.
+    잔고·보유종목·매매이력이 그 대상이었다. 헤더를 붙이지 않으면 브라우저가 타 출처
+    요청을 막아준다. 같은 출처(대시보드 페이지 자신)는 CORS 와 무관하게 동작한다.
+    """
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     return resp
 
 
@@ -2028,6 +2073,10 @@ def api_run(task):
     """수동 실행 엔드포인트 — 로컬 접속만 허용."""
     if request.method == "OPTIONS":
         return "", 204
+    # 타 사이트 페이지가 내 브라우저를 통해 보내는 요청 차단 — _same_origin_action 주석 참고.
+    if not _same_origin_action(request):
+        return jsonify({"ok": False,
+                        "msg": "대시보드 페이지에서만 실행할 수 있습니다(CSRF 차단)"}), 403
     # 프록시 경유면 remote_addr 을 믿을 수 없다 — _via_proxy 주석 참고.
     # 원격에서 스케줄러 재시작/AI 파이프라인을 돌릴 수 있으면 안 된다.
     if not _is_local(request):
@@ -3122,7 +3171,7 @@ function runTask(task, label, reloadMs){
     btn.textContent=btn.dataset.orig||btn.textContent; btn.style.background=''; btn.style.color=''; }
   const el=document.getElementById('run-status');
   if(el) el.innerHTML=`<span style="color:#38bdf8">${label} 시작 요청 중...</span>`;
-  fetch('/api/run/'+task,{method:'POST'}).then(r=>r.json()).then(d=>{
+  fetch('/api/run/'+task,{method:'POST',headers:{'X-Dashboard-Action':'1'}}).then(r=>r.json()).then(d=>{
     if(el) el.innerHTML=`<span style="${d.ok?'color:#10b981':'color:#ef4444'}">[${label}] ${d.msg||(d.ok?'시작됨':'실패')}</span> <span style="color:#64748b;font-size:11px">(${new Date().toLocaleTimeString()})</span>`;
     if(d.ok){ setTimeout(()=>{ refreshLogFiles('run_'+task+'.log').then(()=>loadLogFile()); }, 2000); }
     if(reloadMs && d.ok){ if(el) el.innerHTML+=` <span style="color:#94a3b8">— ${(reloadMs/1000)}초 후 갱신</span>`; setTimeout(()=>load(), reloadMs); }
@@ -3147,7 +3196,7 @@ function fillLogs(logs, files){
 
 async function refreshIntraday(){
   try{
-    const d=await fetch('/api/intraday/refresh',{method:'POST'}).then(r=>r.json());
+    const d=await fetch('/api/intraday/refresh',{method:'POST',headers:{'X-Dashboard-Action':'1'}}).then(r=>r.json());
     fillIntraday(d);
   }catch(e){
     const eb=document.getElementById('intra-err');

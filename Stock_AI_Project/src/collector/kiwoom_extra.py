@@ -41,7 +41,8 @@ SLEEP_BETWEEN_CALLS = 0.05
 _LOCK_CANDIDATES = [
     os.getenv("KIWOOM_LOCK", ""),
     os.path.join(os.path.dirname(__file__), "../../../data/.kiwoom.lock"),
-    "C:/fin/Stock_AI_Project/data/.kiwoom.lock",
+    os.path.join(os.environ.get("FIN_ROOT", ""), "Stock_AI_Project", "data", ".kiwoom.lock")
+        if os.environ.get("FIN_ROOT") else "",     # FIN_ROOT 환경변수(이관 대비, 2026-09-04)
 ]
 _LOCK_PATH = next((os.path.normpath(p) for p in _LOCK_CANDIDATES
                    if p and os.path.isdir(os.path.dirname(os.path.normpath(p)))), None)

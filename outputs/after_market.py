@@ -21,6 +21,7 @@ after_market.py — 시간외 단일가 등락률 순위 수집 → stock.db 누
 """
 from __future__ import annotations
 import os
+from fin_paths import STOCK_DB as _FIN_STOCK_DB   # 절대경로 단일 출처(2026-09-04)
 import sys
 import json
 import sqlite3
@@ -32,7 +33,7 @@ from kiwoom_market import KiwoomMarket, _first_list, _pick, _to_int, _to_float
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _DB_PATHS = [
     os.path.join(_HERE, "..", "Stock_AI_Project", "data", "stock.db"),
-    "C:/fin/Stock_AI_Project/data/stock.db",
+    str(_FIN_STOCK_DB),                       # FIN_ROOT 기반(fin_paths) — 이관 시 자동 추적
 ]
 _JSON_OUT = os.path.join(_HERE, "db", "kiwoom", "after_market.json")
 TODAY = datetime.now().strftime("%Y%m%d")

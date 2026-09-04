@@ -22,6 +22,7 @@ watchdog.py — '돌았어야 할 시점에 안 돌면' 자동 감지 → 텔레
 
 from __future__ import annotations
 import os
+from fin_paths import STOCK_DB as _FIN_STOCK_DB   # 절대경로 단일 출처(2026-09-04)
 import sys
 import json
 import glob
@@ -42,7 +43,7 @@ _STATE = os.path.join(_HERE, "db", "watchdog_state.json")
 _KIWOOM_DIR = os.path.join(_HERE, "db", "kiwoom")
 _STOCK_DB_PATHS = [
     os.path.join(_HERE, "..", "Stock_AI_Project", "data", "stock.db"),
-    "C:/fin/Stock_AI_Project/data/stock.db",
+    str(_FIN_STOCK_DB),                       # FIN_ROOT 기반(fin_paths) — 이관 시 자동 추적
 ]
 
 NOW = datetime.now()

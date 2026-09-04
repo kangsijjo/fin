@@ -16,6 +16,7 @@ v2 대비 변경:
 """
 
 import os
+from fin_paths import STOCK_DB as _FIN_STOCK_DB   # 절대경로 단일 출처(2026-09-04)
 import sys
 import sqlite3
 from datetime import datetime, timedelta
@@ -47,7 +48,7 @@ OUT = "./trades_history_v3.csv"
 STOCK_DB_CANDIDATES = [
     os.getenv("STOCK_DB", ""),
     "../Stock_AI_Project/data/stock.db",
-    "C:/fin/Stock_AI_Project/data/stock.db",
+    str(_FIN_STOCK_DB),                       # FIN_ROOT 기반(fin_paths) — 이관 시 자동 추적
 ]
 
 STRATEGIES = [

@@ -11,6 +11,7 @@ foreign_ratio_backtest.py — 외국인 '지분율 상승' vs '순매수 플로�
 실행: cd C:/fin/outputs ; .venv/Scripts/python.exe foreign_ratio_backtest.py
 """
 import os
+from fin_paths import STOCK_DB as _FIN_STOCK_DB   # 절대경로 단일 출처(2026-09-04)
 import sys
 import sqlite3
 import statistics as st
@@ -34,7 +35,7 @@ from strategies.foreign_inst_flow_ratio import ForeignInstFlowRatioStrategy
 STOCK_DB_CANDIDATES = [
     os.getenv("STOCK_DB", ""),
     "../Stock_AI_Project/data/stock.db",
-    "C:/fin/Stock_AI_Project/data/stock.db",
+    str(_FIN_STOCK_DB),                       # FIN_ROOT 기반(fin_paths) — 이관 시 자동 추적
 ]
 
 

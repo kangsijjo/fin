@@ -109,7 +109,8 @@ def test_proxy_headers_defeat_the_fake_localhost(with_pw):
 def test_local_execution_still_works(with_pw):
     """회귀 방지 — 진짜 로컬 실행 경로를 막아버리면 대시보드 버튼이 전부 죽는다."""
     with with_pw.app.test_client() as c:
-        r = c.post("/api/run/__nonexistent_task__", environ_base=LOCAL)
+        r = c.post("/api/run/__nonexistent_task__", environ_base=LOCAL,
+                   headers={"X-Dashboard-Action": "1"})   # 페이지 JS 가 붙이는 CSRF 헤더
         assert r.status_code == 400, "로컬 실행이 가드에 걸렸다(400=작업명 오류가 정상)"
 
 
