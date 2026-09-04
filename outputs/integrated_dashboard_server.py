@@ -11,7 +11,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 
 try:
-    from flask import Flask, jsonify, request
+    from flask import Flask, jsonify, request, session, redirect, Response
 except ImportError:
     print("pip install flask"); sys.exit(1)
 try:
@@ -46,13 +46,176 @@ except ImportError:
     app.json_encoder = _NpEncoder  # type: ignore
 
 # ── paths ──────────────────────────────────────────────────────────────────────
-PORT        = int(sys.argv[1]) if len(sys.argv) > 1 else 5050
+def _port_from_argv(default=5050):
+    """실행 인자로 포트 지정 — **숫자가 아닌 인자는 무시**한다.
+
+    [2026-08-30] 종전엔 int(sys.argv[1]) 를 그대로 했다. 그래서 argv 가 있는
+    환경(pytest 등)에서는 **import 만 해도 ValueError 로 죽었다** — 모듈이
+    자기가 __main__ 이라고 가정한 것. daily_audit 의 import 부수효과와 같은 부류.
+    """
+    for a in sys.argv[1:]:
+        if a.isdigit():
+            return int(a)
+    return default
+
+
+PORT        = _port_from_argv()
 BASE        = Path(__file__).parent
 AI_DIR      = BASE.parent / "Stock_AI_Project"
 DB_PATH     = AI_DIR / "data" / "stock.db"
 LOG_DIR     = BASE / "logs"           # 실제 로그 위치: C:\fin\outputs\logs\
 RESULTS_DIR = BASE / "results"
 KIWOOM_DIR  = BASE / "db" / "kiwoom"
+
+# ── 원격 접속 인증 (2026-08-30 신설) ─────────────────────────────────────────
+# 배경: 대시보드는 host="0.0.0.0" 으로 떠 있는데 인증이 하나도 없었다. 잔고,
+# 보유종목, 매매이력, 로그가 그대로 보인다. Tailscale 로 집 밖에서 보게 되면서
+# 이대로 두면 안 된다.
+#
+# 설계 원칙
+#   · 로컬(같은 PC)은 종전대로 무인증 — 대시보드 버튼과 자동화가 그대로 동작해야 한다.
+#   · 비밀번호 미설정 = 원격 접속 **차단**(fail-closed). 실수로 열리는 쪽이 아니라
+#     실수로 막히는 쪽으로 기운다.
+#   · 비밀번호는 .env 의 DASH_PASSWORD 에서만 읽는다 — 코드에도 git 에도 값이 없다.
+#   · 세션 키는 db/ 에 보관해 서버를 재시작해도 폰에서 다시 로그인하지 않게 한다.
+import hmac as _hmac
+import secrets as _secrets
+import time as _time
+
+
+def _load_dotenv(path=None):
+    """.env 를 os.environ 으로 — kis_trader 와 같은 방식(추가 의존성 없음)."""
+    p = path or (BASE / ".env")
+    try:
+        if not os.path.exists(p):
+            return
+        with open(p, encoding="utf-8-sig") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                # 인라인 주석은 '공백 뒤 #' 부터만 제거 — 값 안의 '#' 보존
+                for _i, _ch in enumerate(v):
+                    if _ch == "#" and (_i == 0 or v[_i - 1] in " 	"):
+                        v = v[:_i]
+                        break
+                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+    except Exception:
+        pass
+
+
+_load_dotenv()
+DASH_PASSWORD = os.environ.get("DASH_PASSWORD", "").strip()
+_LOCAL_ADDRS = ("127.0.0.1", "::1")
+_PUBLIC_PATHS = ("/login", "/favicon.ico")
+_LOGIN_FAILS = {"n": 0, "until": 0.0}
+
+
+def _dash_secret_key():
+    """세션 서명 키 — db/ 에 보관(gitignore 대상)해 재시작해도 로그인이 유지된다."""
+    p = BASE / "db" / "dashboard_secret.txt"
+    try:
+        if p.exists():
+            k = p.read_text(encoding="utf-8").strip()
+            if len(k) >= 32:
+                return k
+        p.parent.mkdir(parents=True, exist_ok=True)
+        k = _secrets.token_hex(32)
+        p.write_text(k, encoding="utf-8")
+        return k
+    except Exception:
+        return _secrets.token_hex(32)      # 저장 실패해도 동작(재시작 시 재로그인)
+
+
+app.secret_key = _dash_secret_key()
+app.permanent_session_lifetime = timedelta(days=30)
+
+
+def _via_proxy(req):
+    """프록시를 거쳐 왔는가 — remote_addr 을 믿을 수 없다는 신호.
+
+    Cloudflare Tunnel/ngrok 류는 PC 안에서 127.0.0.1 로 프록시한다. 그러면
+    remote_addr 이 **로컬로 찍혀** '로컬만 허용' 가드가 통째로 무력화된다.
+    Tailscale 은 100.x.x.x 로 그대로 오므로 해당 없음. 앞으로 터널을 붙이더라도
+    이 가드가 조용히 뚫리지 않도록 헤더 존재만으로 원격 취급한다.
+    """
+    return any(req.headers.get(h) for h in
+               ("X-Forwarded-For", "X-Real-IP", "Forwarded", "CF-Connecting-IP"))
+
+
+def _is_local(req):
+    return (req.remote_addr in _LOCAL_ADDRS) and not _via_proxy(req)
+
+
+def _page(title, body, code=200):
+    html = ("<!doctype html><meta charset=utf-8>"
+            "<meta name=viewport content='width=device-width,initial-scale=1'>"
+            f"<title>{title}</title>"
+            "<style>body{font-family:system-ui,-apple-system,'Malgun Gothic',sans-serif;"
+            "background:#0f1115;color:#e6e6e6;display:flex;min-height:100vh;margin:0;"
+            "align-items:center;justify-content:center}"
+            ".c{max-width:22rem;width:90%;text-align:center}"
+            "h1{font-size:1.1rem;margin:0 0 .8rem}p{color:#9aa0a6;font-size:.85rem;line-height:1.6}"
+            "input{width:100%;padding:.7rem;margin:.6rem 0;border-radius:.4rem;border:1px solid #333;"
+            "background:#191c22;color:#e6e6e6;font-size:1rem;box-sizing:border-box}"
+            "button{width:100%;padding:.7rem;border:0;border-radius:.4rem;background:#2b6cb0;"
+            "color:#fff;font-size:1rem;cursor:pointer}"
+            ".e{color:#ff6b6b;font-size:.85rem;min-height:1.2rem}</style>"
+            f"<div class=c>{body}</div>")
+    return Response(html, code, mimetype="text/html; charset=utf-8")
+
+
+@app.before_request
+def _require_auth():
+    if _is_local(request):
+        return None                                   # 같은 PC — 종전과 동일
+    if request.path in _PUBLIC_PATHS:
+        return None
+    if not DASH_PASSWORD:
+        return _page("설정 필요",
+                     "<h1>원격 접속이 설정되지 않았습니다</h1>"
+                     "<p>C:\fin\outputs\.env 에 <b>DASH_PASSWORD=원하는비밀번호</b> 를 "
+                     "추가하고 대시보드를 재시작하세요.</p>", 403)
+    if session.get("ok") is True:
+        return None
+    return redirect("/login")
+
+
+@app.route("/login", methods=["GET", "POST"])
+def dash_login():
+    if _is_local(request):
+        return redirect("/")
+    if not DASH_PASSWORD:
+        return _page("설정 필요", "<h1>원격 접속이 설정되지 않았습니다</h1>", 403)
+
+    err = ""
+    now = _time.time()
+    if now < _LOGIN_FAILS["until"]:
+        wait = int(_LOGIN_FAILS["until"] - now)
+        return _page("잠김", f"<h1>잠시 잠겼습니다</h1><p>{wait}초 후 다시 시도하세요.</p>", 429)
+
+    if request.method == "POST":
+        # compare_digest — 맞는 글자 수에 따라 응답시간이 달라지지 않게 한다
+        if _hmac.compare_digest(request.form.get("pw") or "", DASH_PASSWORD):
+            session["ok"] = True
+            session.permanent = True
+            _LOGIN_FAILS["n"] = 0
+            return redirect("/")
+        _LOGIN_FAILS["n"] += 1
+        if _LOGIN_FAILS["n"] >= 10:                   # 무차별 대입 완화
+            _LOGIN_FAILS["until"] = now + 300
+            _LOGIN_FAILS["n"] = 0
+        _time.sleep(0.5)
+        err = "비밀번호가 맞지 않습니다."
+
+    return _page("천억이", "<h1>천억이 대시보드</h1>"
+                 f"<div class=e>{err}</div>"
+                 "<form method=post><input type=password name=pw placeholder='비밀번호' "
+                 "autofocus autocomplete='current-password'>"
+                 "<button type=submit>들어가기</button></form>")
+
+
 KIS_DIR     = BASE / "db" / "kis"
 MACRO_DAILY = BASE / "macro_data" / "daily"
 
@@ -1865,8 +2028,10 @@ def api_run(task):
     """수동 실행 엔드포인트 — 로컬 접속만 허용."""
     if request.method == "OPTIONS":
         return "", 204
-    if request.remote_addr not in ("127.0.0.1", "::1"):
-        return jsonify({"ok": False, "msg": "로컬에서만 허용"}), 403
+    # 프록시 경유면 remote_addr 을 믿을 수 없다 — _via_proxy 주석 참고.
+    # 원격에서 스케줄러 재시작/AI 파이프라인을 돌릴 수 있으면 안 된다.
+    if not _is_local(request):
+        return jsonify({"ok": False, "msg": "로컬에서만 허용(원격 실행 불가)"}), 403
 
     # 스케줄러 재시작
     if task == "scheduler_restart":

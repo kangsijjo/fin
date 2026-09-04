@@ -222,6 +222,39 @@ def kis_lock(timeout: int = 60):
 
 
 # ── KIS 모의투자 클라이언트 ────────────────────────────────────────────────────
+# ── KIS 토큰 오류 판정 (2026-09-04 신설) ────────────────────────────────────
+# KIS 는 **만료된 토큰에 401 이 아니라 HTTP 500** 을 준다. 원인은 본문에만 있다.
+#   {"rt_cd":"1","msg1":"기간이 만료된 token 입니다.","msg_cd":"EGW00123"}
+# 상태코드만 보면 '서버 장애'로 오분류되어, 같은 만료 토큰으로 재시도만 반복하다
+# 포기한다. 실사고 2026-09-04: 잔고조회가 하루 종일 500, KisStopCheck 이 15분마다
+# 실패, KisTraderAM 도 3회 재시도 전부 실패. 로컬 만료 계산은 '아직 1.5시간 남음'
+# 이었다 — **로컬 계산만 믿으면 안 된다. 서버가 만료라면 만료다.**
+_TOKEN_ERR_CODES = {
+    "EGW00123",   # 기간이 만료된 token
+    "EGW00121",   # 유효하지 않은 token
+    "EGW00105",   # 사용할 수 없는 token
+    "EGW00103",   # token 이 없음
+}
+
+
+def _kis_msg(resp):
+    """응답 본문의 msg_cd/msg1 을 짧게 — 경보에 '500' 만 뜨면 원인을 못 찾는다."""
+    try:
+        d = resp.json()
+        cd, m1 = str(d.get("msg_cd", "")).strip(), str(d.get("msg1", "")).strip()
+        return (f"{cd} {m1}".strip() or f"{resp.status_code} Server Error")
+    except Exception:
+        return f"{resp.status_code} Server Error"
+
+
+def _is_token_error(resp):
+    """이 응답이 '토큰 문제'인가 — 상태코드가 아니라 본문 msg_cd 로 판정한다."""
+    try:
+        return str(resp.json().get("msg_cd", "")) in _TOKEN_ERR_CODES
+    except Exception:
+        return False
+
+
 class KISMockClient:
     """항상 openapivts(모의) URL만 사용. 실전 계좌는 절대 접근 불가."""
 
@@ -258,6 +291,18 @@ class KISMockClient:
             pass
         return None
 
+    def invalidate_token(self):
+        """캐시된 토큰 폐기 — 다음 호출에서 새로 발급받는다.
+
+        서버가 '만료'라고 하면 로컬 만료 계산이 뭐라 하든 그게 사실이다.
+        """
+        self._token = None
+        try:
+            if os.path.exists(TOKEN_CACHE):
+                os.remove(TOKEN_CACHE)
+        except Exception as e:
+            print(f"[warn] 토큰 캐시 삭제 실패(무시하고 재발급 시도): {e}")
+
     def _request_token(self):
         r = requests.post(
             f"{MOCK_URL}/oauth2/tokenP",
@@ -269,7 +314,12 @@ class KISMockClient:
         r.raise_for_status()
         d = r.json()
         token = d["access_token"]
-        expire = time.time() + int(d.get("expires_in", 86400))
+        # KIS 는 expires_in=86400 을 주지만 **그보다 먼저 만료시킨다**(2026-09-04 실측:
+        # 09-03 13:05 발급분이 09-04 09:00 에 이미 EGW00123). 로컬 신뢰 수명을 12시간으로
+        # 잘라 하루 2회 재발급한다 — 발급 비용은 무시할 수준이고, 아래 반응형 재발급이
+        # 최종 안전망이라 이건 왕복 한 번을 아끼는 보조 장치다.
+        _ttl = min(int(d.get("expires_in", 86400)), 12 * 3600)
+        expire = time.time() + _ttl
         with open(TOKEN_CACHE, "w") as f:
             # key_fp: 어느 앱키로 받은 토큰인지 — 재발급 후 옛 토큰 재사용 방지
             json.dump({"token": token, "expire": expire,
@@ -336,6 +386,7 @@ class KISMockClient:
         # 더 끈질기게 기다리는 편이 낫다(매수 경로는 시가 진입이 목적이라 3회 유지).
         r = None
         last_err = None
+        _token_retried = False
         _n = max(1, int(attempts))
         for _attempt in range(_n):
             try:
@@ -345,8 +396,13 @@ class KISMockClient:
                     params=params, timeout=15,
                 )
                 if r.status_code >= 500:
+                    # 만료 토큰도 500 으로 온다 — 재시도가 아니라 재발급이 답이다.
+                    if _is_token_error(r) and not _token_retried:
+                        _token_retried = True
+                        print("[KIS 모의] 토큰 만료 감지 — 재발급 후 재시도")
+                        self.invalidate_token()
                     raise requests.exceptions.HTTPError(
-                        f"{r.status_code} Server Error (잔고조회)", response=r)
+                        f"{r.status_code} {_kis_msg(r)} (잔고조회)", response=r)
                 r.raise_for_status()
                 break
             except (requests.exceptions.ConnectionError,
@@ -357,10 +413,12 @@ class KISMockClient:
                     raise                       # 4xx = 요청 문제, 재시도 무의미
                 last_err = e
                 if _attempt < _n - 1:
-                    wait_s = 2 * (_attempt + 1)
+                    # 토큰을 방금 재발급했으면 기다릴 이유가 없다(서버 장애가 아니다)
+                    wait_s = 0 if _token_retried and _attempt == 0 else 2 * (_attempt + 1)
                     print(f"[warn] 잔고조회 실패({e}) — {wait_s}초 후 재시도 "
                           f"{_attempt + 2}/{_n}")
-                    time.sleep(wait_s)
+                    if wait_s:
+                        time.sleep(wait_s)
         else:
             raise last_err
         data = r.json()
@@ -397,41 +455,52 @@ class KISMockClient:
                 }
         return deposit, positions
 
-    def order_buy(self, code: str, qty: int) -> str:
-        """시장가 매수. 주문번호(odno) 반환."""
+    def _order(self, tr_id: str, code: str, qty: int, label: str) -> str:
+        """시장가 주문 전송 — 토큰 만료면 **한 번만** 재발급 후 재전송.
+
+        [2026-09-04 신설] 종전엔 raise_for_status() 뿐이라, 토큰이 만료되면
+        (KIS 는 만료에 500 을 준다) 주문이 그대로 실패했다. 잔고조회는 재시도라도
+        했지만 주문은 그마저 없었다. 그날은 신호가 전부 강도 미달이라 주문이 0건
+        이어서 안 터졌을 뿐, 매수가 있었으면 그대로 유실됐다.
+
+        재시도를 **토큰 오류로만** 한정하는 이유가 핵심이다:
+          · 일반 5xx/타임아웃은 주문이 접수됐는지 알 수 없다 → 재전송은 곧 이중주문.
+          · 토큰 오류는 KIS 게이트웨이가 **인증 단계에서** 거부한 것이라
+            주문이 접수되지 않은 것이 확실하다 → 재전송이 안전하다.
+        이 조건을 넓히면 이중주문이 난다. 절대 완화하지 말 것.
+        """
         body = {
             "CANO": _CANO, "ACNT_PRDT_CD": _ACNT_PRDT_CD,
             "PDNO": code, "ORD_DVSN": "01", "ORD_QTY": str(qty), "ORD_UNPR": "0",
         }
-        hk = self._hashkey(body)
-        r = requests.post(
-            f"{MOCK_URL}/uapi/domestic-stock/v1/trading/order-cash",
-            headers=self._hdrs("VTTC0802U", hk),
-            json=body, timeout=15,
-        )
-        r.raise_for_status()
-        data = r.json()
-        if data.get("rt_cd") != "0":
-            _raise_order_error("매수", data)
-        return data.get("output", {}).get("odno", "")
+        for _try in range(2):
+            r = requests.post(
+                f"{MOCK_URL}/uapi/domestic-stock/v1/trading/order-cash",
+                headers=self._hdrs(tr_id, self._hashkey(body)),
+                json=body, timeout=15,
+            )
+            if r.status_code >= 500:
+                if _try == 0 and _is_token_error(r):
+                    print(f"[KIS 모의] {label} 중 토큰 만료 — 재발급 후 재전송 "
+                          f"({code} {qty}주, 주문 미접수 확인됨)")
+                    self.invalidate_token()
+                    continue
+                raise requests.exceptions.HTTPError(
+                    f"{r.status_code} {_kis_msg(r)} ({label})", response=r)
+            r.raise_for_status()
+            data = r.json()
+            if data.get("rt_cd") != "0":
+                _raise_order_error(label, data)
+            return data.get("output", {}).get("odno", "")
+        raise RuntimeError(f"{label} 실패 — 토큰 재발급 후에도 접수되지 않음")
+
+    def order_buy(self, code: str, qty: int) -> str:
+        """시장가 매수. 주문번호(odno) 반환."""
+        return self._order("VTTC0802U", code, qty, "매수")
 
     def order_sell(self, code: str, qty: int) -> str:
         """시장가 매도. 주문번호(odno) 반환."""
-        body = {
-            "CANO": _CANO, "ACNT_PRDT_CD": _ACNT_PRDT_CD,
-            "PDNO": code, "ORD_DVSN": "01", "ORD_QTY": str(qty), "ORD_UNPR": "0",
-        }
-        hk = self._hashkey(body)
-        r = requests.post(
-            f"{MOCK_URL}/uapi/domestic-stock/v1/trading/order-cash",
-            headers=self._hdrs("VTTC0801U", hk),
-            json=body, timeout=15,
-        )
-        r.raise_for_status()
-        data = r.json()
-        if data.get("rt_cd") != "0":
-            _raise_order_error("매도", data)
-        return data.get("output", {}).get("odno", "")
+        return self._order("VTTC0801U", code, qty, "매도")
 
 
 class AccountBlocked(RuntimeError):

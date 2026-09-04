@@ -114,12 +114,12 @@ def run(mock=True, max_tickers=None):
     trader = KISTrader(mock=mock)
     if not trader.get_token():
         logger.error("토큰 발급 실패 - 중단")
-        return
+        return False
 
     tickers = _kr_tickers()
     if not tickers:
         logger.warning("종목 리스트 비어 있음")
-        return
+        return False
     if max_tickers:
         tickers = tickers[:max_tickers]
 
@@ -158,12 +158,32 @@ def run(mock=True, max_tickers=None):
         conn.commit()
 
     logger.info(f"완료. 신규 {total}행 추가 (공백 없어 스킵 {skipped}종목).")
+    return True
+
+
+def _parse_args():
+    p = argparse.ArgumentParser(description="KIS API 기반 수급 수집")
+    p.add_argument('--real', dest='mock', action='store_false', default=True,
+                   help='실전 계정 사용 (기본: 모의)')
+    p.add_argument('--limit', type=int, default=None, help='테스트용 종목 수 제한')
+    return p.parse_args()
+
+
+if __name__ == "__main__":
+    args = _parse_args()
+    ok = run(mock=args.mock, max_tickers=args.limit)
 
     # [2026-08-29] 정체 감지 — '전량 스킵 + 0행' 을 성공으로 보고하던 조용한 실패 차단.
-    #   실사고: 08-24~28 닷새 동안 매일 이 잡이 1초 만에 끝나며 스케줄러에 '완료'로
-    #   기록됐고, supply_demand 는 08-21 에 고착됐다(korea_indicators 도 파생이라 동반 정체).
-    #   watchdog 의 테이블 신선도 점검이 6영업일 뒤에야 잡아냈다.
-    #   여기서 '기준 달력(korea_stocks) 최신일 > 내 테이블 최신일' 이면 실패로 종료해
+    #   '기준 달력(korea_stocks) 최신일 > 내 테이블 최신일' 이면 실패로 종료해
     #   스케줄러가 다음날 아침 곧바로 ✗ 실패를 남기게 한다.
+    #
+    # [2026-09-04] 두 가지를 고쳤다. 08-29 패치가 파일 끝의 _parse_args/__main__ 을
+    #   통째로 날려서 `python -m src.collector.supply_demand` 가 **모듈만 import 하고
+    #   1초 만에 종료**했다. 수집이 그날 이후 한 번도 돌지 않았고(supply_demand 08-28
+    #   고착), 정작 그걸 잡으라고 넣은 assert_fresh 는 run() 안에 있어 함께 죽어 있었다.
+    #   ─ 검증은 **성공 경로가 아니라 종료 경로**에 둔다. 조기 return(토큰 실패 등)으로
+    #     빠져나가도 반드시 실행돼야 한다. 그게 검증의 존재 이유다.
     with closing(get_connection()) as conn:
         assert_fresh(conn, 'supply_demand', logger=logger)
+    if not ok:
+        sys.exit(1)

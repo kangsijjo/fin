@@ -995,14 +995,15 @@ def test_bats_are_ascii_only():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _load_scan_helper():
-    """daily_summary 를 import 하면 텔레그램을 보내므로 헬퍼만 떼어내 평가한다."""
-    src = open(os.path.join(OUTPUTS, "daily_summary.py"), encoding="utf-8").read()
-    i = src.find("def _scan_today_errors")
-    j = src.find("\n\n# ── 파이프라인", i)
-    assert i != -1 and j != -1, "_scan_today_errors 헬퍼를 찾지 못했다"
-    ns = {}
-    exec(src[i:j], ns)
-    return ns["_scan_today_errors"]
+    """실제 daily_summary._scan_today_errors 를 그대로 쓴다.
+
+    [2026-09-04] 종전엔 소스를 텍스트로 잘라 exec 했다 — "import 하면 텔레그램이
+    나가니까". 그 전제 자체가 버그였고(모듈 레벨 실행), main() 가드로 고쳤다.
+    잘라내기는 끝 표시 문자열이 조금만 움직여도 깨지는 데다, **테스트가 진짜
+    코드가 아닌 사본을 검증**하게 만든다. 이제 그냥 import 해서 쓴다.
+    """
+    import daily_summary
+    return daily_summary._scan_today_errors
 
 
 CHAINED = """Traceback (most recent call last):
@@ -1418,3 +1419,125 @@ def test_task_query_is_locale_independent():
     assert "Get-ScheduledTask" in body, "로캘 독립 API 를 쓰지 않는다"
     for banned in ("마지막 결과", "실행할 작업", "Last Result", "Task To Run", "/fo", "csv"):
         assert banned not in body, f"로캘 의존 CSV 헤더에 기대고 있다: {banned}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 진입점 __main__ 전수 — 2026-09-04 (실사고 회귀 방지)
+#   08-29 패치가 supply_demand.py 파일 끝의 _parse_args/__main__ 을 통째로 날렸다.
+#   `python -m src.collector.supply_demand` 가 **모듈만 import 하고 1초 만에 종료**했고,
+#   스케줄러는 매일 '✔ 완료'로 기록했다. 수급이 6일간 고착됐고, 강도 질량의 27.5%를
+#   차지하는 korea_indicators 가 파생으로 함께 멈춰 최대 강도가 5.7대→4.2대로 내려앉아
+#   매수가 조용히 0건이 됐다.
+#   → 실행되는 파일에 __main__ 이 있는지는 **기계가 지켜야 한다**.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _entrypoint_targets():
+    import glob as _glob
+    import re as _re
+    root = os.path.dirname(OUTPUTS)
+    targets, bs = set(), chr(92)
+    sched = os.path.join(root, "Stock_AI_Project", "scheduler.py")
+    if os.path.exists(sched):
+        s = open(sched, encoding="utf-8").read()
+        for m in _re.findall(r'"-m",\s*"([\w.]+)"', s):
+            targets.add(("module", m))
+        for m in _re.findall(r'"([\w./' + bs + r'-]+\.py)"', s):
+            targets.add(("file", m))
+    for b in _glob.glob(os.path.join(OUTPUTS, "*.bat")):
+        t = open(b, "rb").read().decode("utf-8", "replace")
+        for m in _re.findall(r'([A-Za-z0-9_.' + bs + r'/:-]+\.py)', t):
+            targets.add(("file", m))
+        for m in _re.findall(r'-m\s+([\w.]+)', t):
+            targets.add(("module", m))
+    return targets, root
+
+
+def test_every_entrypoint_has_main_guard():
+    """스케줄러/bat 가 실행하는 모든 파일에 __main__ 이 있어야 한다.
+
+    없으면 import 만 되고 **아무것도 안 하면서 exit 0** 이다 — 가장 조용한 실패.
+    """
+    targets, root = _entrypoint_targets()
+    checked, bad = 0, []
+    for kind, name in sorted(targets):
+        if kind == "module":
+            p = os.path.join(root, "Stock_AI_Project",
+                             name.replace(".", os.sep) + ".py")
+        else:
+            base = name.replace(chr(92), "/").split("/")[-1]
+            p = next((q for q in (os.path.join(OUTPUTS, base),
+                                  os.path.join(root, "Stock_AI_Project", base))
+                      if os.path.exists(q)), None)
+        if not p or not os.path.exists(p):
+            continue                      # 존재하지 않는 경로는 판정 대상 아님
+        checked += 1
+        if "__main__" not in open(p, encoding="utf-8", errors="replace").read():
+            bad.append(os.path.relpath(p, root))
+    assert checked >= 20, f"진입점을 {checked}개밖에 못 찾았다 — 탐지가 깨졌다"
+    assert not bad, f"__main__ 없는 실행 대상(import 만 되고 아무것도 안 함): {bad}"
+
+
+def test_supply_demand_checks_freshness_on_every_exit_path():
+    """정체 검증은 성공 경로가 아니라 **종료 경로**에 있어야 한다.
+
+    종전엔 assert_fresh 가 run() 맨 끝에 있어, 토큰 실패 같은 조기 return 에서는
+    아예 실행되지 않았다 — 막으려던 그 조용한 실패를 그대로 통과시켰다.
+    """
+    p = os.path.join(os.path.dirname(OUTPUTS), "Stock_AI_Project",
+                     "src", "collector", "supply_demand.py")
+    src = open(p, encoding="utf-8").read()
+    i = src.find('if __name__ == "__main__":')
+    assert i != -1, "__main__ 가드가 없다"
+    assert "assert_fresh" in src[i:], "정체 검증이 종료 경로에 없다"
+    assert "sys.exit(1)" in src[i:], "실패가 exit 0 으로 보고된다"
+    body = src[src.find("def run("):i]
+    assert "return False" in body, "조기 종료가 실패로 표현되지 않는다"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# KIS 토큰 만료 — 2026-09-04
+#   KIS 는 만료 토큰에 401 이 아니라 **HTTP 500** 을 준다. 상태코드만 보면
+#   '서버 장애'로 오분류되어 같은 만료 토큰으로 재시도만 반복하다 포기한다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _FakeResp:
+    def __init__(self, status, payload):
+        self.status_code, self._p = status, payload
+
+    def json(self):
+        if self._p is None:
+            raise ValueError("not json")
+        return self._p
+
+
+def test_token_error_is_detected_from_body_not_status():
+    import kis_trader as kt
+    expired = _FakeResp(500, {"rt_cd": "1", "msg_cd": "EGW00123",
+                              "msg1": "기간이 만료된 token 입니다."})
+    assert kt._is_token_error(expired)
+    assert "EGW00123" in kt._kis_msg(expired)
+    # 진짜 서버 장애는 토큰 오류가 아니다 — 재발급으로 풀리지 않는다
+    outage = _FakeResp(500, {"rt_cd": "1", "msg_cd": "EGW00999", "msg1": "일시 오류"})
+    assert not kt._is_token_error(outage)
+    assert not kt._is_token_error(_FakeResp(500, None))     # 본문이 JSON 이 아님
+    assert kt._kis_msg(_FakeResp(500, None))                # 그래도 문구는 나와야 한다
+
+
+def test_order_retry_is_limited_to_token_errors():
+    """주문 재전송은 **토큰 오류일 때만**. 넓히면 이중주문이 난다."""
+    import inspect
+    import kis_trader as kt
+    src = inspect.getsource(kt.KISMockClient._order)
+    assert "_is_token_error(r)" in src, "토큰 판정 없이 재전송하고 있다"
+    assert "_try == 0" in src, "재전송 횟수 제한이 없다"
+    assert "range(2)" in src, "재전송이 1회를 넘는다"
+    # 매수/매도가 같은 경로를 쓰는지 — 한쪽만 고치면 다른 쪽이 남는다
+    for fn in (kt.KISMockClient.order_buy, kt.KISMockClient.order_sell):
+        assert "_order(" in inspect.getsource(fn)
+
+
+def test_token_cache_lifetime_is_capped():
+    """KIS 가 expires_in 보다 먼저 만료시킨다 — 로컬 신뢰 수명을 잘라둔다."""
+    src = open(os.path.join(OUTPUTS, "kis_trader.py"), encoding="utf-8").read()
+    assert "12 * 3600" in src, "토큰 신뢰 수명 상한이 사라졌다"
+    assert "def invalidate_token" in src, "토큰 폐기 경로가 없다"

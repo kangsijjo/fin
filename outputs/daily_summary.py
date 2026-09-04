@@ -42,21 +42,6 @@ def _won(v):
         return str(v)
 
 
-# ── 오늘 신호 (paper_signals.csv) ──
-try:
-    p = os.path.join(BASE, "paper_signals.csv")
-    by_strat, total = {}, 0
-    if os.path.exists(p):
-        with open(p, encoding="utf-8-sig") as f:
-            for row in csv.DictReader(f):
-                if str(row.get("signal_date", "")).strip() == TODAY8:
-                    total += 1
-                    by_strat[row.get("strategy", "?")] = by_strat.get(row.get("strategy", "?"), 0) + 1
-    parts.append(f"• 오늘 신호 {total}건" + (f" ({', '.join(f'{k} {v}' for k, v in by_strat.items())})" if total else ""))
-except Exception as e:
-    parts.append(f"• 신호 집계 실패: {str(e)[:40]}")
-
-
 # ── 오늘 체결 (kis_orders_*, orders_*) ──
 def _today_fills(prefix, label):
     f = os.path.join(BASE, "db", "kiwoom", f"{prefix}_{TODAY8}.csv")
@@ -86,50 +71,6 @@ def _today_fills(prefix, label):
     if sells:
         seg.append(f"🔴매도 {len(sells)}({', '.join(sells[:4])})")
     return f"• {label} 체결: " + " / ".join(seg)
-
-for pre, lab in [("kis_orders", "KIS"), ("orders", "키움")]:
-    line = _today_fills(pre, lab)
-    if line:
-        parts.append(line)
-
-
-# ── KIS 모의 (총평가/예수금/평가손익/보유) ──
-ksnap = _read_json(os.path.join(BASE, "db", "kiwoom", "kis_snapshot.json"))
-if ksnap:
-    pos = ksnap.get("positions", []) or []
-    names = ", ".join(str(x.get("name", x.get("code", "?"))) for x in pos[:5])
-    teval = ksnap.get("total_eval")
-    head = f"• KIS: 총평가 {_won(teval)}원" if teval is not None else f"• KIS: 예수금 {_won(ksnap.get('deposit', '?'))}원"
-    pnl = ksnap.get("eval_pnl")
-    if pnl is not None:
-        head += f" / 평가손익 {('+' if int(pnl) >= 0 else '')}{_won(pnl)}"
-    head += f" / 보유 {len(pos)}종목" + (f" ({names})" if names else "")
-    parts.append(head)
-else:
-    parts.append("• KIS: 스냅샷 없음")
-
-
-# ── 키움 모의 (예수금/보유) ──
-snap = _read_json(os.path.join(BASE, "db", "kiwoom", "snapshot.json"))
-if snap:
-    pos = snap.get("positions", []) or []
-    parts.append(f"• 키움: 예수금 {_won(snap.get('deposit', '?'))}원 / 보유 {len(pos)}종목")
-else:
-    parts.append("• 키움: 스냅샷 없음")
-
-
-# ── 손절 모니터 (임박/도달) ──
-mon = _read_json(os.path.join(BASE, "db", "kiwoom", "kis_stop_monitor.json"))
-if mon and mon.get("items"):
-    fired = [m for m in mon["items"] if m.get("room_pp", 99) <= 0]
-    imm = [m for m in mon["items"] if 0 < m.get("room_pp", 99) <= 3]
-    if fired or imm:
-        seg = []
-        if fired:
-            seg.append("도달 " + ", ".join(m.get("name", "") for m in fired[:4]))
-        if imm:
-            seg.append("임박 " + ", ".join(m.get("name", "") for m in imm[:4]))
-        parts.append("• ⚠ 손절: " + " / ".join(seg))
 
 
 
@@ -180,25 +121,102 @@ def _scan_today_errors(log_dir, today8, exclude_prefix=()):
     return total, recovered, detail
 
 
-# ── 파이프라인 상태 (오늘 로그 크래시 사건 수) ──
-try:
-    err, rec, detail = _scan_today_errors(LOGS, TODAY8, exclude_prefix=("daily_audit",))
-    if err == 0:
-        parts.append("• 파이프라인: 정상")
-    elif err == rec:
-        # 전부 재시도로 회복 — 사람이 손댈 일이 없다. 경고 아이콘을 쓰지 않는다.
-        parts.append(f"• 파이프라인: 크래시 {err}건 전부 재시도로 회복 (조치 불필요)")
+def main():
+    """하루 요약을 만들어 텔레그램으로 한 통 보낸다.
+
+    [2026-09-04] main() 으로 감쌌다. 종전엔 모듈 레벨에서 바로 실행돼
+    **import 만 해도 요약이 만들어지고 텔레그램이 나갔다**.
+    daily_audit 에서 같은 문제를 08-30 에 고쳤는데 형제 파일인 여기를 놓쳤다 —
+    한 파일에서 고친 버그는 같은 모양을 가진 파일을 전부 훑어야 한다.
+
+    헬퍼 함수(_read_json/_won/_today_fills/_scan_today_errors)와 상수는
+    **모듈 레벨에 그대로 둔다** — 함께 들여쓰면 중첩함수가 되어 밖에서 못 쓴다
+    (테스트가 _scan_today_errors 를 직접 참조한다).
+    """
+
+
+    # ── 오늘 신호 (paper_signals.csv) ──
+    try:
+        p = os.path.join(BASE, "paper_signals.csv")
+        by_strat, total = {}, 0
+        if os.path.exists(p):
+            with open(p, encoding="utf-8-sig") as f:
+                for row in csv.DictReader(f):
+                    if str(row.get("signal_date", "")).strip() == TODAY8:
+                        total += 1
+                        by_strat[row.get("strategy", "?")] = by_strat.get(row.get("strategy", "?"), 0) + 1
+        parts.append(f"• 오늘 신호 {total}건" + (f" ({', '.join(f'{k} {v}' for k, v in by_strat.items())})" if total else ""))
+    except Exception as e:
+        parts.append(f"• 신호 집계 실패: {str(e)[:40]}")
+
+    for pre, lab in [("kis_orders", "KIS"), ("orders", "키움")]:
+        line = _today_fills(pre, lab)
+        if line:
+            parts.append(line)
+
+
+    # ── KIS 모의 (총평가/예수금/평가손익/보유) ──
+    ksnap = _read_json(os.path.join(BASE, "db", "kiwoom", "kis_snapshot.json"))
+    if ksnap:
+        pos = ksnap.get("positions", []) or []
+        names = ", ".join(str(x.get("name", x.get("code", "?"))) for x in pos[:5])
+        teval = ksnap.get("total_eval")
+        head = f"• KIS: 총평가 {_won(teval)}원" if teval is not None else f"• KIS: 예수금 {_won(ksnap.get('deposit', '?'))}원"
+        pnl = ksnap.get("eval_pnl")
+        if pnl is not None:
+            head += f" / 평가손익 {('+' if int(pnl) >= 0 else '')}{_won(pnl)}"
+        head += f" / 보유 {len(pos)}종목" + (f" ({names})" if names else "")
+        parts.append(head)
     else:
-        top = ", ".join(f"{b.split('_2026')[0]} {n}건{' (회복)' if ok else ''}"
-                        for b, n, ok in detail[:3])
-        parts.append(f"• ⚠ 파이프라인 크래시 {err}건"
-                     + (f" (그중 {rec}건 재시도 회복)" if rec else "")
-                     + f" — {top}")
-except Exception:
-    pass
+        parts.append("• KIS: 스냅샷 없음")
 
 
-msg = "\n".join(parts)
-print(msg)
-sent, info = notifier.send(msg)
-print(f"[텔레그램] {'전송됨' if sent else '미전송 — ' + info}")
+    # ── 키움 모의 (예수금/보유) ──
+    snap = _read_json(os.path.join(BASE, "db", "kiwoom", "snapshot.json"))
+    if snap:
+        pos = snap.get("positions", []) or []
+        parts.append(f"• 키움: 예수금 {_won(snap.get('deposit', '?'))}원 / 보유 {len(pos)}종목")
+    else:
+        parts.append("• 키움: 스냅샷 없음")
+
+
+    # ── 손절 모니터 (임박/도달) ──
+    mon = _read_json(os.path.join(BASE, "db", "kiwoom", "kis_stop_monitor.json"))
+    if mon and mon.get("items"):
+        fired = [m for m in mon["items"] if m.get("room_pp", 99) <= 0]
+        imm = [m for m in mon["items"] if 0 < m.get("room_pp", 99) <= 3]
+        if fired or imm:
+            seg = []
+            if fired:
+                seg.append("도달 " + ", ".join(m.get("name", "") for m in fired[:4]))
+            if imm:
+                seg.append("임박 " + ", ".join(m.get("name", "") for m in imm[:4]))
+            parts.append("• ⚠ 손절: " + " / ".join(seg))
+
+
+    # ── 파이프라인 상태 (오늘 로그 크래시 사건 수) ──
+    try:
+        err, rec, detail = _scan_today_errors(LOGS, TODAY8, exclude_prefix=("daily_audit",))
+        if err == 0:
+            parts.append("• 파이프라인: 정상")
+        elif err == rec:
+            # 전부 재시도로 회복 — 사람이 손댈 일이 없다. 경고 아이콘을 쓰지 않는다.
+            parts.append(f"• 파이프라인: 크래시 {err}건 전부 재시도로 회복 (조치 불필요)")
+        else:
+            top = ", ".join(f"{b.split('_2026')[0]} {n}건{' (회복)' if ok else ''}"
+                            for b, n, ok in detail[:3])
+            parts.append(f"• ⚠ 파이프라인 크래시 {err}건"
+                         + (f" (그중 {rec}건 재시도 회복)" if rec else "")
+                         + f" — {top}")
+    except Exception:
+        pass
+
+
+    msg = "\n".join(parts)
+    print(msg)
+    sent, info = notifier.send(msg)
+    print(f"[텔레그램] {'전송됨' if sent else '미전송 — ' + info}")
+
+
+if __name__ == "__main__":
+    main()
