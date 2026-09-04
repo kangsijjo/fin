@@ -255,6 +255,63 @@ def check_data():
     return out
 
 
+# ── 전섹터 지표 커버리지 (2026-09-04 신설) ──────────────────────────────────
+# 이 시스템의 감시는 전부 '최신 날짜'만 봤다. 그런데 korea_indicators 는 날짜가
+# 최신이어도 **종목 수가 붕괴**할 수 있다 — indicators 를 인자 없이 돌리면
+# active_sector 한 섹터만 갱신하고, 전섹터 갱신은 주간(일요일 weekly_job)만 하기
+# 때문. 08-30 주간 갱신이 실패하자 마지막 전섹터(full)가 08-28 에 고착됐고, 이후
+# 매일 은행 11종목만 갱신됐다. 최신 '날짜'는 계속 바뀌니 check_data 를 통과했다.
+#
+# 강도(score_ic)는 각 종목의 '≤신호일 최신' rsi/macd/bb 로 폴백하므로
+# (factor_scorer.prepare_db_features 의 g[g.date<=date_str].iloc[-1]), full 이
+# 묵을수록 폴백값이 오래돼 강도가 조금씩 눌린다. 실측: 5영업일 묵음 → 강도 평균
+# -0.35. 폴백 덕에 영향은 작지만, 여러 주 연속 방치는 잡아야 한다.
+INDICATOR_FULL_MIN = 500        # 이 이상이면 '전섹터 갱신됨'(한 섹터 최대 169종목)
+INDICATOR_STALE_BDAYS = 6       # 마지막 full 이 이보다 오래면 경고(주간 정상주기 5 → 6 통과)
+
+
+def check_indicator_coverage():
+    """korea_indicators 전섹터 갱신이 방치되지 않았는가.
+
+    판정: 종목 수 >= FULL_MIN 인 가장 최근 날짜가 STALE_BDAYS 영업일보다 오래면 경고.
+    (주간 갱신 정상 주기는 최대 5영업일 → 6 이면 통과, 한 주 통째 놓치면 경고)
+
+    ※ 이 경고는 매수를 정지시키지 않는다(kill_switch 비대상). 강도 왜곡은 임계
+      미달 → 매수 스킵이라 '안전한 방향'이고, 폴백이 있어 영향도 작기 때문.
+    ※ 이번 사고는 실제로 강도를 -0.35 눌렀지만 그것만으로 매수 0건이 되진 않았다
+      (시장 약세로 최대 강도 5.26 < 임계 5.7). 즉 이 점검은 '치명'이 아니라
+      '조용한 열화'를 조기에 드러내는 용도다.
+    """
+    con = _open_db()
+    if con is None:
+        return []
+    try:
+        rows = con.execute(
+            "SELECT replace(date,'-',''), COUNT(*) FROM korea_indicators "
+            "GROUP BY date ORDER BY date DESC LIMIT 15").fetchall()
+    except Exception:
+        return []
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+    full = [str(d) for d, n in rows if n and n >= INDICATOR_FULL_MIN]
+    if not full:
+        return [("indicator_cov", "전섹터 지표", False,
+                 "korea_indicators 에 전섹터(>=%d종목) 갱신 기록이 최근 15일 내 없음 "
+                 "— 지표 파이프라인 점검(python -m src.processor.indicators all)"
+                 % INDICATOR_FULL_MIN)]
+    last_full = full[0]
+    age = _age_bdays(last_full)
+    if age <= INDICATOR_STALE_BDAYS:
+        return [("indicator_cov", "전섹터 지표", True, f"최신 전섹터 갱신 {last_full}")]
+    return [("indicator_cov", "전섹터 지표", False,
+             f"전섹터 지표가 {age}영업일째 미갱신(마지막 full {last_full}) — "
+             f"주간 갱신(일요일) 실패 의심. 강도가 오래된 폴백 지표로 계산돼 눌릴 수 "
+             f"있음. 복구: python -m src.processor.indicators all")]
+
+
 def check_signals():
     """신호 생성 — 평일 18:35 이후, 오늘 live_signal/kis_signal 로그가 있나(=작업 실행됨)."""
     out = []
@@ -715,6 +772,7 @@ def run_all_checks():
     results = []
     results.append(check_scheduler())
     results += check_data()
+    results += check_indicator_coverage()   # 전섹터 지표 붕괴(2026-09-04 신설)
     results += check_signals()
     results += check_trading()
     results += check_snapshots()

@@ -1334,7 +1334,7 @@ def _task(path, state="Ready", result=0, exec_line="", core=None, last="2026-08-
 
 
 def test_task_missing_targets_finds_ghost_in_arguments():
-    """실행 파일이 아니라 **인자 쪽** 경로가 없는 경우까지 잡아야 한다.
+    r"""실행 파일이 아니라 **인자 쪽** 경로가 없는 경우까지 잡아야 한다.
 
     \KIS_Monthly 의 실행 파일은 cmd 였다. 실행 파일만 봤으면 사고를 놓쳤다.
     """
@@ -1593,3 +1593,83 @@ def test_get_balance_accepts_timeout_override():
     src = inspect.getsource(kt.KISMockClient.get_balance)
     assert "timeout or BALANCE_TIMEOUT" in src, "기본값이 상수에서 오지 않는다"
     assert "timeout=15" not in src, "하드코딩된 15초가 남아 있다"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 전섹터 지표 커버리지 감시 — 2026-09-04
+#   korea_indicators 는 '날짜'는 최신이어도 '종목 수'가 붕괴할 수 있다(1344→11).
+#   indicators 를 인자 없이 돌리면 active_sector 한 섹터만 갱신, 전섹터는 주간만.
+#   08-30 주간 갱신 실패로 마지막 full 이 08-28 고착 → 강도 -0.35(폴백이라 소폭).
+#   기존 감시는 최신 날짜만 봐서 이 붕괴를 놓쳤다. 종목 수를 보는 점검을 넣는다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _indicator_db(rows):
+    """rows: [(date_str, n_tickers), ...] 로 인메모리 korea_indicators 를 만든다."""
+    import sqlite3
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE korea_indicators (date TEXT, ticker TEXT)")
+    for d, n in rows:
+        con.executemany("INSERT INTO korea_indicators VALUES (?, ?)",
+                        [(d, f"{i:06d}") for i in range(n)])
+    con.commit()
+    return con
+
+
+def _bdays_ago(n):
+    """오늘로부터 n 영업일 전 날짜(YYYYMMDD). 테스트를 오늘 기준으로 고정."""
+    import numpy as np
+    from datetime import date
+    d = np.busday_offset(date.today(), -n, roll="backward")
+    return str(d).replace("-", "")
+
+
+def test_indicator_coverage_ok_when_recent_full(monkeypatch):
+    import watchdog as w
+    con = _indicator_db([(_bdays_ago(0), 1344), (_bdays_ago(1), 1344)])
+    monkeypatch.setattr(w, "_open_db", lambda: con)
+    out = w.check_indicator_coverage()
+    assert len(out) == 1 and out[0][2] is True, out
+
+
+def test_indicator_coverage_flags_stale_full(monkeypatch):
+    """최신 날짜는 갱신되지만(11종목) 마지막 full 이 오래되면 경고 — 이번 사고 재현."""
+    import watchdog as w
+    rows = [(_bdays_ago(i), 11) for i in range(0, 8)]      # 최근 8영업일 은행만 11종목
+    rows.append((_bdays_ago(8), 1344))                      # 마지막 full 은 8영업일 전
+    con = _indicator_db(rows)
+    monkeypatch.setattr(w, "_open_db", lambda: con)
+    out = w.check_indicator_coverage()
+    assert len(out) == 1 and out[0][2] is False, out
+    assert "영업일째 미갱신" in out[0][3]
+
+
+def test_indicator_coverage_partial_within_grace_is_ok(monkeypatch):
+    """주간 갱신 정상 주기(full 5영업일 전 + 이후 partial)는 통과해야 한다(오탐 방지)."""
+    import watchdog as w
+    rows = [(_bdays_ago(i), 11) for i in range(0, 5)]      # 최근 5일 partial
+    rows.append((_bdays_ago(5), 1344))                      # 5영업일 전 full → STALE 6 이내
+    con = _indicator_db(rows)
+    monkeypatch.setattr(w, "_open_db", lambda: con)
+    out = w.check_indicator_coverage()
+    assert out[0][2] is True, out
+
+
+def test_indicator_coverage_flags_total_absence(monkeypatch):
+    """전섹터 갱신이 최근 15일 내 한 번도 없으면 경고."""
+    import watchdog as w
+    con = _indicator_db([(_bdays_ago(i), 11) for i in range(0, 15)])
+    monkeypatch.setattr(w, "_open_db", lambda: con)
+    out = w.check_indicator_coverage()
+    assert out[0][2] is False and "전섹터" in out[0][3]
+
+
+def test_indicator_coverage_does_not_trip_kill_switch(monkeypatch):
+    """강도 열화는 '안전한 방향'(매수 스킵)이라 신규매수를 정지시키면 안 된다."""
+    import watchdog as w
+    # check_kill_switch 는 account_blocked/trade_kis/trade_kiwoom 세 키만 본다
+    rows = [("indicator_cov", "전섹터 지표", False, "전섹터 지표가 9영업일째 미갱신")]
+    import kill_switch as ks
+    on, _st, _err = ks.status()
+    out = w.check_kill_switch(rows)
+    on2, _st2, _err2 = ks.status()
+    assert on == on2, "지표 커버리지 경고가 kill_switch 를 건드렸다"

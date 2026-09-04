@@ -1,3 +1,5 @@
+# pip freeze 전체 덤프 — 참고용 잠금 파일. 설치는 requirements.txt(정본)로.
+# (2026-09-04 requirements.txt 에서 이름 변경)
 annotated-doc==0.0.4
 anyio==4.13.0
 backtrader==1.9.78.123
