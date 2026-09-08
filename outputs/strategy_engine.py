@@ -43,6 +43,7 @@ from strategies.rsi_volume              import RsiVolumeStrategy
 from strategies.high52w_short_decrease  import High52wShortDecreaseStrategy
 from strategies.gc_foreign              import GcForeignStrategy
 from strategies.high52w_credit_decrease import High52wCreditDecreaseStrategy
+from strategies.supply_reversal        import SupplyReversalStrategy, SupplyRatioStrategy
 from strategies.daily_loader       import load_macro_daily
 
 DEFAULT_COSTS = {"fee_pct": 0.015, "tax_pct": 0.18, "slip_pct": 0.05, "total_pct": 0.245}
@@ -96,6 +97,20 @@ ALL_STRATEGIES = [
     GcForeignStrategy(fast_ma=20, slow_ma=60, foreign_n=3, holding_days=15, name="gc_for3d"),
     GcForeignStrategy(fast_ma=20, slow_ma=60, foreign_n=3, holding_days=15, use_market_filter=MKT, name="gc_for3d_mkt"),
     High52wCreditDecreaseStrategy(holding_days=20, name="h52w_cred_dec"),
+    # ── 수급 역전(개인 이탈 + 외국인/기관 유입) — 2026-09-08 사용자 아이디어 ──
+    # 개인 20일누적 양→음 교차 + 외인/기관 20일누적 음→양 교차, cross_window 내 동시 → 20일 보유.
+    # 개인 데이터(supply_demand.individual_net) 백필 후에만 신호 발생(그 전엔 폴백 0건).
+    # ablation 설계(2026-09-08): 원안(기준선) + 대안 A/B/C 를 분리·결합해 나란히 비교.
+    #   결합만 보면 '무엇이 기여했나'를 모른다. 제로섬상 C(개인)는 B(외인+기관)와 상관이
+    #   높아 독립 기여가 작을 것 — 그걸 데이터로 확인한다. 종 수는 6 이내로 제한(다중검정).
+    SupplyReversalStrategy(smart_mode="or", cross_window=3, name="supply_rev_or"),      # 원안(20일 교차)
+    SupplyReversalStrategy(smart_mode="or", cross_window=3, use_price_gate=True,
+                           name="supply_rev_or_ma"),                                     # 원안+20일선
+    SupplyReversalStrategy(accum_days=5, smart_mode="or", cross_window=3,
+                           name="supply_5d"),                                            # A: 5일 창 교차
+    SupplyRatioStrategy(mode="smart", name="supply_ratio"),                              # B: 비율+연속(외인+기관)
+    SupplyRatioStrategy(mode="ind",   name="supply_ind"),                                # C: 개인 강도
+    SupplyRatioStrategy(mode="both",  name="supply_abc"),                                # A+B+C 결합(사용자 가설)
 ]
 
 

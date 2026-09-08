@@ -18,7 +18,8 @@ SIG_PATH   = f"{DATA_DIR}/_daily_cache.sig.json"   # 사이드카: 큰 피클을
 
 # 로더 로직 버전 — 올리면 기존 캐시(_daily_cache.pkl)가 자동 무효화돼 재생성된다.
 # v2: 중복 컬럼 coalesce 수정 (2026-06-19) — 이전 캐시는 trading_value/change_pct 가 깨져 있어 무효.
-_LOADER_VERSION = 2
+# v3: supply_demand 개인 순매수(individual_net) 조인 추가 (2026-09-08) — 캐시 재생성 필요.
+_LOADER_VERSION = 3
 
 
 def _cache_signature(files):
@@ -33,47 +34,55 @@ def _cache_signature(files):
             os.path.basename(files[-1]) if files else "", total)
 
 
-def _read_sig():
+def _read_sig(sig_path=SIG_PATH):
     """사이드카 시그니처 로드 (없거나 깨지면 None)."""
     try:
         import json
-        with open(SIG_PATH, "r", encoding="utf-8") as fh:
+        with open(sig_path, "r", encoding="utf-8") as fh:
             return tuple(json.load(fh))
     except Exception:
         return None
 
 
-def _write_sig(sig):
+def _write_sig(sig, sig_path=SIG_PATH):
     """사이드카 시그니처 기록 (실패 무시)."""
     try:
         import json
-        with open(SIG_PATH, "w", encoding="utf-8") as fh:
+        with open(sig_path, "w", encoding="utf-8") as fh:
             json.dump(list(sig), fh)
     except Exception:
         pass
 
 
-def load_macro_daily(start_date=None, end_date=None) -> pd.DataFrame:
+def load_macro_daily(start_date=None, end_date=None, data_dir=None) -> pd.DataFrame:
     """
     Returns: DataFrame[code, date, open, high, low, close, volume,
                       trading_value, change_pct, market_cap,
-                      foreign_net, inst_net]
+                      foreign_net, inst_net, individual_net]
     date 는 YYYYMMDD 문자열, 종목/날짜 정렬.
+
+    data_dir: 일봉 CSV 폴더. None 이면 기본 macro_data/daily(KOSDAQ).
+      KOSPI 전용 테스트는 data_dir="macro_data/daily_kospi" 로 호출(캐시도 폴더별 분리).
 
     [캐시] 데이터가 8년(1,900+ 파일)으로 커져 매 호출 풀스캔이 수 분 걸림.
     필터 없는 호출은 pickle 캐시 사용 — 파일 추가/변경 시 자동 재생성.
+    캐시 파일은 data_dir 안에 두므로 KOSDAQ/KOSPI 가 서로 덮어쓰지 않는다.
     """
-    files = sorted(glob.glob(f"{DATA_DIR}/*.csv"))
+    _dir = data_dir or DATA_DIR
+    _cache_path = f"{_dir}/_daily_cache.pkl"
+    _sig_path = f"{_dir}/_daily_cache.sig.json"
+
+    files = sorted(glob.glob(f"{_dir}/*.csv"))
     if not files:
-        raise FileNotFoundError(f"{DATA_DIR} 에 일봉 데이터 없음. pykrx_collector.py 먼저 실행.")
+        raise FileNotFoundError(f"{_dir} 에 일봉 데이터 없음. pykrx_collector.py(또는 backfill_kospi_daily.py) 먼저 실행.")
 
     use_cache = (start_date is None and end_date is None)
-    if use_cache and os.path.exists(CACHE_PATH):
+    if use_cache and os.path.exists(_cache_path):
         # 사이드카 시그니처로 먼저 판단 — 무효면 324MB 피클을 읽지 않고 바로 재생성.
-        if _read_sig() == _cache_signature(files):
+        if _read_sig(_sig_path) == _cache_signature(files):
             try:
                 import pickle
-                with open(CACHE_PATH, "rb") as fh:
+                with open(_cache_path, "rb") as fh:
                     return pickle.load(fh)["df"]
             except Exception:
                 pass
@@ -130,17 +139,45 @@ def load_macro_daily(start_date=None, end_date=None) -> pd.DataFrame:
     if n0 - len(full) > 0:
         print(f"  [loader] close<=0 행 {n0 - len(full):,}개 제거")
 
+    # 개인 순매수 조인 — supply_demand.individual_net_value (2026-09-08 신설)
+    # CSV(macro_data/daily)엔 외국인/기관만 있어, 개인은 stock.db 에서 date+code 로 조인한다.
+    # 백필 전(개인 NULL)이면 individual_net 은 NaN → supply_reversal 전략이 폴백(신호 0).
+    try:
+        import sqlite3
+        try:
+            from fin_paths import STOCK_DB as _SDB
+            _sdb = str(_SDB)
+        except Exception:
+            _sdb = os.path.join(os.path.dirname(__file__), "..", "..",
+                                "Stock_AI_Project", "data", "stock.db")
+        _con = sqlite3.connect(f"file:{_sdb}?mode=ro", uri=True)
+        _ind = pd.read_sql(
+            "SELECT date, ticker, individual_net_value FROM supply_demand "
+            "WHERE individual_net_value IS NOT NULL", _con)
+        _con.close()
+        if len(_ind):
+            _ind["date"] = _ind["date"].astype(str).str.replace("-", "", regex=False)
+            _ind["code"] = _ind["ticker"].astype(str).str.zfill(6)
+            full = full.merge(_ind[["date", "code", "individual_net_value"]],
+                              on=["date", "code"], how="left")
+            full = full.rename(columns={"individual_net_value": "individual_net"})
+            print(f"  [loader] 개인 순매수 조인: {_ind['individual_net_value'].notna().sum():,}건")
+    except Exception as _e:
+        print(f"  [loader] 개인 순매수 조인 실패(무시): {str(_e)[:70]}")
+    if "individual_net" not in full.columns:
+        full["individual_net"] = float("nan")
+
     full = full.sort_values(["code", "date"]).reset_index(drop=True)
 
     if use_cache:
         try:
             import pickle
-            tmp = CACHE_PATH + ".tmp"
+            tmp = _cache_path + ".tmp"
             with open(tmp, "wb") as fh:
                 pickle.dump({"sig": _cache_signature(files), "df": full}, fh,
                             protocol=pickle.HIGHEST_PROTOCOL)
-            os.replace(tmp, CACHE_PATH)
-            _write_sig(_cache_signature(files))   # 사이드카도 함께 기록
+            os.replace(tmp, _cache_path)
+            _write_sig(_cache_signature(files), _sig_path)   # 사이드카도 함께 기록
             print(f"  [loader] 캐시 저장 ({len(full):,}행) — 다음 로드부터 수 초")
         except Exception as e:
             print(f"  [loader] 캐시 저장 실패 (무시): {e}")
