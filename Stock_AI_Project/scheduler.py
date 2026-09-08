@@ -202,6 +202,12 @@ def kiwoom_weekly_job():
     # 5거래일 이상 비면 피처가 결측으로 돌아가므로 이 주간 증분이 자가치유 역할을 한다.
     _run_subprocess("키움 프로그램매매 수집",
                     [sys.executable, "-m", "src.collector.kiwoom_program", "--since", since])
+    # 2022~ 과거 백필 재개(IC 재측정용). 이미 2022 까지 채운 종목은 API 호출 없이 건너뛰므로
+    # 완료 후엔 수 초짜리 무동작 단계가 된다. 종목당 ~30초(페이지 ~20행)라 전체 ~23h → 주말 수 회에 걸쳐 완료.
+    # 일요일 03:00 AI 파이프라인 전에 멈추도록 --until 로 토요일 안에 끊는다(재실행 시 이어서).
+    _run_subprocess("키움 프로그램매매 과거 백필(재개)",
+                    [sys.executable, "-m", "src.collector.kiwoom_program",
+                     "--backfill", "--since", "2022-01-01", "--until", "23:30"])
 
 
 def weekend_audit_job():

@@ -73,6 +73,45 @@ def test_backfill_resume_skips_tickers_already_filled_to_since():
     assert _oldest_date(con, "C") is None, "미수집 종목 → 수집 대상"
 
 
+class _RowsClient:
+    """지정 행을 한 페이지로 돌려주는 클라이언트(오류 없음)."""
+    def __init__(self, rows):
+        self.rows, self.last_error_msg, self.env = rows, None, "fake"
+
+    def program_daily(self, *a, **k):
+        return self.rows, 'N', ''
+
+
+def _patch_now(kp, y, m, d, hh, mm):
+    class _Now:
+        def strftime(self, fmt):
+            from datetime import datetime as _real
+            return _real(y, m, d, hh, mm).strftime(fmt)
+    kp.datetime = type("D", (), {"now": staticmethod(lambda: _Now())})
+
+
+def test_collect_program_drops_today_placeholder_before_close_and_future_rows():
+    """실사고(2026-09-09 06:00): 자정 넘긴 야간 백필이 ka90013 의 '오늘' 0값 자리표시 행 53개를 저장 →
+    5일 합 최신 칸 오염. 장마감(15:40) 전엔 오늘 행 폐기, 미래 날짜는 항상 폐기, 마감 후엔 오늘 행 저장."""
+    from src.collector import kiwoom_program as kp
+    rows = [{"dt": "20260910", "prm_netprps_amt": "0"},      # 미래 → 항상 폐기
+            {"dt": "20260909", "prm_netprps_amt": "0"},      # 오늘(자리표시)
+            {"dt": "20260908", "prm_netprps_amt": "204"}]    # 어제(실값)
+    orig = kp.datetime
+    try:
+        _patch_now(kp, 2026, 9, 9, 6, 0)                     # 06:00 장 시작 전
+        con = _conn()
+        assert kp.collect_program(_RowsClient(rows), con, "079960") == 1
+        assert [r[0] for r in con.execute("SELECT date FROM program_trading ORDER BY date")] == ["2026-09-08"]
+
+        _patch_now(kp, 2026, 9, 9, 16, 0)                    # 16:00 장 마감 후 → 오늘 행 저장
+        con = _conn()
+        assert kp.collect_program(_RowsClient(rows), con, "079960") == 2
+        assert [r[0] for r in con.execute("SELECT date FROM program_trading ORDER BY date")] == ["2026-09-08", "2026-09-09"]
+    finally:
+        kp.datetime = orig
+
+
 def test_past_deadline_morning_cutoff():
     from src.collector import kiwoom_program as kp
     from datetime import datetime

@@ -99,9 +99,17 @@ def collect_program(client, conn, ticker, since_iso=None, paginate=False, date_p
                 raise RuntimeError(f"ka90013 실패: {client.last_error_msg}")
             break
         inserts, reached = [], False
+        # 당일 행 가드: ka90013 은 장 시작 전에도 '오늘' 행을 0값 자리표시로 돌려준다(2026-09-09 06:00
+        # 실측 — 자정 넘긴 야간 백필이 이를 저장해 5일 합의 최신 칸을 0 으로 오염). 장마감(15:40) 전엔
+        # 오늘 행을 버리고, 미래 날짜는 항상 버린다. 마감 후 재수집 시 REPLACE 로 정상값이 들어간다.
+        _now = datetime.now()
+        _today = _now.strftime('%Y-%m-%d')
+        _after_close = _now.strftime('%H%M') >= '1540'
         for r in rows:
             d = _iso(r.get('dt'))
             if d is None:
+                continue
+            if d > _today or (d == _today and not _after_close):
                 continue
             if since_iso and d < since_iso:
                 reached = True
