@@ -43,7 +43,7 @@ from strategies.rsi_volume              import RsiVolumeStrategy
 from strategies.high52w_short_decrease  import High52wShortDecreaseStrategy
 from strategies.gc_foreign              import GcForeignStrategy
 from strategies.high52w_credit_decrease import High52wCreditDecreaseStrategy
-from strategies.supply_reversal        import SupplyReversalStrategy, SupplyRatioStrategy
+from strategies.supply_reversal        import SupplyReversalStrategy, SupplyRatioStrategy, SupplyCrossoverStrategy
 from strategies.daily_loader       import load_macro_daily
 
 DEFAULT_COSTS = {"fee_pct": 0.015, "tax_pct": 0.18, "slip_pct": 0.05, "total_pct": 0.245}
@@ -111,6 +111,11 @@ ALL_STRATEGIES = [
     SupplyRatioStrategy(mode="smart", name="supply_ratio"),                              # B: 비율+연속(외인+기관)
     SupplyRatioStrategy(mode="ind",   name="supply_ind"),                                # C: 개인 강도
     SupplyRatioStrategy(mode="both",  name="supply_abc"),                                # A+B+C 결합(사용자 가설)
+    # ── 정정된 원안(2026-09-08, 스크린샷 확인): '선 역전' 신호 + 20일 내 +2% 익절 ──
+    #   위 6종은 '절대 0 교차'로 잘못 해석한 버전. 아래 2종이 사용자 의도 그대로.
+    #   hold20 은 같은 신호·고정 20일 대조군 — 익절 규칙의 기여만 분리해서 본다.
+    SupplyCrossoverStrategy(take_profit_pct=2.0, name="supply_xover_tp2"),               # 사용자 규칙
+    SupplyCrossoverStrategy(take_profit_pct=None, name="supply_xover_hold20"),           # 대조군(TP 없음)
 ]
 
 

@@ -140,9 +140,17 @@ def _make_trades_with_stops(df_with_sig, holding_days, strategy_name,
                              stop_loss_pct=None, trailing_peak_pct=None,
                              trailing_activate_pct=10.0,
                              time_check_days=None, time_check_min_pct=None,
-                             time_stop_pct=None):
+                             time_stop_pct=None,
+                             take_profit_pct=None, tp_fill="high"):
     """
-    조건부 청산 백테스트 — 손절 + trailing stop + 시간 조건부 + 만기 청산.
+    조건부 청산 백테스트 — 손절 + trailing stop + 시간 조건부 + 익절 + 만기 청산.
+
+      take_profit_pct: 진입가 대비 익절 목표 (+2.0 = +2%). None 이면 미적용. (2026-09-08 신설)
+        라이브 kiwoom 의 '매수 후 익절 지정가'와 같은 기제 — 진입 당일부터 체크.
+      tp_fill: "high" = 일중 고가가 목표에 닿으면 목표가 체결(갭상승으로 시가가 목표 위면 시가).
+               "close" = 종가가 목표 이상일 때 종가 체결(보수적 감도 검사용).
+      청산 우선순위: stop_loss(일중 low) > take_profit(일중 high) > trailing(종가) > time_stop > 만기.
+      같은 날 손절·익절이 둘 다 닿으면 손절을 먼저 본다(보수적).
 
     Args:
       stop_loss_pct: 진입가 대비 (-15.0 = -15%). None 이면 미적용.
@@ -190,13 +198,28 @@ def _make_trades_with_stops(df_with_sig, holding_days, strategy_name,
         peak_activated = False
         max_pct_so_far = 0.0   # 보유 중 최고 손익률 (high 기준)
         stop_price = entry_p * (1 + stop_loss_pct / 100) if stop_loss_pct is not None else None
+        tp_price = entry_p * (1 + take_profit_pct / 100) if take_profit_pct is not None else None
 
         exit_idx = max_exit_idx
         exit_p = float(g.iloc[exit_idx]["close"])
         exit_reason = "hold_exit"
 
+        # 0. 진입 당일 익절 — 시가 진입 직후 걸어둔 지정가가 당일 고가에 닿는 경우
+        #    (진입가=시가라 '시가가 목표 위' 갭 케이스는 당일엔 없다 → 목표가 체결)
+        _loop_start = entry_idx + 1
+        if tp_price is not None:
+            _r0 = g.iloc[entry_idx]
+            _h0 = float(_r0["high"] or 0)
+            _c0 = float(_r0["close"] or 0)
+            _hit0 = (_c0 >= tp_price) if tp_fill == "close" else (_h0 > 0 and _h0 >= tp_price)
+            if _hit0:
+                exit_idx = entry_idx
+                exit_p = _c0 if tp_fill == "close" else tp_price
+                exit_reason = "take_profit"
+                _loop_start = max_exit_idx + 1          # 일별 루프 건너뜀
+
         # 보유 기간 일별 검사 (entry 다음날부터 만기까지)
-        for i in range(entry_idx + 1, max_exit_idx + 1):
+        for i in range(_loop_start, max_exit_idx + 1):
             row = g.iloc[i]
             day_high = float(row["high"] or 0)
             day_low = float(row["low"] or 0)
@@ -212,6 +235,22 @@ def _make_trades_with_stops(df_with_sig, holding_days, strategy_name,
                 exit_p = min(stop_price, day_open) if day_open > 0 else stop_price
                 exit_reason = "stop_loss"
                 break
+
+            # 1b. 익절 지정가 (2026-09-08) — 손절 다음 우선순위(같은 날 둘 다면 손절 우선, 보수적)
+            if tp_price is not None:
+                if tp_fill == "close":
+                    if day_close >= tp_price:
+                        exit_idx = i
+                        exit_p = day_close
+                        exit_reason = "take_profit"
+                        break
+                elif day_high > 0 and day_high >= tp_price:
+                    day_open = float(row["open"] or 0)
+                    # 갭상승으로 시가가 이미 목표 위면 지정가 매도는 시가에 체결(유리한 쪽)
+                    exit_idx = i
+                    exit_p = max(tp_price, day_open) if day_open > 0 else tp_price
+                    exit_reason = "take_profit"
+                    break
 
             # 2. peak 갱신 + max_pct 추적
             if day_high > peak:
@@ -259,6 +298,7 @@ def _make_trades_with_stops(df_with_sig, holding_days, strategy_name,
             code=str(code),
             entry_date=str(entry_date),
             entry_price=float(entry_p),
+            exit_date=str(exit_date),      # [2026-09-08 fix] 누락돼 있어 이 함수가 통째로 TypeError — 손절 백테스트 전부 불능이었음
             exit_price=float(exit_p),
             holding_days=exit_idx - entry_idx + 1,
             gross_pct=float(gross_pct),

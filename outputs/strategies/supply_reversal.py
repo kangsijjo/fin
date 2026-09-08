@@ -24,7 +24,7 @@ supply_reversal — 수급 역전(개인 이탈 + 외국인/기관 유입) 전�
 import pandas as pd
 
 from .base import BaseStrategy
-from ._swing_base import _make_trades_for_signals, _add_market_gate
+from ._swing_base import _make_trades_for_signals, _make_trades_with_stops, _add_market_gate
 
 
 class SupplyReversalStrategy(BaseStrategy):
@@ -217,3 +217,78 @@ class SupplyRatioStrategy(BaseStrategy):
 
         return _make_trades_for_signals(
             df, holding_days=self.holding_days, strategy_name=self.name, costs=costs)
+
+
+class SupplyCrossoverStrategy(BaseStrategy):
+    """수급선 '역전(상대 교차)' + 익절 — 사용자 원안의 **정정된** 해석. (2026-09-08)
+
+    앞의 SupplyReversalStrategy 는 '개인이 0 밑 / 기관·외인이 0 위'(절대 0 교차)로 구현했는데,
+    사용자가 스크린샷(두산에너빌리티 2026-08-26)으로 바로잡았다: 그날 기관 20일누적선
+    (1,112,992)이 개인 20일누적선(317,193)을 **아래에서 위로 역전**했고 둘 다 0 위였다.
+    즉 절대 0 이 아니라 **선끼리의 역전**이 신호다. 청산도 고정 20일이 아니라
+    **20영업일 내 +2% 도달 시 익절, 미도달이면 20일째 종가**.
+
+    신호: 기관 또는 외국인의 accum_days 누적 순매수가 개인 누적 순매수를 전일 이하 → 당일 초과.
+    진입: 다음날 시가(entry_lag=1). 청산: take_profit_pct 지정가(일중 고가 기준) / 만기.
+    take_profit_pct=None 이면 고정 보유 대조군(같은 신호로 TP 효과만 분리).
+
+    주의: +2% 익절·무손절은 '작은 이익 다수 + 큰 손실 소수'의 음의 왜도 구조다.
+    승률이 높게 나와도 평균수익·진짜 MDD 로 판정해야 한다. tp_fill="high" 는 일중 고가
+    체결 가정이라 약간 낙관적 — 결과가 양수면 "close" 로 감도 재확인.
+    """
+    name = "supply_xover"
+
+    def __init__(self, accum_days=20, holding_days=20, take_profit_pct=2.0, tp_fill="high",
+                 smart_mode="or", min_tv=1_000_000_000, stop_loss_pct=None, name=None):
+        self.accum_days = accum_days
+        self.holding_days = holding_days
+        self.take_profit_pct = take_profit_pct
+        self.tp_fill = tp_fill
+        self.stop_loss_pct = stop_loss_pct      # (2026-09-08) 익절+손절 스윕용. None=손절 없음
+        self.smart_mode = smart_mode
+        self.min_tv = min_tv
+        if name:
+            self.name = name
+
+    def signal_df(self, df):
+        """신호 계산만 — 청산 규칙(익절/손절) 스윕에서 재사용하도록 분리. (2026-09-08)
+        반환 df 는 code/date 정렬 + 'signal' 컬럼. 개인 데이터 없으면 signal 전부 False."""
+        df = df.sort_values(["code", "date"]).copy()
+        if "individual_net" not in df.columns or df["individual_net"].notna().sum() == 0:
+            df["signal"] = False
+            return df
+
+        gb = df.groupby("code")
+        N = self.accum_days
+
+        def _acc(col):
+            return gb[col].transform(
+                lambda s: s.fillna(0.0).rolling(N, min_periods=N).sum())
+        df["_ind"] = _acc("individual_net")
+        df["_for"] = _acc("foreign_net")
+        df["_ins"] = _acc("inst_net")
+
+        # 선 역전: 전일 (스마트 <= 개인) → 당일 (스마트 > 개인)
+        def _cross_up(col):
+            cur = df[col] > df["_ind"]
+            prev = df.groupby("code")[col].shift(1) <= df.groupby("code")["_ind"].shift(1)
+            return cur & prev
+        ins_x = _cross_up("_ins")
+        for_x = _cross_up("_for")
+        cross = (ins_x & for_x) if self.smart_mode == "and" else (ins_x | for_x)
+
+        cond = cross & df["_ind"].notna() & df["_for"].notna() & df["_ins"].notna()
+        if "trading_value" in df.columns:
+            cond = cond & (df["trading_value"] >= self.min_tv)
+        df["signal"] = cond.fillna(False)
+        return df
+
+    def backtest(self, df, costs):
+        df = self.signal_df(df)
+        if self.take_profit_pct is None and self.stop_loss_pct is None:
+            return _make_trades_for_signals(
+                df, holding_days=self.holding_days, strategy_name=self.name, costs=costs)
+        return _make_trades_with_stops(
+            df, holding_days=self.holding_days, strategy_name=self.name, costs=costs,
+            take_profit_pct=self.take_profit_pct, tp_fill=self.tp_fill,
+            stop_loss_pct=self.stop_loss_pct)
