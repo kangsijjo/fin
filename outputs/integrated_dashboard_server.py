@@ -1619,6 +1619,19 @@ def _ai_score_signals(codes):
     )
     sd_map = {str(r[0]).zfill(6): (float(r[1] or 0), float(r[2] or 0)) for r in sd_rows}
 
+    # ── 프로그램매매 5일 절단합 (factor_scorer prm_net_5d_raw 와 동일 정의, 2026-09-08) ─────
+    # 신호일(ld_str) 이하 최근 5행, 음수 날은 0 절단, 5행 미만이면 결측. 테이블 없으면 safe_db 가 [] → NaN 유지.
+    pt_rows = safe_db(
+        f"SELECT ticker, prm_net_amt FROM ("
+        f"  SELECT ticker, prm_net_amt, ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) rn "
+        f"  FROM program_trading WHERE ticker IN ({codes_q}) AND date <= '{ld_str}' AND prm_net_amt IS NOT NULL"
+        f") WHERE rn <= 5"
+    )
+    _pt_acc = {}
+    for r in pt_rows or []:
+        _pt_acc.setdefault(str(r[0]).zfill(6), []).append(float(r[1] or 0))
+    pt_map = {c: sum(max(v, 0.0) for v in vs) for c, vs in _pt_acc.items() if len(vs) == 5}
+
     # ── 뉴스 ─────────────────────────────────────────────────────────────
     pw = (datetime.today()-timedelta(days=7)).strftime("%Y%m%d")
     nw_rows = safe_db(
@@ -1676,7 +1689,10 @@ def _ai_score_signals(codes):
             "rsi_db":          float(r.get("rsi14", np.nan)),
             "macd_hist_db":    np.nan,
             "bb_pct_db":       np.nan,
-            "prm_net_5d_ratio": np.nan,
+            # 5일 절단합(백만원) / 당일 거래대금(원) — 학습 정의. 데이터·거래대금 없으면 NaN.
+            "prm_net_5d_ratio": (pt_map[code] / float(r.get("trading_value"))
+                                 if code in pt_map and float(r.get("trading_value") or 0) > 0
+                                 else np.nan),
             "strat_h252_40":   0,
             "strat_h500_20":   0,
             "strat_h500_40_MKT": 1,

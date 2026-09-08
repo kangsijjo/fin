@@ -136,6 +136,11 @@ def collect_credit(client, conn, ticker, since_iso=None, paginate=False,
         rows, cont_yn, next_key = client.credit_trend(
             ticker, date=date_q, cont_yn=cont_yn, next_key=next_key)
         if not rows:
+            # 실패 호출(인증 8005·한도 1700·네트워크)의 빈 결과를 '데이터 없음'으로 삼키면
+            # "완료 0행" 으로 조용히 성공 처리된다(2026-09-08 kiwoom_program 시험에서 실측한 동일 패턴).
+            # 오류면 예외로 올려 run() 이 실패로 집계하게 한다.
+            if getattr(client, 'last_error_msg', None):
+                raise RuntimeError(f"ka10013 실패: {client.last_error_msg}")
             break
         inserts, reached = [], False
         for r in rows:
@@ -179,6 +184,8 @@ def collect_lending(client, conn, ticker, since_iso=None, paginate=False,
             ticker, start_date=start_dt, end_date=end_dt,
             cont_yn=cont_yn, next_key=next_key)
         if not rows:
+            if getattr(client, 'last_error_msg', None):   # 실패 호출을 '데이터 없음'으로 삼키지 않음
+                raise RuntimeError(f"ka20068 실패: {client.last_error_msg}")
             break
         inserts = []
         for r in rows:
@@ -222,7 +229,7 @@ def run(backfill=False, since='2022-01-01', limit=None, force=False):
     logger.info(f"키움 신용/대차 공백 수집 시작: 종목 {len(tickers)}개, since={since}")
 
     client = None   # 공백이 있는 종목을 처음 만났을 때만 토큰 발급
-    total_c = total_l = skipped = 0
+    total_c = total_l = skipped = fail = 0
     start_ts = time.time()
     with _kiwoom_lock(timeout=60), closing(get_connection()) as conn:
         _ensure_tables(conn)
@@ -256,6 +263,7 @@ def run(backfill=False, since='2022-01-01', limit=None, force=False):
                         client, conn, t, since_iso=gap_l[0],
                         paginate=True, end_iso=gap_l[1])
             except Exception as e:
+                fail += 1
                 logger.error(f"{t} 수집 실패(다음 종목 진행): {e}")
             # 종목마다 커밋 → 중단 시 1종목 이내만 손실
             write_retry(conn.commit, logger=logger)
@@ -269,7 +277,12 @@ def run(backfill=False, since='2022-01-01', limit=None, force=False):
         write_retry(conn.commit, logger=logger)
 
     logger.info(f"완료. 신용 {total_c:,}행 / 대차 {total_l:,}행 추가 "
-                f"(공백 없어 스킵 {skipped}종목).")
+                f"(공백 없어 스킵 {skipped}종목, 실패 {fail}종목).")
+    # 시도한 종목이 있는데 전부 실패(인증 8005/8050·한도)면 '완료' 종료코드를 주지 않는다 —
+    # 종전엔 collect_* 가 실패 응답을 빈 결과로 삼켜 "완료 0행" 이 조용히 성공 처리됐다(2026-09-08).
+    if fail and (total_c + total_l) == 0:
+        logger.error(f"키움 신용/대차: 시도 전부 실패({fail}종목) — 비0 종료")
+        sys.exit(1)
 
 
 def _parse_args():

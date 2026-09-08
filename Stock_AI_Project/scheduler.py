@@ -197,6 +197,11 @@ def kiwoom_weekly_job():
     log(f"===== 키움 주간 데이터 수집 시작 (since={since}) =====")
     _run_subprocess("키움 신용/대차 수집",
                     [sys.executable, "-m", "src.collector.kiwoom_extra", "--since", since])
+    # 프로그램매매(ka90013) 증분 — factor_scorer prm_net_5d_ratio(IC +0.141) 의 입력. (2026-09-08)
+    # 종목별 마지막 저장일 이후만 가져오므로 평시 ~1콜/종목. 위 신용 수집과 순차 실행(같은 키움 락).
+    # 5거래일 이상 비면 피처가 결측으로 돌아가므로 이 주간 증분이 자가치유 역할을 한다.
+    _run_subprocess("키움 프로그램매매 수집",
+                    [sys.executable, "-m", "src.collector.kiwoom_program", "--since", since])
 
 
 def weekend_audit_job():

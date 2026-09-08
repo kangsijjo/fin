@@ -130,8 +130,25 @@ def collect_program(client, conn, ticker, since_iso=None, paginate=False, date_p
     return inserted
 
 
-def run(backfill=False, since='2022-01-01', limit=None, force=False, ticker=None):
-    """backfill=True: since 까지 과거 방향 페이지네이션. False: 종목별 마지막 저장일 이후만(증분)."""
+def _oldest_date(conn, ticker):
+    row = conn.execute(
+        "SELECT MIN(date) FROM program_trading WHERE ticker=?", (ticker,)).fetchone()
+    return row[0] if row and row[0] else None
+
+
+def _past_deadline(until_hhmm):
+    """until='06:00' 형식. 지정 시각을 넘었으면 True (같은 날 기준; 자정 넘김은 시각이 작아지므로
+    '시작 시각보다 작고 현재가 until 이상'으로 판정 — 야간 백필이 아침 충돌 시간대로 넘어가는 것 방지)."""
+    if not until_hhmm:
+        return False
+    now = datetime.now()
+    hh, mm = (int(x) for x in until_hhmm.split(':'))
+    return (now.hour, now.minute) >= (hh, mm) and now.hour < 12
+
+
+def run(backfill=False, since='2022-01-01', limit=None, force=False, ticker=None, until=None):
+    """backfill=True: since 까지 과거 방향 페이지네이션(이미 since 까지 채운 종목은 건너뜀 → 재개 가능).
+    False: 종목별 마지막 저장일 이후만(증분). until='HH:MM' 이면 그 시각에 정상 종료(다음 실행이 이어받음)."""
     if not weekend_guard(force):
         return False
 
@@ -146,16 +163,28 @@ def run(backfill=False, since='2022-01-01', limit=None, force=False, ticker=None
             tickers = [ticker] if ticker else _kr_tickers()
             if limit:
                 tickers = tickers[:limit]
-            logger.info(f"[program] 대상 {len(tickers)}종목 | backfill={backfill} since={since} env={client.env}")
+            logger.info(f"[program] 대상 {len(tickers)}종목 | backfill={backfill} since={since} "
+                        f"until={until} env={client.env}")
 
-            total, fail = 0, 0
+            total, fail, skipped, attempted = 0, 0, 0, 0
+            t0 = time.time()
             bar = tqdm(tickers, desc="program(ka90013)", unit="종목", ncols=90,
                        disable=not sys.stdout.isatty())
             for i, t in enumerate(bar, 1):
+                if _past_deadline(until):
+                    logger.warning(f"[program] 마감 {until} 도달 — {i - 1}/{len(tickers)} 처리 후 정상 종료"
+                                   f"(재실행 시 이어서 수집)")
+                    break
                 try:
                     if backfill:
+                        oldest = _oldest_date(conn, t)
+                        if oldest and oldest <= since:
+                            skipped += 1          # 이미 since 까지 채워진 종목 → 재개 시 건너뜀
+                            continue
+                        attempted += 1
                         n = collect_program(client, conn, t, since_iso=since, paginate=True)
                     else:
+                        attempted += 1
                         last = _latest_date(conn, t)
                         # 증분: 마지막 저장일 이후만. 첫 수집이면 since 부터.
                         n = collect_program(client, conn, t, since_iso=(last or since), paginate=True)
@@ -164,12 +193,19 @@ def run(backfill=False, since='2022-01-01', limit=None, force=False, ticker=None
                 except Exception as e:
                     fail += 1
                     logger.warning(f"{t} 실패: {str(e)[:100]}")
-                    if fail >= 20 and fail / max(i, 1) > 0.5:
+                    if fail >= 20 and fail / max(attempted, 1) > 0.5:
                         logger.error("실패율 50% 초과 — 토큰/한도 문제 의심, 중단")
                         return False
+                if i % 100 == 0:
+                    el = time.time() - t0
+                    eta = el / i * (len(tickers) - i) / 60
+                    logger.info(f"[program] 진행 {i}/{len(tickers)} | 신규 {total:,}행 | 실패 {fail} | "
+                                f"건너뜀 {skipped} | 경과 {el / 60:.0f}분 | ETA {eta:.0f}분")
                 time.sleep(SLEEP_BETWEEN_CALLS)
 
-            logger.info(f"[program] 완료: 신규 {total:,}행 / 실패 {fail}종목")
+            logger.info(f"[program] 완료: 신규 {total:,}행 / 실패 {fail}종목 / 건너뜀 {skipped}종목 "
+                        f"(총 {(time.time() - t0) / 60:.0f}분)")
+            tickers = tickers[:attempted] if attempted else tickers   # 전종목실패 판정은 시도분 기준
             # 시도한 종목이 전부 실패(인증·한도 등)면 '성공' 종료코드를 주지 않는다 —
             # exit 0 이면 스케줄러가 '완료'로 오인하는 조용한 실패(2026-07-04 credit 사례 재발 방지)
             if fail and fail >= len(tickers):
@@ -186,11 +222,13 @@ def _parse_args():
     p.add_argument('--ticker', default=None, help='단일 종목 코드(시험용)')
     p.add_argument('--force', action='store_true',
                    help='주중 실행 강제 (키움 키 공유 충돌 주의 — 장중 금지)')
+    p.add_argument('--until', default=None,
+                   help='HH:MM 마감 — 야간 백필이 아침(다른 시스템 키 사용) 시간대로 넘어가지 않게 정상 종료')
     return p.parse_args()
 
 
 if __name__ == "__main__":
     a = _parse_args()
     ok = run(backfill=a.backfill or bool(a.ticker), since=a.since, limit=a.limit,
-             force=a.force, ticker=a.ticker)
+             force=a.force, ticker=a.ticker, until=a.until)
     sys.exit(0 if ok else 1)
