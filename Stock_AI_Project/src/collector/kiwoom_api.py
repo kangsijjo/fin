@@ -61,6 +61,7 @@ _RESOURCE = {
     'ka10059': '/api/dostk/stkinfo',   # 종목별투자자기관별
     'ka10013': '/api/dostk/stkinfo',   # 신용매매동향
     'ka20068': '/api/dostk/slb',       # 종목별 대차거래추이
+    'ka90013': '/api/dostk/mrkcond',   # 종목일별프로그램매매추이 (2026-09-08, prm_net_5d_ratio 복구용)
 }
 
 
@@ -189,18 +190,22 @@ class KiwoomClient:
         if resource is None:
             raise ValueError(f"등록되지 않은 api_id: {api_id}")
         url = f"{self.base_url}{resource}"
-        headers = {
-            "Content-Type": "application/json;charset=UTF-8",
-            "authorization": f"Bearer {self.access_token}",
-            "api-id": api_id,
-            "cont-yn": cont_yn,
-            "next-key": next_key,
-        }
 
+        def _headers():
+            # 토큰 재발급 후에도 새 토큰이 실리도록 매 시도마다 구성
+            return {
+                "Content-Type": "application/json;charset=UTF-8",
+                "authorization": f"Bearer {self.access_token}",
+                "api-id": api_id,
+                "cont-yn": cont_yn,
+                "next-key": next_key,
+            }
+
+        token_retried = False
         for attempt in range(_RATE_LIMIT_RETRIES + 1):
             self._throttle()
             result = self._http_raw('POST', url, retries=_HTTP_RETRIES,
-                                    headers=headers, json=body)
+                                    headers=_headers(), json=body)
             if result is None:
                 self.last_error_msg = '네트워크 실패'
                 return None, 'N', ''
@@ -213,6 +218,21 @@ class KiwoomClient:
                         res_headers.get('next-key', ''))
 
             msg = data.get('return_msg', '') or ''
+
+            # 인증 실패(8005 Token 무효 등) → 캐시 토큰이 서버에서 죽은 경우(키 공유 시 다른
+            # 시스템의 재발급이 우리 토큰을 무효화). expires_dt 만 믿는 캐시는 이를 못 본다
+            # (2026-09-08 ka90013 시험에서 실측). 강제 재발급 1회 후 같은 요청을 재시도한다.
+            # 읽기 전용 TR 이라 재시도가 안전(주문과 달리 이중실행 없음).
+            if self._is_token_error(rc, msg):
+                if not token_retried:
+                    token_retried = True
+                    logger.warning(f"{api_id} 인증 실패({msg}) - 토큰 강제 재발급 후 1회 재시도")
+                    if self.get_token(force_refresh=True):
+                        continue
+                self.last_error_msg = msg
+                logger.error(f"{api_id} 인증 실패 지속: rc={rc} {msg} "
+                             "(8050=지정단말기(IP) 미등록 / 8005=토큰 무효)")
+                return None, 'N', ''
             # 허용량 초과(1700) → 지수 백오프 후 재시도.
             # 계속 밀어붙이면 모의서버가 연결 자체를 끊으므로 (timeout/reset)
             # 넉넉히 기다리는 게 전체 처리량에 오히려 이득.
@@ -237,6 +257,13 @@ class KiwoomClient:
             return None, 'N', ''
 
         return None, 'N', ''
+
+    @staticmethod
+    def _is_token_error(rc, msg):
+        """키움 인증 계열 오류 판정 — 본문 코드/문구 기준(rc=3 + 8005/8050/'인증'/'Token')."""
+        m = str(msg or '')
+        return (str(rc) == '3' or '8005' in m or '8050' in m
+                or 'Token' in m or '토큰' in m or '인증' in m)
 
     # ── TR 래퍼 ──────────────────────────────────────────
     def investor_daily(self, ticker, date=None, cont_yn='N', next_key=''):
@@ -270,6 +297,22 @@ class KiwoomClient:
         }
         data, cy, nk = self.call('ka10013', body, cont_yn, next_key)
         rows = (data or {}).get('crd_trde_trend') or []
+        return rows, cy, nk
+
+    def program_daily(self, ticker, date=None, cont_yn='N', next_key=''):
+        """ka90013 종목일별프로그램매매추이 (일별, 금액 기준). (2026-09-08)
+        반환: (rows, cont_yn, next_key) — rows 필드: dt, prm_netprps_amt(프로그램 순매수 금액),
+        prm_netprps_amt_irds(증감), prm_buy_amt, prm_sell_amt, prm_netprps_qty, cur_prc, trde_qty.
+        용도: factor_scorer 의 prm_net_5d_ratio(IC +0.141) 가 program_trading 테이블 부재로
+        라이브 89% 결측이던 것을 복구. 페이지네이션은 신용 ka10013 과 동일(과거 방향)."""
+        date = date or datetime.now().strftime('%Y%m%d')
+        body = {
+            "stk_cd": ticker,
+            "amt_qty_tp": "1",   # 1: 금액, 2: 수량
+            "date": date,
+        }
+        data, cy, nk = self.call('ka90013', body, cont_yn, next_key)
+        rows = (data or {}).get('stk_daly_prm_trde_trnsn') or []
         return rows, cy, nk
 
     def lending_trend(self, ticker, start_date='', end_date='', cont_yn='N', next_key=''):

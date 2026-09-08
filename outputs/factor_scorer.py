@@ -282,6 +282,9 @@ class FactorScorer:
             row = latest.loc[code]
             feats = {c: _safe_float(row.get(c)) for c in feat_cols}
             feats["score_tv"] = _safe_float(score_map.get(code))
+            # 당일 거래대금(원) — prm_net_5d_ratio(= 5일 프로그램 순매수 절단합 / 당일 거래대금)의
+            # 분모. 모델 벡터화는 feature order 기준이라 여분 키는 무해. (2026-09-08)
+            feats["trading_value"] = _safe_float(row.get("trading_value"))
             result[code] = feats
 
         return result
@@ -463,6 +466,35 @@ class FactorScorer:
         except Exception as e:
             print(f"[FactorScorer] credit_balance 로드 실패: {e}")
 
+        # program_trading (키움 ka90013, kiwoom_program.py) — prm_net_5d_ratio 복구 (2026-09-08)
+        # 학습된 정의(kiwoom_hist_features.csv 역산, 079960/20260129 로 978 정확 재현):
+        #   prm_net_5d_raw = 신호일 포함 최근 5거래일 프로그램 순매수 금액(백만원) 합,
+        #                    단 **음수 날은 0 으로 절단**(옛 백필의 '--' 파싱 특성이 학습에 그대로 들어감).
+        #   prm_net_5d_ratio = raw / 당일 거래대금(원)  → build_feature_vec 에서 결합.
+        # DB 에는 참값(부호)이 저장돼 있으므로 절단은 여기서 재현한다. 부호 보존 합(prm_net_5d_signed)은
+        # IC_FEATURES 에 넣지 않은 후보 — 사전등록 IC 검정 후에만 채택.
+        try:
+            _pcut = (_dt.strptime(date_str, "%Y%m%d") - _td(days=30)).strftime("%Y%m%d")
+            pt = pd.read_sql(
+                "SELECT ticker, date, prm_net_amt FROM program_trading "
+                "WHERE replace(date,'-','') >= ? AND prm_net_amt IS NOT NULL ORDER BY ticker, date",
+                con, params=[_pcut]
+            )
+            if len(pt) > 0:
+                pt["date"] = pt["date"].astype(str).str.replace("-", "").str[:8]
+                for code, g in pt.groupby("ticker"):
+                    g = g[g["date"] <= date_str].sort_values("date").tail(5)
+                    if len(g) < 5:          # 5거래일 미만이면 정의 불충족 → 결측 유지
+                        continue
+                    code = str(code).zfill(6)
+                    if code not in result:
+                        result[code] = {}
+                    vals = g["prm_net_amt"].astype(float)
+                    result[code]["prm_net_5d_raw"] = float(vals.clip(lower=0).sum())
+                    result[code]["prm_net_5d_signed"] = float(vals.sum())
+        except Exception as e:
+            print(f"[FactorScorer] program_trading 로드 실패: {e}")
+
         return result
 
     # ─────────────────────────────────────────────────────────────────────
@@ -480,6 +512,13 @@ class FactorScorer:
         feats.update(price_feats.get(code, {}))
         feats.update(macro_feats)                   # 매크로는 종목 공통
         feats.update(db_feats.get(code, {}))        # DB 피처 (있으면 덮어씀)
+
+        # prm_net_5d_ratio = 5일 프로그램 순매수 절단합(백만원, DB) / 당일 거래대금(원, 가격피처).
+        # 단위 불일치(백만원/원)는 학습 정의 그대로 — IC 는 순위 기반이라 스케일 무관. (2026-09-08)
+        _raw = feats.get("prm_net_5d_raw")
+        _tv = feats.get("trading_value")
+        if _raw is not None and _tv is not None and not np.isnan(_raw) and not np.isnan(_tv) and _tv > 0:
+            feats["prm_net_5d_ratio"] = float(_raw) / float(_tv)
 
         # 전략 더미 피처 — feature_spec.STRAT_FEATURES 단일 출처(학습 one-hot 과 동일 규칙).
         # 2026-07-17: 라이브 6전략 학습 편입으로 하드코딩 3개 → 계약 기반 일반화.
