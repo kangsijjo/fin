@@ -43,7 +43,9 @@ from strategies.foreign_high import ForeignHighStrategy
 from strategies.gc_foreign import GcForeignStrategy
 from make_trades_history_v2 import compute_stock_features
 
-OUT = "./trades_history_v3.csv"
+# 기본은 라이브 IC 원천 파일. TRADES_OUT 로 덮어쓰면 별도 파일로 생성해
+# 교체 전에 IC·강도분포 영향을 비교할 수 있다(라이브 채점에 무영향). (2026-09-11)
+OUT = os.getenv("TRADES_OUT", "./trades_history_v3.csv")
 
 STOCK_DB_CANDIDATES = [
     os.getenv("STOCK_DB", ""),
@@ -458,6 +460,42 @@ def main():
         cov = out.get("crd_remn_rt")
         if cov is not None:
             print(f"[kiwoom_feat] 병합 — 신용 커버리지 {cov.notna().mean()*100:.0f}%")
+
+    # 프로그램매매 피처 — program_trading 테이블(키움 ka90013, kiwoom_program.py) 기반. (2026-09-10)
+    #   종전엔 위 kiwoom_hist_features.csv 만 썼는데 그 CSV 는 4,207행(라이브6 표본의 4.2%)뿐이라
+    #   IC +0.141 인 prm_net_5d_ratio 가 학습에서 사실상 비어 있었다. 백필된 DB 로 표본을 넓힌다.
+    #   정의는 factor_scorer.prepare_db_features 와 **반드시 동일**해야 학습 IC 가 라이브로 이전된다:
+    #     raw   = 신호일 포함 최근 5거래일 순매수(백만원) 합, 음수 날은 0 절단
+    #     ratio = raw / 당일 거래대금(원)
+    #   CSV 값이 있는 행은 그대로 두고(과거 학습과의 연속성), 결측만 DB 로 채운다(coalesce).
+    try:
+        _pt = pd.read_sql(
+            "SELECT ticker AS code, date, prm_net_amt FROM program_trading "
+            "WHERE prm_net_amt IS NOT NULL ORDER BY ticker, date", con)
+        if len(_pt) > 0:
+            _pt["code"] = _pt["code"].astype(str).str.zfill(6)
+            _pt["date"] = _pt["date"].astype(str).str.replace("-", "").str[:8]
+            _pt = _pt.drop_duplicates(["code", "date"]).sort_values(["code", "date"])
+            _g = _pt.groupby("code")["prm_net_amt"]
+            _pt["prm_raw_db"] = _g.transform(
+                lambda s: s.clip(lower=0).rolling(5, min_periods=5).sum())
+            _pt = _pt.dropna(subset=["prm_raw_db"])[["code", "date", "prm_raw_db"]]
+            out = out.merge(_pt, on=["code", "date"], how="left")
+            _tv = df[["date", "code", "trading_value"]].copy()
+            _tv["date"] = _tv["date"].astype(str)
+            _tv["code"] = _tv["code"].astype(str).str.zfill(6)
+            _tv = _tv.drop_duplicates(["date", "code"])
+            out = out.merge(_tv, on=["date", "code"], how="left")
+            _ratio_db = out["prm_raw_db"] / out["trading_value"].where(out["trading_value"] > 0)
+            _before = out["prm_net_5d_ratio"].notna().sum() if "prm_net_5d_ratio" in out.columns else 0
+            for _c, _new in (("prm_net_5d_raw", out["prm_raw_db"]), ("prm_net_5d_ratio", _ratio_db)):
+                out[_c] = out[_c].fillna(_new) if _c in out.columns else _new
+            out = out.drop(columns=["prm_raw_db", "trading_value"])
+            _after = out["prm_net_5d_ratio"].notna().sum()
+            print(f"[program_trading] DB 병합 — prm_net_5d_ratio {_before:,} → {_after:,}행 "
+                  f"({_after / len(out) * 100:.1f}%), DB 원천 {len(_pt):,}행")
+    except Exception as e:
+        print(f"[program_trading] DB 병합 실패(스킵): {e}")
 
     out.to_csv(OUT, index=False, encoding="utf-8-sig")
     print(f"\n[saved] {OUT}, {len(out):,} 행 "

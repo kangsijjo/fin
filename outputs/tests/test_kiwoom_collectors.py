@@ -73,6 +73,37 @@ def test_backfill_resume_skips_tickers_already_filled_to_since():
     assert _oldest_date(con, "C") is None, "미수집 종목 → 수집 대상"
 
 
+def test_effective_since_handles_holiday_start_date():
+    """실사고(2026-09-11): since='2022-01-01' 은 휴일이라 어떤 종목도 그 날짜 행이 없다.
+    MIN(date)='2022-01-03' <= '2022-01-01' 이 항상 거짓 → 완료된 794종목을 재수집(7시간 낭비)."""
+    from src.collector.kiwoom_program import _effective_since, _is_backfilled
+    con = _conn()
+    con.execute("CREATE TABLE program_backfill_state (ticker TEXT PRIMARY KEY, since TEXT, done_at TEXT)")
+    con.executemany("INSERT INTO program_trading (date, ticker, prm_net_amt) VALUES (?,?,?)",
+                    [("2022-01-03", "A", 1.0), ("2026-09-08", "A", 2.0),   # 2022 첫 거래일부터 = 완료
+                     ("2024-05-02", "B", 3.0)])                             # 2024 상장 or 미완료
+    since = "2022-01-01"
+    assert _effective_since(con, since) == "2022-01-03", "휴일 since → 실제 첫 거래일로 보정"
+    assert _is_backfilled(con, "A", since, "2022-01-03"), "A 는 완료 → 건너뜀"
+    assert not _is_backfilled(con, "B", since, "2022-01-03"), "B 는 미완료 → 수집"
+    assert not _is_backfilled(con, "C", since, "2022-01-03"), "미수집 종목 → 수집"
+
+
+def test_backfill_marker_prevents_rescan_of_late_listed_ticker():
+    """2022 이후 상장 종목은 MIN(date) 가 영원히 eff_since 보다 커서 데이터 추정만으로는
+    매일 밤 재수집된다. 완료 마커가 그것을 막는다."""
+    from src.collector.kiwoom_program import _is_backfilled, _mark_backfilled
+    con = _conn()
+    con.execute("CREATE TABLE program_backfill_state (ticker TEXT PRIMARY KEY, since TEXT, done_at TEXT)")
+    con.execute("INSERT INTO program_trading (date, ticker, prm_net_amt) VALUES ('2024-05-02','B',3.0)")
+    since, eff = "2022-01-01", "2022-01-03"
+    assert not _is_backfilled(con, "B", since, eff)
+    _mark_backfilled(con, "B", since)
+    assert _is_backfilled(con, "B", since, eff), "마커 기록 후에는 건너뜀"
+    # 더 이른 since 를 요구하면 다시 수집해야 한다
+    assert not _is_backfilled(con, "B", "2020-01-01", "2020-01-02"), "더 과거를 요구하면 재수집"
+
+
 class _RowsClient:
     """지정 행을 한 페이지로 돌려주는 클라이언트(오류 없음)."""
     def __init__(self, rows):

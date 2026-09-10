@@ -75,6 +75,16 @@ def _ensure_table(conn):
     ''')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_pt_ticker ON program_trading(ticker)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_pt_date ON program_trading(date)')
+    # 백필 완료 마커 — "이 종목을 이 since 로 끝까지 받았다" 는 사실 자체를 기록한다. (2026-09-11)
+    # 데이터의 MIN(date) 로 추정하면 since 이전 상장분이 없는 종목(2022 이후 신규상장)을
+    # 영원히 미완료로 오판해 매일 밤 재수집한다.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS program_backfill_state (
+            ticker TEXT PRIMARY KEY,
+            since TEXT,
+            done_at TEXT
+        )
+    ''')
 
 
 def _latest_date(conn, ticker):
@@ -144,6 +154,34 @@ def _oldest_date(conn, ticker):
     return row[0] if row and row[0] else None
 
 
+def _effective_since(conn, since):
+    """since 이후 실제로 데이터가 존재하는 첫 날짜(= 그 구간의 첫 거래일).
+
+    since='2022-01-01' 은 휴일이라 어떤 종목도 그 날짜 행을 갖지 못한다. 그런데 재개 판정을
+    MIN(date) <= since 로 하면 MIN(date)='2022-01-03' 이 항상 거짓이 되어 **이미 끝난 종목을
+    매번 다시 수집**한다(2026-09-11 실측: 완료된 794종목 재수집 = 약 7시간 낭비).
+    실제 첫 거래일로 바꿔 비교한다. 데이터가 없으면 since 그대로."""
+    row = conn.execute(
+        "SELECT MIN(date) FROM program_trading WHERE date >= ?", (since,)).fetchone()
+    return row[0] if row and row[0] else since
+
+
+def _is_backfilled(conn, ticker, since, eff_since):
+    """이 종목을 이 since 로 이미 끝까지 받았나. 완료 마커 우선, 없으면 데이터로 추정."""
+    row = conn.execute(
+        "SELECT 1 FROM program_backfill_state WHERE ticker=? AND since<=?", (ticker, since)).fetchone()
+    if row:
+        return True
+    oldest = _oldest_date(conn, ticker)
+    return bool(oldest and oldest <= eff_since)
+
+
+def _mark_backfilled(conn, ticker, since):
+    conn.execute(
+        "INSERT OR REPLACE INTO program_backfill_state (ticker, since, done_at) VALUES (?,?,?)",
+        (ticker, since, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+
+
 def _past_deadline(until_hhmm):
     """until='06:00' 형식. 지정 시각을 넘었으면 True (같은 날 기준; 자정 넘김은 시각이 작아지므로
     '시작 시각보다 작고 현재가 until 이상'으로 판정 — 야간 백필이 아침 충돌 시간대로 넘어가는 것 방지)."""
@@ -175,6 +213,9 @@ def run(backfill=False, since='2022-01-01', limit=None, force=False, ticker=None
                         f"until={until} env={client.env}")
 
             total, fail, skipped, attempted = 0, 0, 0, 0
+            eff_since = _effective_since(conn, since) if backfill else since
+            if backfill and eff_since != since:
+                logger.info(f"[program] since {since} → 실제 첫 거래일 {eff_since} 로 재개 판정")
             t0 = time.time()
             bar = tqdm(tickers, desc="program(ka90013)", unit="종목", ncols=90,
                        disable=not sys.stdout.isatty())
@@ -185,12 +226,12 @@ def run(backfill=False, since='2022-01-01', limit=None, force=False, ticker=None
                     break
                 try:
                     if backfill:
-                        oldest = _oldest_date(conn, t)
-                        if oldest and oldest <= since:
-                            skipped += 1          # 이미 since 까지 채워진 종목 → 재개 시 건너뜀
+                        if _is_backfilled(conn, t, since, eff_since):
+                            skipped += 1          # 이미 since 까지 받은 종목 → 재개 시 건너뜀
                             continue
                         attempted += 1
                         n = collect_program(client, conn, t, since_iso=since, paginate=True)
+                        _mark_backfilled(conn, t, since)   # 예외 없이 끝났으면 완료로 기록
                     else:
                         attempted += 1
                         last = _latest_date(conn, t)
