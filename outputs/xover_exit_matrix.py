@@ -43,8 +43,13 @@ HOLD = 20
 OOS = "20240908"
 COST = DEFAULT_COSTS["total_pct"]
 DATA_DIRS = {"kosdaq": None, "kospi": "macro_data/daily_kospi"}
-TPS = [round(3.0 + 0.5 * i, 1) for i in range(25)]      # 3.0 ~ 15.0
-SLS = [round(-5.0 - 0.5 * i, 1) for i in range(31)]     # -5.0 ~ -20.0
+def _seq(lo, hi, step=0.5, sign=1):
+    n = int(round((hi - lo) / step)) + 1
+    return [round(sign * (lo + step * i), 1) for i in range(n)]
+
+
+TPS = _seq(3.0, 15.0)                 # 기본 익절 3.0 ~ 15.0 (--tp-from/--tp-to 로 변경)
+SLS = _seq(5.0, 20.0, sign=-1)        # 기본 손절 -5.0 ~ -20.0 (--sl-from/--sl-to 는 절댓값으로 준다)
 
 
 class ExitMatrix:
@@ -194,7 +199,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--market", default="kosdaq", choices=["kosdaq", "kospi", "both"])
     ap.add_argument("--seeds", type=int, default=1)
+    ap.add_argument("--tp-from", type=float, default=3.0)
+    ap.add_argument("--tp-to", type=float, default=15.0)
+    ap.add_argument("--sl-from", type=float, default=5.0, help="손절 하한(절댓값). 2.0 이면 -2.0%%")
+    ap.add_argument("--sl-to", type=float, default=20.0, help="손절 상한(절댓값)")
+    ap.add_argument("--step", type=float, default=0.5)
     a = ap.parse_args()
+    global TPS, SLS
+    TPS = _seq(a.tp_from, a.tp_to, a.step)
+    SLS = _seq(a.sl_from, a.sl_to, a.step, sign=-1)
     for mk in (["kosdaq", "kospi"] if a.market == "both" else [a.market]):
         print(f"\n{'=' * 110}\n {mk.upper()} — 익절 {TPS[0]}~{TPS[-1]}% × 손절 {SLS[0]}~{SLS[-1]}% "
               f"({len(TPS)}×{len(SLS)} = {len(TPS) * len(SLS):,} 조합)\n{'=' * 110}")
@@ -216,7 +229,7 @@ def main():
             e.set_ca_filter(ca)
             rnd_em.append((e, ca_mask(e)))
 
-        W, A, ALPHA = {}, {}, {}
+        W, A, ALPHA, SLP = {}, {}, {}, {}
         best = []
         for tp in TPS:
             for sl in SLS:
@@ -231,26 +244,40 @@ def main():
                 W[(tp, sl)] = s["win"]
                 A[(tp, sl)] = s["avg"]
                 ALPHA[(tp, sl)] = s["avg"] - float(np.mean(ra)) if ra else np.nan
+                SLP[(tp, sl)] = s["sl_pct"]
                 best.append((s["avg"], tp, sl, s["win"], ALPHA[(tp, sl)], s["oos"], s["n"],
-                             s["tp_pct"], s["sl_pct"], s["ho_pct"]))
+                             s["tp_pct"], s["tp_avg"], s["sl_pct"], s["sl_avg"], s["ho_pct"]))
 
         heat(f" [승률 %] 행=익절, 열=손절 (1.0% 간격 표시)", W)
         heat(f" [평균 net %] 행=익절, 열=손절", A, fmt="{:5.2f}")
 
         best.sort(reverse=True)
-        print(f"\n [평균 net 상위 10 조합]")
-        print(f"   {'익절':>6s}{'손절':>7s}{'매매수':>9s}{'승률':>8s}{'평균net':>9s}{'OOS':>8s}{'무작위대비':>10s}"
-              f"{'익절%':>7s}{'손절%':>7s}{'만기%':>7s}")
-        for avg, tp, sl, w, al, oo, n, tpp, slp, hop in best[:10]:
-            print(f"   {tp:6.1f}{sl:7.1f}{n:9,}{w:7.1f}%{avg:+9.3f}{oo:+8.3f}{al:+10.3f}{tpp:7.1f}{slp:7.1f}{hop:7.1f}")
+        print(f"\n [평균 net 상위 10 조합]  (손절평균 = 실제 체결 손실 — 갭 때문에 손절선보다 나쁠 수 있다)")
+        print(f"   {'익절':>6s}{'손절':>7s}{'승률':>8s}{'평균net':>9s}{'OOS':>8s}{'무작위대비':>10s}"
+              f"{'익절%':>7s}{'익절평균':>9s}{'손절%':>7s}{'손절평균':>9s}{'만기%':>7s}")
+        for avg, tp, sl, w, al, oo, n, tpp, tpa, slp, sla, hop in best[:10]:
+            print(f"   {tp:6.1f}{sl:7.1f}{w:7.1f}%{avg:+9.3f}{oo:+8.3f}{al:+10.3f}"
+                  f"{tpp:7.1f}{tpa:+9.2f}{slp:7.1f}{sla:+9.2f}{hop:7.1f}")
 
         pos = sum(1 for v in A.values() if v > 0)
         pos_a = sum(1 for v in ALPHA.values() if v > 0.3)
-        print(f"\n [요약] 775조합 중 평균 net > 0: **{pos}개** | 무작위 대비 알파 ≥ +0.3%p: **{pos_a}개**")
+        ncomb = len(TPS) * len(SLS)
+        print(f"\n [요약] {ncomb:,}조합 중 평균 net > 0: **{pos}개** | 무작위 대비 알파 ≥ +0.3%p: **{pos_a}개**")
         print(f"   최고 평균 net {best[0][0]:+.3f}% (익절 {best[0][1]}/손절 {best[0][2]}) | "
               f"최저 {best[-1][0]:+.3f}% (익절 {best[-1][1]}/손절 {best[-1][2]})")
-        u = (5.0, -8.0)
-        print(f"   사용자 조합 익절+5%/손절−8%: 승률 {W[u]:.1f}% | 평균 {A[u]:+.3f}% | 무작위 대비 {ALPHA[u]:+.3f}%p")
+        print(f"   무작위 대비 알파: 최대 {max(ALPHA.values()):+.3f}%p / 최소 {min(ALPHA.values()):+.3f}%p "
+              f"/ 평균 {np.mean(list(ALPHA.values())):+.3f}%p")
+        for u in [(5.0, -8.0), (5.0, -3.0), (5.0, -2.0)]:
+            if u in W:
+                print(f"   익절+{u[0]:g}%/손절{u[1]:g}%: 승률 {W[u]:.1f}% | 평균 {A[u]:+.3f}% | 무작위 대비 {ALPHA[u]:+.3f}%p")
+        # 손절을 조일수록 '신호 영향'이 사라지는지 — 손절선별 알파 절댓값 평균
+        print(f"\n [손절선별] 손절이 타이트할수록 무작위와 구별이 사라지는가")
+        print(f"   {'손절':>7s}{'평균net(익절 전구간)':>22s}{'|알파| 평균':>14s}{'손절체결 비중':>14s}")
+        for sl in SLS:
+            vals = [A[(tp, sl)] for tp in TPS]
+            als = [abs(ALPHA[(tp, sl)]) for tp in TPS]
+            slps = [SLP[(tp, sl)] for tp in TPS]
+            print(f"   {sl:7.1f}{np.mean(vals):22.3f}{np.mean(als):14.3f}{np.mean(slps):13.1f}%")
 
 
 if __name__ == "__main__":
