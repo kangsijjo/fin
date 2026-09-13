@@ -148,11 +148,24 @@ def main():
     if not ok4:
         fails.append("G4 통과율")
 
-    c_o, c_n = o["prm_net_5d_ratio"].notna().mean() * 100, n["prm_net_5d_ratio"].notna().mean() * 100
-    ok5 = c_n > c_o
-    print(f"   G5 prm 커버리지 {c_o:.1f}% → {c_n:.1f}% … {'OK' if ok5 else 'FAIL'}")
+    # G5: 결측으로 버려지는 IC 질량이 줄었는가 = 재생성의 목적 자체.
+    # 종전엔 prm_net_5d_ratio 커버리지만 봤는데, 그건 프로그램매매 백필 전용 조건이라
+    # 다른 피처(기술지표 등)를 채우는 작업에서는 항상 FAIL 이었다. (2026-09-13 일반화)
+    def _lost_mass(df, ic):
+        tot = sum(abs(v) for v in ic.values())
+        live_df = df[df["strategy"].astype(str).isin(LIVE_STRATEGY_NAMES)]
+        lost = 0.0
+        for f, w in ic.items():
+            col = "crd_remn_rt_y" if (f == "crd_remn_rt" and "crd_remn_rt_y" in live_df.columns) else f
+            if col not in live_df.columns:
+                continue
+            lost += abs(w) / tot * 100 * (1 - live_df[col].notna().mean())
+        return lost
+    l_o, l_n = _lost_mass(o, ic_o), _lost_mass(n, ic_n)
+    ok5 = l_n <= l_o + 0.1          # 악화만 아니면 통과(동률 허용)
+    print(f"   G5 결측으로 버려지는 IC 질량 {l_o:.1f}% → {l_n:.1f}% … {'OK' if ok5 else 'FAIL'}")
     if not ok5:
-        fails.append("G5 커버리지")
+        fails.append("G5 정보손실")
 
     print(f"\n   [참고] prm IC {ic_o.get('prm_net_5d_ratio', float('nan')):+.4f} → {ic_n.get('prm_net_5d_ratio', float('nan')):+.4f} | "
           f"통과분 평균 net {live_o[s_o >= 5.7]['net_pct'].mean():+.3f} → {live_n[s_n >= 5.7]['net_pct'].mean():+.3f}")

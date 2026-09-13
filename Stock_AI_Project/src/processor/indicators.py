@@ -424,8 +424,22 @@ if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else None
 
     if cmd == 'all':
-        logger.info("🚀 전 섹터 일괄 지표 생성")
-        for s in list(KOREA_SECTORS) + usa_sectors:
+        # config 의 korea_sectors 는 테마 22개뿐인데 DB(korea_stocks.sector)에는 31개가 있다.
+        # 네이버가 테마를 못 준 종목은 '소속부'(중견기업부·우량기업부·벤처기업부·기술성장기업부)로
+        # 분류되는데, 그 1,144종목이 지표 생성에서 통째로 빠져 있었다 — IC 질량 상위 3개
+        # (BB위치·RSI·MACD)의 커버리지가 45~61% 에 머문 원인(2026-09-13 규명).
+        # config 목록 대신 **DB 의 실제 섹터**를 읽어 신규 섹터가 생겨도 자동 포함되게 한다.
+        from src.config_db import get_connection
+        SKIP = ('SPAC', '관리종목', '투자주의환기종목', '외국기업')   # 매매 부적합 — 지표 생성 제외
+        with get_connection() as _c:
+            db_sectors = [r[0] for r in _c.execute(
+                "SELECT DISTINCT sector FROM korea_stocks WHERE sector IS NOT NULL AND sector <> ''")]
+        kr = [s for s in db_sectors if not any(s.startswith(p) for p in SKIP)]
+        skipped = [s for s in db_sectors if s not in kr]
+        missing_cfg = [s for s in kr if s not in list(KOREA_SECTORS)]
+        logger.info(f"🚀 전 섹터 일괄 지표 생성 — DB 섹터 {len(db_sectors)}개 중 {len(kr)}개 처리 "
+                    f"(제외 {skipped}, config 미등록이나 포함 {len(missing_cfg)}개)")
+        for s in kr + usa_sectors:
             process_sector(s, _market_of(s))
     elif cmd:
         # 특정 섹터 지정
