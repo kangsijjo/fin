@@ -240,8 +240,13 @@ def check_data():
     # [2026-08-29] foreign_ratio 추가. 매일 수집(daily_data_job)하는데 감시 목록에
     # 없어, 정체돼도 아무도 몰랐다 — korea_indicators 가 빠져 있던 것(08-20)과 같은 구멍.
     # 수집 작업 8개 중 감시되지 않던 유일한 테이블이었다.
+    # [2026-09-13] korea_indicators 임계 5 → 7영업일. 이 테이블만 **주 1회**(일요일 weekly_job)
+    # 갱신이라, 일요일에 채우면 최신값이 '전주 금요일'이고 다음 금~토면 이미 5~6영업일이 된다.
+    # 그래서 매주 금요일 저녁~토요일에 오경보가 반복됐다(08-22·08-23·08-29·09-12 실측, 전부
+    # 다음 일요일 갱신으로 자동 해소). 같은 테이블을 보는 아래 indicator_cov 체크는 임계가 6이라
+    # 같은 시각에 '정상'을 냈다 — 두 체크의 기준이 어긋나 있었다. 갱신 하루 지연까지 견디도록 7.
     specs = [("korea_stocks", "date", 5, True), ("supply_demand", "date", 5, True),
-             ("korea_indicators", "date", 5, True), ("foreign_ratio", "date", 5, True),
+             ("korea_indicators", "date", 7, True), ("foreign_ratio", "date", 5, True),
              ("usa_stocks", "date", 6, False), ("macro_indicators", "date", 6, False),
              ("credit_balance", "date", 10, False), ("news", "pubDate", 6, False)]
     for tbl, col, thr, use_bday in specs:
