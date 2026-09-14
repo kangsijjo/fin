@@ -204,6 +204,9 @@ def main():
     ap.add_argument("--sl-from", type=float, default=5.0, help="손절 하한(절댓값). 2.0 이면 -2.0%%")
     ap.add_argument("--sl-to", type=float, default=20.0, help="손절 상한(절댓값)")
     ap.add_argument("--step", type=float, default=0.5)
+    ap.add_argument("--from-date", default=None, help="진입일 하한 YYYYMMDD (기간 한정 분석)")
+    ap.add_argument("--to-date", default=None, help="진입일 상한(미만) YYYYMMDD")
+    ap.add_argument("--no-verify", action="store_true", help="원 엔진 대조 생략(이미 검증된 경우)")
     a = ap.parse_args()
     global TPS, SLS
     TPS = _seq(a.tp_from, a.tp_to, a.step)
@@ -218,29 +221,45 @@ def main():
         em = ExitMatrix(sig, sig["signal"])
         em.set_ca_filter(ca)
         keep0 = ca_mask(em)
-        print(f" 크로스 신호 {int(sig['signal'].sum()):,} → 유효 매매 {int(keep0.sum()):,} (기업행위 제외 {int((~keep0).sum()):,})")
+        if a.from_date:
+            keep0 &= em.entry_date >= a.from_date
+        if a.to_date:
+            keep0 &= em.entry_date < a.to_date
+        period = f"{a.from_date or '전체'}~{a.to_date or '전체'}"
+        print(f" 크로스 신호 {int(sig['signal'].sum()):,} → 기간 {period} 유효 매매 {int(keep0.sum()):,}")
+        if keep0.sum() < 500:
+            print(f" ⚠ 표본 {int(keep0.sum()):,}건 — 소표본. 조합별 수치를 신뢰하기 어렵다.")
 
-        verify(df, sig, em, keep0, [(5.0, -8.0), (2.0, None), (3.0, -5.0)])
+        if not a.no_verify:
+            verify(df, sig, em, keep0, [(5.0, -8.0), (2.0, None), (3.0, -5.0)])
 
         rnd_em = []
         for k in range(max(1, a.seeds)):
             rs = random_like(sig, 7000 + k)
             e = ExitMatrix(rs, rs["signal"])
             e.set_ca_filter(ca)
-            rnd_em.append((e, ca_mask(e)))
+            kk = ca_mask(e)
+            if a.from_date:
+                kk &= e.entry_date >= a.from_date
+            if a.to_date:
+                kk &= e.entry_date < a.to_date
+            rnd_em.append((e, kk))
 
         W, A, ALPHA, SLP = {}, {}, {}, {}
         best = []
+        rnd_pos = [0] * len(rnd_em)          # 무작위 신호에서 '평균 양수'가 나온 조합 수 = 우연 기준선
         for tp in TPS:
             for sl in SLS:
                 net, reason, _, good = em.evaluate(tp, sl)
                 s = stats(net, reason, keep0 & good, em.entry_date)
                 rw, ra = [], []
-                for e, kk in rnd_em:
+                for j, (e, kk) in enumerate(rnd_em):
                     n2, r2, _, g2 = e.evaluate(tp, sl)
                     s2 = stats(n2, r2, kk & g2, e.entry_date)
                     if s2:
                         rw.append(s2["win"]); ra.append(s2["avg"])
+                        if s2["avg"] > 0:
+                            rnd_pos[j] += 1
                 W[(tp, sl)] = s["win"]
                 A[(tp, sl)] = s["avg"]
                 ALPHA[(tp, sl)] = s["avg"] - float(np.mean(ra)) if ra else np.nan
@@ -263,6 +282,8 @@ def main():
         pos_a = sum(1 for v in ALPHA.values() if v > 0.3)
         ncomb = len(TPS) * len(SLS)
         print(f"\n [요약] {ncomb:,}조합 중 평균 net > 0: **{pos}개** | 무작위 대비 알파 ≥ +0.3%p: **{pos_a}개**")
+        print(f"   ** 우연 기준선: 같은 그리드를 **무작위 진입**에 돌렸을 때 평균 양수 조합 수 = "
+              f"{rnd_pos} / {ncomb:,}  → 크로스({pos}개)가 이보다 많지 않으면 신호가 아니라 장세다.")
         print(f"   최고 평균 net {best[0][0]:+.3f}% (익절 {best[0][1]}/손절 {best[0][2]}) | "
               f"최저 {best[-1][0]:+.3f}% (익절 {best[-1][1]}/손절 {best[-1][2]})")
         print(f"   무작위 대비 알파: 최대 {max(ALPHA.values()):+.3f}%p / 최소 {min(ALPHA.values()):+.3f}%p "
