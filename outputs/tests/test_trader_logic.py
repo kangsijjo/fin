@@ -1673,3 +1673,120 @@ def test_indicator_coverage_does_not_trip_kill_switch(monkeypatch):
     out = w.check_kill_switch(rows)
     on2, _st2, _err2 = ks.status()
     assert on == on2, "지표 커버리지 경고가 kill_switch 를 건드렸다"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# [2026-09-16] 계좌 주문불가 판정을 '문구'가 아니라 '주문 결과'로 — 실사고 회귀
+#   09-16 키움 모의계좌가 09-08 초기화되며 '개인공매도이수전용'으로 바뀌어 매수가
+#   RC5006 으로 거부됐다. 종전 판정은 문구 화이트리스트 5개였고 이 문구는 없어서
+#   워치독이 "정상 16/16"을 찍었다 — 강도 5.76 통과 종목을 못 산 날인데도.
+#   화이트리스트는 증권사가 문구를 바꾸면 반드시 뚫린다. 결과로 봐야 한다.
+# ──────────────────────────────────────────────────────────────────────────
+_LEDGER_HEAD = "time,side,code,name,strategy,qty,price,order_type,ok,order_no,msg\n"
+
+
+def _wd_env(tmp_path, monkeypatch, dates, ledgers):
+    """워치독을 임시 디렉토리로 격리. ledgers: {(broker,date): [csv 행 문자열]}"""
+    import watchdog as w
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "db" / "kiwoom").mkdir(parents=True)
+    for d in dates:                                   # 거래일 달력 = 트레이더 로그
+        (tmp_path / "logs" / f"kiwoom_{d}.log").write_text("run", encoding="utf-8")
+    for (broker, d), rows in ledgers.items():
+        name = "orders" if broker == "kiwoom" else "kis_orders"
+        (tmp_path / "db" / "kiwoom" / f"{name}_{d}.csv").write_text(
+            _LEDGER_HEAD + "".join(rows), encoding="utf-8-sig")
+    monkeypatch.setattr(w, "_HERE", str(tmp_path))
+    monkeypatch.setattr(w, "_LOGS", str(tmp_path / "logs"))
+    monkeypatch.setattr(w, "_KIWOOM_DIR", str(tmp_path / "db" / "kiwoom"))
+    return w
+
+
+def test_account_blocked_catches_unknown_rejection_phrase(tmp_path, monkeypatch):
+    """실사고 재현: 처음 보는 거부 문구여도 '시도 전부 실패'면 잡아야 한다."""
+    rej = ("09:00:05,buy,214370,케어젠,rsi_reversal,23,41250,3,False,,"
+           "매수 거부: return_code=20 [2000](RC5006:모의투자 개인공매도이수전용 계좌입니다.)\n")
+    w = _wd_env(tmp_path, monkeypatch, ["20260914", "20260915", "20260916"],
+                {("kiwoom", "20260916"): [rej]})
+    out = w.check_account_blocked(3)
+    assert out[0][2] is False, "새 거부 문구를 놓쳤다(종전 화이트리스트 버그 재발)"
+    assert "전부 실패" in out[0][3]
+
+
+def test_account_blocked_ignores_rate_limit_429(tmp_path, monkeypatch):
+    """HTTP 429(초당 주문한도)는 계좌 사고가 아니다 — 오경보 금지."""
+    rows = ["09:01:05,buy,320000,한울반도체,high_52w_filt,41,23200,3,True,0006143,\n",
+            "09:01:05,buy,067290,JW신약,high_52w_filt,314,3105,3,False,,"
+            "API Error (HTTP 429): Unknown error\n"]
+    w = _wd_env(tmp_path, monkeypatch, ["20260914", "20260915", "20260916"],
+                {("kiwoom", "20260916"): rows})
+    out = w.check_account_blocked(3)
+    assert out[0][2] is True, f"429 를 계좌 사고로 오판했다: {out[0][3]}"
+
+
+def test_account_blocked_429_only_no_success_is_not_alarm(tmp_path, monkeypatch):
+    """성공 0건이라도 실패가 전부 429 면 계좌 사고가 아니다(06-30 실사례)."""
+    rows = ["15:21:06,sell,058610,에스피지,rsi_reversal,12,0,3,False,,"
+            "API Error (HTTP 429): Unknown error\n"]
+    w = _wd_env(tmp_path, monkeypatch, ["20260914", "20260915", "20260916"],
+                {("kiwoom", "20260916"): rows})
+    out = w.check_account_blocked(3)
+    assert out[0][2] is True, f"429 전용 실패로 오경보: {out[0][3]}"
+
+
+def test_account_blocked_quiet_days_are_ok(tmp_path, monkeypatch):
+    """주문 자체가 0건인 날(강도 미달로 안 산 날)은 정상이어야 한다."""
+    w = _wd_env(tmp_path, monkeypatch, ["20260914", "20260915", "20260916"], {})
+    out = w.check_account_blocked(3)
+    assert out[0][2] is True, f"주문 0건을 사고로 오판: {out[0][3]}"
+
+
+def test_account_blocked_detects_kis_ledger_too(tmp_path, monkeypatch):
+    """KIS 원장(kis_orders_*.csv)도 같은 규칙으로 본다."""
+    rej = ("09:01:02,buy,030530,원익홀딩스,for_high20_mkt,10,24950,시장가,False,,"
+           "매수 불가 — 계좌 상태 이상 [40910000] 모의투자 주문이 불가한 계좌입니다\n")
+    w = _wd_env(tmp_path, monkeypatch, ["20260914", "20260915", "20260916"],
+                {("kis", "20260916"): [rej]})
+    out = w.check_account_blocked(3)
+    assert out[0][2] is False and "KIS" in out[0][3], out
+
+
+def test_buy_failure_alert_exists_in_both_traders():
+    """매수 실패도 매도 실패와 같이 통보해야 한다(비대칭 재발 방지)."""
+    for f in ("kiwoom_trader.py", "kis_trader.py"):
+        src = open(os.path.join(OUTPUTS, f), encoding="utf-8").read()
+        assert "_alert_buy_failures" in src, f"{f} 에 매수 실패 통보가 없다"
+        assert "buy_failures.append" in src, f"{f} 가 매수 실패를 수집하지 않는다"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# [2026-09-16] 장전 탐침 결과에 유효기간 — 08-25 기록을 09-16 까지 22일 재사용했다
+# ──────────────────────────────────────────────────────────────────────────
+def test_probe_result_has_expiry():
+    """탐침 캐시에 만료가 없으면 계좌가 바뀌어도 영원히 '정상'으로 읽힌다."""
+    import preopen_probe as pp
+    assert hasattr(pp, "PROBE_MAX_AGE_DAYS"), "탐침 결과 유효기간 상수가 없다"
+    assert 1 <= pp.PROBE_MAX_AGE_DAYS <= 14, "유효기간이 비현실적"
+
+
+def test_probe_age_days_measures_from_probed_at():
+    """나이는 실제 주문 시각(probed_at)으로 잰다 — 이월(carried_from)로 재면 안 된다."""
+    from datetime import datetime, timedelta
+    import preopen_probe as pp
+    old = (datetime.now() - timedelta(days=22)).strftime("%Y-%m-%d %H:%M:%S")
+    new = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+    assert pp._probe_age_days({"probed_at": old, "carried_from": new}) == 22
+    assert pp._probe_age_days({"probed_at": new}) == 1
+    assert pp._probe_age_days({}) is None            # 못 읽으면 판정 보류
+    assert pp._probe_age_days({"probed_at": "쓰레기"}) is None
+
+
+def test_stale_probe_does_not_narrow_targets_to_empty():
+    """유효기간 초과로 재탐침할 때 대상이 빈 목록이 되면 탐침이 통째로 사라진다."""
+    import inspect
+    import preopen_probe as pp
+    src = inspect.getsource(pp.main)
+    i_stale = src.find("if stale_fatal:")
+    i_assign = src.find("targets = list(stale_fatal)")
+    assert i_stale != -1, "targets 축소가 stale_fatal 유무로 가드되지 않는다"
+    assert i_stale < i_assign, "가드가 축소보다 뒤에 있다"

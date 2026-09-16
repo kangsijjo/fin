@@ -572,6 +572,31 @@ def _alert_account_blocked(where: str, detail: str):
         pass
 
 
+def _alert_buy_failures(failures, n_placed):
+    """매수 주문 실패 통보 (2026-09-16 신설) — 문구 인식과 무관한 백스톱.
+
+    AccountBlocked 로 이미 긴급 통보했으면 중복 발송하지 않는다.
+    시도한 주문이 **전부** 실패했으면 종목 사유가 아니라 계좌 사고로 의심한다.
+    """
+    if getattr(_alert_account_blocked, "_sent", False):
+        return                      # 이미 계좌 경보가 나갔다 — 중복 억제
+    lines = [f"  {c} {n} — {m}" for c, n, m in failures[:5]]
+    if len(failures) > 5:
+        lines.append(f"  … 외 {len(failures) - 5}건")
+    all_failed = (n_placed == 0)
+    head = (f"🚨 [KIS 안D] 매수 주문 {len(failures)}건 **전부 실패** — 계좌 단위 사고 의심"
+            if all_failed else
+            f"⚠ [KIS 안D] 매수 주문 {len(failures)}건 실패 (성공 {n_placed}건)")
+    tail = ("\n  강도 임계를 통과한 종목을 **살 수 없는 상태**입니다. 모의계좌 기간만료·"
+            "재발급·계좌성격 변경을 확인하세요." if all_failed else "")
+    print(f"⚠ [KIS] 매수 실패 {len(failures)}건")
+    try:
+        import notifier
+        notifier.safe_send(head + "\n" + "\n".join(lines) + tail)
+    except Exception:
+        pass
+
+
 def _to_int(v, default=0):
     try:
         return int(str(v).replace(",", "").replace("+", "").strip())
@@ -1310,6 +1335,10 @@ def cmd_buy():
     n_placed = 0
     remaining_dep = buy_budget
     placed_per_strat = {k: 0 for k in STRATEGY_PRIORITY}
+    # [2026-09-16] 문구를 못 알아본 계좌 사고의 백스톱 — _BLOCKED_MSG_WORDS 는
+    # 화이트리스트라 새 거부 문구가 나오면 그대로 뚫린다(같은 날 키움이 RC5006
+    # '개인공매도이수전용 계좌'로 뚫렸다). 문구와 무관하게 '시도 전부 실패'를 잡는다.
+    buy_failures = []      # [(code, name, msg)]
 
     for strat in STRATEGY_PRIORITY:
         if n_placed >= total_avail:   # 전역 동시보유 상한(레거시 반영) 도달 — 과다매수 방지(2026-06-29)
@@ -1399,6 +1428,7 @@ def cmd_buy():
                 already.add(code)
             except Exception as e:
                 print(f"    [실패] {code} {name}: {e}")
+                buy_failures.append((code, name, str(e)[:160]))
                 if isinstance(e, AccountBlocked):
                     _alert_account_blocked("신규 매수", str(e)[:160])
                 log_order({
@@ -1411,6 +1441,8 @@ def cmd_buy():
             time.sleep(0.6)   # 주문 간 간격 — 초당한도 예방(2026-07-14)
 
     print(f"\n[buy] 주문 {n_placed}건 완료")
+    if buy_failures:
+        _alert_buy_failures(buy_failures, n_placed)
 
 
 def cmd_sell(reasons=("expire", "stop")):

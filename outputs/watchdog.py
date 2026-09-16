@@ -328,6 +328,17 @@ def check_signals():
     return out
 
 
+def _recent_trading_dates(days):
+    """최근 N 거래일(YYYYMMDD) — 트레이더 실행 로그 kiwoom_YYYYMMDD.log 로 판정.
+
+    주문 CSV 는 '주문이 있는 날'에만 생기므로 그것으로 달력을 잡으면 창이 실제보다
+    길어져 둔감해진다. 트레이더 로그는 매 거래일 생성되므로 이쪽이 정확하다.
+    """
+    logs = sorted(glob.glob(os.path.join(_HERE, "logs", "kiwoom_*.log")))[-days:]
+    return [os.path.basename(f)[7:15] for f in logs
+            if os.path.basename(f)[7:15].isdigit()]
+
+
 def check_idle_buying(days=5):
     """[2026-08-09 신설] '연속 N거래일 매수 0건'을 잡는다.
 
@@ -344,9 +355,7 @@ def check_idle_buying(days=5):
         return out
     try:
         # 최근 N 거래일(트레이더가 실제로 돈 날)
-        logs = sorted(glob.glob(os.path.join(_HERE, "logs", "kiwoom_*.log")))[-days:]
-        dates = [os.path.basename(f)[7:15] for f in logs
-                 if os.path.basename(f)[7:15].isdigit()]
+        dates = _recent_trading_dates(days)
         if len(dates) < days:
             return out                       # 이력이 짧으면 판정 보류
         bought = 0
@@ -376,7 +385,19 @@ def check_account_blocked(days=3):
     지난 보유 1종목이 청산되지 못한 채 남았다. 매수 0건(idle_buying)만으로는
     '살 게 없어서'와 '살 수가 없어서'를 구분하지 못하므로 별도 감시가 필요하다.
 
-    판정: 최근 days 일치 트레이더 로그에 계좌 단위 거부 문구가 있으면 이상.
+    판정 (2026-09-16 전면 교체 — 문구 목록 → **주문 결과**):
+      ① 당일 장전 탐침이 fatal 이면 즉시 이상(가장 신선한 증거)
+      ② **주문 원장에서 '시도했는데 전부 실패'를 잡는다** — 문구와 무관
+      ③ 보조로 기존 거부 문구 스캔(문구를 알면 더 빨리 잡히므로 남겨둔다)
+
+    ②를 넣은 이유: 종전 판정이 문구 화이트리스트 5개였는데, 09-16 키움이
+    'RC5006:모의투자 개인공매도이수전용 계좌입니다' 로 거부하자 **한 개도 걸리지
+    않아 워치독이 "정상 16/16"을 찍었다.** 강도 5.76 통과 종목을 못 산 날인데도.
+    화이트리스트는 증권사가 새 문구를 쓰는 순간 반드시 뚫린다. 반면 '주문을
+    시도했는데 하나도 안 나갔다'는 문구가 무엇이든 성립한다.
+
+    HTTP 429(초당 주문한도)는 실패에서 제외한다 — 계좌 사고가 아니라 일시적
+    한도초과이고 재시도 경로가 이미 있다(실측: 06-24 09:01 에 3건 429 → 09:48 재시도 성공).
     """
     out = []
     words = ("주문이 불가한 계좌", "사용할 수 없는 계좌", "해지된 계좌",
@@ -397,8 +418,35 @@ def check_account_blocked(days=3):
                         f"매수·매도·만기청산 전부 불가"))
             return out
     except Exception:
-        pass   # 탐침 기록이 없거나 깨졌으면 아래 로그 스캔으로 폴백
+        pass   # 탐침 기록이 없거나 깨졌으면 아래 스캔으로 폴백
 
+    # ── ② 결과 기반: 최근 days 거래일 주문 원장에서 '전부 실패' 판정 ──────────
+    for label, pat in (("키움", "orders_{d}.csv"), ("KIS", "kis_orders_{d}.csv")):
+        ok_n, bad = 0, []
+        for d in _recent_trading_dates(days):
+            p = os.path.join(_KIWOOM_DIR, pat.format(d=d))
+            if not os.path.exists(p):
+                continue                     # 그날 주문 0건 — 판정 재료 없음
+            try:
+                import csv as _csv
+                with open(p, encoding="utf-8-sig", newline="") as fh:
+                    for r in _csv.DictReader(fh):
+                        msg = (r.get("msg") or "")
+                        if str(r.get("ok", "")).strip().lower() == "true":
+                            ok_n += 1
+                        elif "429" not in msg:      # 429 = 초당한도(재시도 대상) — 제외
+                            bad.append(f"{d} {r.get('side','')} {r.get('name','')} — {msg[:90]}")
+            except Exception:
+                return out                   # 읽기 실패 시 오탐 방지(판정 보류)
+        if bad and ok_n == 0:
+            out.append(("account_blocked", "계좌 주문 가능 여부", False,
+                        f"{label} 최근 {days}거래일 주문 {len(bad)}건이 **전부 실패**"
+                        f"(성공 0건) — 계좌 단위 사고 의심. "
+                        + " / ".join(bad[:3]) +
+                        " → 모의투자 계좌 기간만료·재발급·계좌성격 변경 확인 필요"))
+            return out
+
+    # ── ③ 보조: 기존 거부 문구 스캔(알려진 문구면 원장보다 빨리 잡힌다) ───────
     recent = sorted(glob.glob(os.path.join(_LOGS, "kis_trader_*.log"))
                     + glob.glob(os.path.join(_LOGS, "kis_stop_*.log"))
                     + glob.glob(os.path.join(_HERE, "logs", "kiwoom_*.log")),

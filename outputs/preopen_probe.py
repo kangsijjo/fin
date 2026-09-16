@@ -44,6 +44,16 @@ RESULT_PATH = "./db/preopen_probe_result.json"
 # 하드코딩(005930)은 코스닥 전용 유니버스에서 항상 실패했음(2026-08-09 수정).
 PROBE_DISCOUNT = 0.71          # 전일종가 대비 −29% ≈ 하한가 근처(체결 불가)
 
+# [2026-09-16] 탐침 결과 유효기간. 종전엔 만료가 없어 **한 번 '수용'이 나오면 영원히
+# 재사용**했다. 실사고: 08-25 탐침 결과를 09-16 까지 22일간 재사용하는 동안 키움
+# 모의계좌가 09-08 에 초기화되며 '개인공매도이수전용'으로 바뀌었고, 워치독은 이
+# 낡은 기록을 '1순위 증거'로 삼아 "계좌 주문 가능 여부: 정상"을 계속 찍었다.
+# 7일로 잡은 이유: 탐침 주문은 취소 API 를 쓰지 않고 장 마감 실효에 맡기므로 접수된
+# 1주가 그날 예수금을 묶는다(실측 08-21: 9,158,011 → 8,916,171). 매일 찌르면 매수
+# 예산을 매일 깎고, 너무 길면 지금처럼 3주를 눈 감는다. 주 1회가 절충점이며,
+# 실패 자체는 watchdog 의 주문 원장 판정(check_account_blocked)이 당일 잡는다.
+PROBE_MAX_AGE_DAYS = 7
+
 
 def _tick(price):
     """호가단위 내림 정렬 — 잘못된 호가는 '가격 오류'로 거부돼 탐침 결과가 오염된다."""
@@ -269,6 +279,21 @@ def probe_targets(prev):
             or _is_fatal(k, (prev.get(k, {}) or {}).get("msg", ""))]
 
 
+def _probe_age_days(prev):
+    """직전 탐침이 며칠 전인가. 읽을 수 없으면 None(= 판정 보류, 기존 동작 유지).
+
+    [2026-09-16] 'carried_from'(이월 표기)이 아니라 **probed_at**(실제 주문을 낸 시각)을
+    기준으로 잰다. 이월된 기록은 다시 찔러 본 게 아니므로 나이를 새로 세면 안 된다.
+    """
+    raw = str(prev.get("probed_at") or "").strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return (datetime.now() - datetime.strptime(raw, fmt)).days
+        except ValueError:
+            continue
+    return None
+
+
 def main():
     if "--cleanup" in sys.argv:
         n = cleanup_leftover_probe_orders()
@@ -287,8 +312,14 @@ def main():
         with open(RESULT_PATH, encoding="utf-8") as f:
             prev = json.load(f)
         stale_fatal = probe_targets(prev)
-        if not stale_fatal:
-            print(f"[probe] 이미 실측됨({prev.get('probed_at')}) — 재탐침 생략. "
+        aged = _probe_age_days(prev)
+        if not stale_fatal and aged is not None and aged >= PROBE_MAX_AGE_DAYS:
+            print(f"[probe] 직전 기록이 {aged}일 전({prev.get('probed_at')}) — "
+                  f"유효기간 {PROBE_MAX_AGE_DAYS}일 초과로 양 계좌 재탐침. "
+                  f"(계좌는 예고 없이 만료·초기화될 수 있다)")
+        elif not stale_fatal:
+            print(f"[probe] 이미 실측됨({prev.get('probed_at')}, {aged if aged is not None else '?'}일 전) "
+                  f"— 유효기간 {PROBE_MAX_AGE_DAYS}일 이내라 재탐침 생략. "
                   f"결과: {prev.get('verdict')}")
             return
         # [2026-08-21] 재탐침 대상을 '이상이 있는 계좌'로 한정한다.
@@ -298,9 +329,12 @@ def main():
         #   접수된 1주(지정가 24.1만원)가 **장중 내내 예수금을 묶었다**
         #   (실측 08-21: 키움 예수금 9,158,011 -> 8,916,171, 미체결 1건).
         #   슬롯당 예산이 89만원 수준이라 매수가 나가는 날엔 그대로 손실이다.
-        targets = list(stale_fatal)
-        print(f"[probe] 직전 기록에 계좌 이상({', '.join(targets)}) — 해당 계좌만 재탐침"
-              f"(정상 계좌는 재주문하지 않는다 — 예수금 묶임 방지)")
+        #   [2026-09-16] 단 '유효기간 초과'로 내려온 경우(stale_fatal 이 비었음)는
+        #   대상을 좁히면 안 된다 — 빈 목록이 되어 탐침이 통째로 사라진다.
+        if stale_fatal:
+            targets = list(stale_fatal)
+            print(f"[probe] 직전 기록에 계좌 이상({', '.join(targets)}) — 해당 계좌만 재탐침"
+                  f"(정상 계좌는 재주문하지 않는다 — 예수금 묶임 방지)")
 
     now = datetime.now()
     hm = now.strftime("%H:%M")

@@ -755,6 +755,30 @@ def _gate_check(n_pass: int, n_signals: int) -> bool:
     return (not blocked) if GATE_ENFORCE else True
 
 
+def _alert_buy_failures(failures, n_placed):
+    """매수 주문 실패 텔레그램 통보 (2026-09-16 신설).
+
+    매도 실패(_기존 1591행_)만 알리고 매수 실패는 [실패] 한 줄이던 비대칭을 없앤다.
+    **시도한 주문이 전부 실패했으면 계좌 단위 사고로 의심**한다 — 종목 사유(증거금
+    부족 등)는 보통 일부만 실패하지만, 계좌가 막히면 예외 없이 전부 막힌다.
+    """
+    lines = [f"  {c} {n} — {m}" for c, n, m in failures[:5]]
+    if len(failures) > 5:
+        lines.append(f"  … 외 {len(failures) - 5}건")
+    all_failed = (n_placed == 0)
+    head = (f"🚨 [키움 안C] 매수 주문 {len(failures)}건 **전부 실패** — 계좌 단위 사고 의심"
+            if all_failed else
+            f"⚠ [키움 안C] 매수 주문 {len(failures)}건 실패 (성공 {n_placed}건)")
+    tail = ("\n  강도 임계를 통과한 종목을 **살 수 없는 상태**입니다. 모의계좌 기간만료·"
+            "재발급·계좌성격 변경을 확인하세요." if all_failed else "")
+    print(f"⚠ [키움] 매수 실패 {len(failures)}건")
+    try:
+        import notifier
+        notifier.safe_send(head + "\n" + "\n".join(lines) + tail)
+    except Exception:
+        pass
+
+
 def cmd_buy():
     guard_mock_only()
     # [2026-08-27] 3층 안전장치 — 계좌 단위 정지 상태면 신규매수만 건너뛴다.
@@ -864,6 +888,11 @@ def cmd_buy():
     n_placed = 0
     remaining_dep = dep
     placed_per_strat = {k: 0 for k in STRATEGY_PRIORITY}  # 전략별 실제 배정 수 추적
+    # [2026-09-16] 매수 실패도 리스크 사건이다 — 청산 실패(1591행)와 동일하게 알린다.
+    # 실사고: 09-08 키움 모의계좌가 초기화되며 '개인공매도이수전용'으로 바뀌어 매수가
+    # RC5006 으로 거부됐는데, [실패] 한 줄 + exit 0 이라 아무도 몰랐다. 강도 통과가
+    # 드문 국면이라 '안 사는 것'과 '못 사는 것'이 겉으로 구분되지 않아 더 위험하다.
+    buy_failures = []      # [(code, name, msg)]
 
     for strat in STRATEGY_PRIORITY:
         if n_placed >= total_avail:   # 전역 동시보유 상한(레거시 반영) 도달 — 과다매수 방지(2026-06-29)
@@ -958,6 +987,7 @@ def cmd_buy():
                     print(f"    [warn] 원장 기록 실패(무시): {e}")
             except Exception as e:
                 print(f"    [실패] {code} {name}: {e}")
+                buy_failures.append((code, name, str(e)[:160]))
                 log_order({
                     "time": datetime.now().strftime("%H:%M:%S"), "side": "buy",
                     "code": code, "name": name, "strategy": strat,
@@ -968,6 +998,8 @@ def cmd_buy():
             time.sleep(0.5)   # 주문 간 간격 — 연속 발사 429 예방(2026-07-14)
 
     print(f"\n[buy] 주문 {n_placed}건 완료")
+    if buy_failures:
+        _alert_buy_failures(buy_failures, n_placed)
 
 
 # ------------------------------------------------------------
