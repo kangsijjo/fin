@@ -1704,6 +1704,9 @@ def _wd_env(tmp_path, monkeypatch, dates, ledgers):
 
 def test_account_blocked_catches_unknown_rejection_phrase(tmp_path, monkeypatch):
     """실사고 재현: 처음 보는 거부 문구여도 '시도 전부 실패'면 잡아야 한다."""
+    # 해결 선언(kill_switch 해제) 필터가 실제 런타임 상태를 타지 않도록 고정한다
+    import kill_switch as _ks
+    monkeypatch.setattr(_ks, "status", lambda: (False, {}, None))
     rej = ("09:00:05,buy,214370,케어젠,rsi_reversal,23,41250,3,False,,"
            "매수 거부: return_code=20 [2000](RC5006:모의투자 개인공매도이수전용 계좌입니다.)\n")
     w = _wd_env(tmp_path, monkeypatch, ["20260914", "20260915", "20260916"],
@@ -1743,6 +1746,8 @@ def test_account_blocked_quiet_days_are_ok(tmp_path, monkeypatch):
 
 def test_account_blocked_detects_kis_ledger_too(tmp_path, monkeypatch):
     """KIS 원장(kis_orders_*.csv)도 같은 규칙으로 본다."""
+    import kill_switch as _ks
+    monkeypatch.setattr(_ks, "status", lambda: (False, {}, None))
     rej = ("09:01:02,buy,030530,원익홀딩스,for_high20_mkt,10,24950,시장가,False,,"
            "매수 불가 — 계좌 상태 이상 [40910000] 모의투자 주문이 불가한 계좌입니다\n")
     w = _wd_env(tmp_path, monkeypatch, ["20260914", "20260915", "20260916"],
@@ -1790,3 +1795,208 @@ def test_stale_probe_does_not_narrow_targets_to_empty():
     i_assign = src.find("targets = list(stale_fatal)")
     assert i_stale != -1, "targets 축소가 stale_fatal 유무로 가드되지 않는다"
     assert i_stale < i_assign, "가드가 축소보다 뒤에 있다"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# [2026-09-19] 전략별 임계 모니터(Phase 1) — 모니터 전용이라는 계약을 테스트로 못박는다
+#   후보수 게이트(GATE_ENFORCE=False)와 같은 패턴. 이 단계에서 매매가 바뀌면 안 된다.
+# ──────────────────────────────────────────────────────────────────────────
+def test_cut_monitor_does_not_touch_trading_code():
+    """모니터는 순수 집계다 — 매매 스크립트가 이 모듈을 import 하면 안 된다."""
+    for f in ("kiwoom_trader.py", "kis_trader.py", "kis_live_signal.py", "live_signal.py"):
+        p = os.path.join(OUTPUTS, f)
+        if not os.path.exists(p):
+            continue
+        src = open(p, encoding="utf-8").read()
+        assert "strength_cut_monitor" not in src, (
+            f"{f} 가 모니터를 import 한다 — Phase 1 은 매매에 개입하면 안 된다")
+
+
+def test_cut_monitor_thresholds_are_walkforward_constants():
+    """임계는 상수로 고정돼 있어야 한다(실행 시점에 재계산하면 결과가 표류)."""
+    import strength_cut_monitor as M
+    assert M.CUR_TH == 5.7, "현행 비교 기준이 라이브 임계(5.7)와 다르다"
+    for cuts in (M.CUTS_40, M.CUTS_50):
+        assert set(cuts) == set(M.HOLD), "전략 목록이 라이브 6전략과 불일치"
+        for k, v in cuts.items():
+            assert 0 < v < 10, f"{k} 임계 {v} 가 점수 범위(0~10) 밖"
+    # 상위50% 컷은 상위40% 보다 낮아야 한다(더 많이 통과)
+    for k in M.CUTS_40:
+        assert M.CUTS_50[k] <= M.CUTS_40[k], f"{k}: 상위50% 컷이 상위40% 보다 높다"
+
+
+def test_cut_monitor_live_constants_match_traders():
+    """슬롯 상한·보유일·손절·익절이 라이브 상수와 어긋나면 비교가 무의미해진다."""
+    import strength_cut_monitor as M
+    import kiwoom_trader as KW
+    import kis_trader as KI
+    assert M.CAPS["kiwoom"] == KW.STRATEGY_MAX_SLOTS, "키움 슬롯 상한 불일치"
+    assert M.PRIORITY["kiwoom"] == KW.STRATEGY_PRIORITY, "키움 우선순위 불일치"
+    assert M.PRIORITY["kis"] == KI.STRATEGY_PRIORITY, "KIS 우선순위 불일치"
+    assert M.STOP == KI.STRATEGY_STOP, "KIS 손절값 불일치"
+    assert M.TAKE == KW.PROFIT_TARGET, "키움 익절값 불일치"
+    assert M.CUR_TH == KW.MIN_STRENGTH_SCORE == KI.MIN_STRENGTH_SCORE, "강도 임계 불일치"
+
+
+def test_cut_monitor_accounts_have_separate_books():
+    """계좌별 보유 원장이 분리돼야 한다 — 섞이면 슬롯·중복매수 판정이 틀린다."""
+    import inspect
+    import strength_cut_monitor as M
+    src = inspect.getsource(M.simulate)
+    assert "books" in src and "books[acct]" in src, "보유 원장이 계좌별로 분리돼 있지 않다"
+
+
+def test_dashboard_exposes_cut_monitor():
+    """대시보드가 모니터를 서빙하는지 — 탭만 만들고 데이터를 안 물리는 사고 방지."""
+    src = open(os.path.join(OUTPUTS, "integrated_dashboard_server.py"), encoding="utf-8").read()
+    assert "def get_cut_monitor" in src, "getter 가 없다"
+    assert '"cutmon":' in src, "/api/all 에 cutmon 이 빠졌다"
+    assert "tab-cutmon" in src, "탭 마크업이 없다"
+    assert "fillCutMonitor" in src, "렌더 함수가 없다"
+    assert "_r(fillCutMonitor, d.cutmon)" in src, "렌더 함수가 호출되지 않는다"
+    # showTab 의 id 배열과 탭 버튼 수가 일치해야 한다(하나 어긋나면 전 탭이 밀린다)
+    import re
+    m = re.search(r"\['overview'[^\]]*\]", src)
+    assert m, "showTab id 배열을 찾지 못했다"
+    ids = re.findall(r"'([a-z]+)'", m.group(0))
+    btns = re.findall(r"onclick=\"showTab\('([a-z]+)'\)\"", src)
+    assert ids == btns, f"showTab 배열과 탭 버튼 순서 불일치: {ids} vs {btns}"
+
+
+def test_recheck_bat_runs_monitor_without_changing_exitcode():
+    """모니터 실패가 recheck 종료코드를 바꾸면 안 된다(참고 집계지 감시 대상이 아니다)."""
+    p = os.path.join(OUTPUTS, "run_recheck.bat")
+    raw = open(p, "rb").read()
+    assert b"\x00" not in raw, "bat 에 NUL 패딩 — 과거 재시도 루프를 죽인 사고 패턴"
+    src = raw.decode("ascii")          # 한글이 섞이면 cp949 에서 깨진다
+    assert "strength_cut_monitor.py" in src, "recheck 에 모니터 실행이 없다"
+    i_guard = src.find('set "EXITCODE=!ERRORLEVEL!"')
+    i_mon = src.find("strength_cut_monitor.py")
+    assert i_guard < i_mon, "모니터가 EXITCODE 확정보다 먼저 실행된다"
+    # 핵심: 모니터 실행 **이후**에 EXITCODE 를 다시 대입하는 곳이 없어야 한다.
+    # (있으면 모니터의 종료코드가 recheck 결과로 새어나가 오경보가 된다)
+    assert 'set "EXITCODE=' not in src[i_mon:], \
+        "모니터 이후에 EXITCODE 를 덮어쓴다 — 모니터 실패가 recheck 실패로 보고된다"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# [2026-09-19] 탐침도 문구 화이트리스트를 쓰고 있었다 — 결과 기반 판정 추가
+#   09-17 실사고: 키움이 RC5006 으로 탐침을 거부했는데 문구 목록에 없어 fatal=false.
+#   같은 탐침을 KIS 는 수용했다 → 종목/시간 사유가 아니라 계좌 사유였다.
+# ──────────────────────────────────────────────────────────────────────────
+def test_probe_flags_one_sided_rejection_as_account_fault():
+    """한쪽만 거부되면 문구를 몰라도 계좌 이상으로 판정해야 한다."""
+    import inspect
+    import preopen_probe as pp
+    src = inspect.getsource(pp.main)
+    assert "len(accepted) == 1" in src, "한쪽만 수용된 경우의 결과 기반 판정이 없다"
+    assert "fatal_reason" in src, "판정 근거를 기록하지 않는다"
+    i_acc = src.find("accepted = [k for k")
+    i_verdict = src.find('res["verdict"] =')
+    i_rule = src.find("len(accepted) == 1")
+    assert i_acc < i_rule < i_verdict, "결과 판정이 verdict 계산 전에 와야 한다"
+
+
+def test_probe_does_not_overwrite_carried_result():
+    """승계된(재탐침 안 한) 결과를 결과판정으로 덮어쓰면 낡은 기록이 사고로 둔갑한다."""
+    import inspect
+    import preopen_probe as pp
+    src = inspect.getsource(pp.main)
+    i_rule = src.find("len(accepted) == 1")
+    seg = src[i_rule:i_rule + 700]
+    assert 'carried_from' in seg, "승계 결과(carried_from)를 제외하지 않는다"
+
+
+def test_probe_phrase_list_still_present_as_backup():
+    """문구 목록은 보조로 남아 있어야 한다 — 양쪽 다 거부된 경우엔 그것뿐이다."""
+    import preopen_probe as pp
+    assert pp._is_fatal("kiwoom", "모의투자 주문이 불가한 계좌입니다") is True
+    assert pp._is_fatal("kiwoom", "장시작전 주문 불가") is False
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# [2026-09-20] 해결 선언 이전 증거로 재발동하면 안 된다 — 해제/재발동 무한루프 방지
+#   실사고 직전 상태: 09-16 주문실패·09-17 탐침 기록이 창에 남아 있어, 계좌를 교체하고
+#   정지를 풀어도 다음 워치독이 같은 기록으로 다시 걸 상태였다.
+# ──────────────────────────────────────────────────────────────────────────
+def _acct_env(tmp_path, monkeypatch, dates, ledgers=None, probe=None):
+    import json
+    import watchdog as w
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "db" / "kiwoom").mkdir(parents=True)
+    for d in dates:
+        (tmp_path / "logs" / f"kiwoom_{d}.log").write_text("run", encoding="utf-8")
+    for d, rows in (ledgers or {}).items():
+        (tmp_path / "db" / "kiwoom" / f"orders_{d}.csv").write_text(
+            _LEDGER_HEAD + "".join(rows), encoding="utf-8-sig")
+    if probe:
+        (tmp_path / "db").mkdir(exist_ok=True)
+        (tmp_path / "db" / "preopen_probe_result.json").write_text(
+            json.dumps(probe, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(w, "_HERE", str(tmp_path))
+    monkeypatch.setattr(w, "_LOGS", str(tmp_path / "logs"))
+    monkeypatch.setattr(w, "_KIWOOM_DIR", str(tmp_path / "db" / "kiwoom"))
+    return w
+
+
+def _released_on(monkeypatch, day):
+    """kill_switch 를 '해제 상태 + 해제일 day' 로 흉내낸다."""
+    import kill_switch as ks
+    monkeypatch.setattr(ks, "status",
+                        lambda: (False, {"released_at": f"{day[:4]}-{day[4:6]}-{day[6:]} 09:00:00"}, None))
+
+
+def test_account_blocked_ignores_failures_before_release(tmp_path, monkeypatch):
+    """해제 이전의 주문 실패로는 다시 걸면 안 된다(무한 해제/재발동 방지)."""
+    rej = ("09:00:05,buy,214370,케어젠,rsi_reversal,23,41250,3,False,,"
+           "매수 거부: RC5006 개인공매도이수전용 계좌입니다\n")
+    _released_on(monkeypatch, "20260920")
+    w = _acct_env(tmp_path, monkeypatch, ["20260916", "20260917", "20260918"],
+                  {"20260916": [rej]})
+    out = w.check_account_blocked(3)
+    assert out[0][2] is True, f"해결 선언 이전 기록으로 재발동했다: {out[0][3]}"
+
+
+def test_account_blocked_still_catches_failures_after_release(tmp_path, monkeypatch):
+    """해제 이후에 새로 실패하면 즉시 다시 잡아야 한다(무력화되면 안 된다)."""
+    rej = ("09:00:05,buy,214370,케어젠,rsi_reversal,23,41250,3,False,,"
+           "매수 거부: RC5006 개인공매도이수전용 계좌입니다\n")
+    _released_on(monkeypatch, "20260920")
+    w = _acct_env(tmp_path, monkeypatch, ["20260918", "20260921", "20260922"],
+                  {"20260921": [rej]})
+    out = w.check_account_blocked(3)
+    assert out[0][2] is False and "전부 실패" in out[0][3], "해제 이후 새 실패를 놓쳤다"
+
+
+def test_account_blocked_ignores_stale_probe_record(tmp_path, monkeypatch):
+    """해제 이전에 찍힌 탐침 fatal 기록으로도 재발동하면 안 된다."""
+    _released_on(monkeypatch, "20260920")
+    w = _acct_env(tmp_path, monkeypatch, ["20260916", "20260917", "20260918"],
+                  probe={"probed_at": "2026-09-17 08:50:03",
+                         "kiwoom": {"accepted": False, "fatal": True, "msg": "RC5006"},
+                         "kis": {"accepted": True, "fatal": False, "msg": "ok"}})
+    out = w.check_account_blocked(3)
+    assert out[0][2] is True, f"해제 이전 탐침 기록으로 재발동했다: {out[0][3]}"
+
+
+def test_account_blocked_uses_fresh_probe_record(tmp_path, monkeypatch):
+    """해제 이후의 탐침 fatal 은 그대로 잡아야 한다."""
+    _released_on(monkeypatch, "20260920")
+    w = _acct_env(tmp_path, monkeypatch, ["20260918", "20260921", "20260922"],
+                  probe={"probed_at": "2026-09-21 08:50:03",
+                         "kiwoom": {"accepted": False, "fatal": True, "msg": "RC5006"},
+                         "kis": {"accepted": True, "fatal": False, "msg": "ok"}})
+    out = w.check_account_blocked(3)
+    assert out[0][2] is False and "kiwoom" in out[0][3], "해제 이후 탐침 이상을 놓쳤다"
+
+
+def test_account_blocked_no_release_record_keeps_old_behavior(tmp_path, monkeypatch):
+    """해제 이력이 없으면(또는 정지 중이면) 필터 없이 종전대로 판정한다."""
+    import kill_switch as ks
+    monkeypatch.setattr(ks, "status", lambda: (True, {}, None))   # 정지 중
+    rej = ("09:00:05,buy,214370,케어젠,rsi_reversal,23,41250,3,False,,"
+           "매수 거부: RC5006\n")
+    w = _acct_env(tmp_path, monkeypatch, ["20260916", "20260917", "20260918"],
+                  {"20260916": [rej]})
+    out = w.check_account_blocked(3)
+    assert out[0][2] is False, "정지 중일 때는 필터가 걸리면 안 된다"

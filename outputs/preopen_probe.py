@@ -385,6 +385,24 @@ def main():
             res[label]["cancelled"] = canceller(msg, code)
 
     accepted = [k for k in ("kiwoom", "kis") if res.get(k, {}).get("accepted")]
+
+    # [2026-09-19] 문구를 몰라도 잡는 결과 기반 판정 — **한쪽만 거부되면 계좌 문제다.**
+    #   탐침은 양 계좌에 같은 종목·같은 가격·같은 시각으로 넣는다. 종목 사유(거래정지·
+    #   호가단위)나 시간대 사유라면 **양쪽 다** 거부돼야 한다. 한쪽만 거부되는 것은
+    #   그 계좌가 주문을 못 받는다는 뜻이고, 증권사가 어떤 문구를 쓰든 성립한다.
+    #   실사고 09-17: 키움이 RC5006('개인공매도이수전용 계좌')로 거부했는데 문구 목록
+    #   5개 중 어느 것도 아니라 fatal=false 로 기록됐다 — 재탐침 대상에서도 빠지고
+    #   워치독의 탐침 근거로도 안 잡혔다(주문 원장 판정이 대신 잡아 다행히 드러났다).
+    if len(accepted) == 1:
+        other = "kis" if accepted[0] == "kiwoom" else "kiwoom"
+        o = res.get(other)
+        if o and not o.get("accepted") and not o.get("fatal") and not o.get("carried_from"):
+            o["fatal"] = True
+            o["fatal_reason"] = f"같은 탐침을 {accepted[0]} 는 수용 — 종목/시간 사유가 아님"
+            if other not in fatal:
+                fatal.append(other)
+            print(f"[probe][{other}] 계좌이상(결과판정) — {o['fatal_reason']}")
+
     res["verdict"] = (f"장전 동시호가 주문 수용: {', '.join(accepted)}" if accepted
                       else "양 계좌 모두 장전 주문 거부 — 09:00 트리거 유지가 정답")
     if fatal:

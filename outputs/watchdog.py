@@ -403,13 +403,31 @@ def check_account_blocked(days=3):
     words = ("주문이 불가한 계좌", "사용할 수 없는 계좌", "해지된 계좌",
              "정지된 계좌", "계좌가 없습니다")
 
+    # [2026-09-19] **해결 선언보다 오래된 증거는 보지 않는다.**
+    #   사용자가 원인을 고치고 kill_switch 를 해제하면 그 시점 이전의 실패 기록은
+    #   '이미 처리된 사고'다. 그런데 창(최근 3거래일)에 남아 있는 동안은 계속 걸려
+    #   해제 → 다음 워치독이 재발동 → 다시 해제가 무한 반복된다(09-20 실측: 09-16
+    #   주문 실패와 09-17 탐침 기록이 계좌 교체 후에도 재발동을 일으킬 상태였다).
+    #   해제 이후에 생긴 증거만 보면, 진짜로 안 고쳐졌을 땐 그날 새 실패가 즉시 잡힌다.
+    since = ""
+    try:
+        import kill_switch as _ks
+        _on, _st, _ = _ks.status()
+        if not _on:
+            since = str(_st.get("released_at") or "")[:10].replace("-", "")
+    except Exception:
+        pass
+
     # [2026-08-21] 1순위 증거는 당일 08:50 탐침 결과다. 로그 스캔만 하면 '가장 최근
     # 주문을 시도한 날'(만기가 없으면 며칠 전)이 근거로 잡혀 경보가 낡아 보인다.
     try:
         with open(os.path.join(_HERE, "db", "preopen_probe_result.json"),
                   encoding="utf-8") as f:
             pr = json.load(f)
-        blocked = [k for k in ("kiwoom", "kis") if pr.get(k, {}).get("fatal")]
+        probed = str(pr.get("probed_at", ""))[:10].replace("-", "")
+        stale_probe = bool(since and probed and probed < since)
+        blocked = [] if stale_probe else [k for k in ("kiwoom", "kis")
+                                          if pr.get(k, {}).get("fatal")]
         if blocked:
             out.append(("account_blocked", "계좌 주문 가능 여부", False,
                         f"{', '.join(blocked)} 계좌가 주문을 거부 "
@@ -424,6 +442,8 @@ def check_account_blocked(days=3):
     for label, pat in (("키움", "orders_{d}.csv"), ("KIS", "kis_orders_{d}.csv")):
         ok_n, bad = 0, []
         for d in _recent_trading_dates(days):
+            if since and d < since:
+                continue                     # 해결 선언 이전의 실패는 이미 처리된 사고
             p = os.path.join(_KIWOOM_DIR, pat.format(d=d))
             if not os.path.exists(p):
                 continue                     # 그날 주문 0건 — 판정 재료 없음

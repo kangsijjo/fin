@@ -259,6 +259,7 @@ MACRO_DAILY = BASE / "macro_data" / "daily"
 PAPER_CSV       = BASE / "paper_signals.csv"
 KIS_SIGNALS_CSV = BASE / "kis_paper_signals.csv"
 STRENGTH_LOG_CSV = BASE / "db" / "signal_strength_log.csv"
+CUT_MONITOR_CSV  = BASE / "db" / "strength_cut_monitor.csv"   # 전략별임계 모니터(Phase 1)
 INTRADAY_CACHE  = BASE / "db" / "kiwoom" / "intraday_cache.json"
 HISTORY_CSV = BASE / "trades_history_v3.csv"
 MODEL_JSON  = BASE / "ai_data" / "meta_model_v4.json"
@@ -1175,6 +1176,74 @@ def get_ai_paper():
         return {"error": str(e)[:200]}
 
 
+def get_cut_monitor(limit=200):
+    """전략별 임계 '모니터 전용' 집계(strength_cut_monitor.py 산출)를 요약해 반환.
+
+    현행 5.7(단일 절대임계) vs 전략별 고정임계 상위40%/50% — **매매에는 개입하지 않고**
+    '그 규칙이었으면 무엇을 샀고 얼마였을까'만 비교한다(시스템_설명서 §39).
+    """
+    out = {"rules": [], "rows": [], "by_strategy": [], "daily": [],
+           "generated": "", "days": 0, "note": ""}
+    if not CUT_MONITOR_CSV.exists():
+        out["note"] = "아직 집계 없음 — strength_cut_monitor.py 를 한 번 실행하세요."
+        return out
+    try:
+        df = pd.read_csv(CUT_MONITOR_CSV, dtype={"code": str, "signal_date": str,
+                                                 "entry_date": str, "exit_date": str},
+                         encoding="utf-8-sig")
+    except Exception as e:
+        out["error"] = str(e)[:200]
+        return out
+    if df.empty:
+        out["note"] = "집계 결과가 비어 있습니다."
+        return out
+    df["code"] = df["code"].astype(str).str.zfill(6)
+    df["net_pct"] = pd.to_numeric(df["net_pct"], errors="coerce")
+    df["done"] = pd.to_numeric(df["done"], errors="coerce").fillna(0).astype(int)
+    out["generated"] = datetime.fromtimestamp(CUT_MONITOR_CSV.stat().st_mtime
+                                              ).strftime("%Y-%m-%d %H:%M")
+    out["days"] = int(df["signal_date"].nunique())
+    out["span"] = f"{df['signal_date'].min()}~{df['signal_date'].max()}"
+
+    for rule, g in df.groupby("rule", sort=False):
+        d = g[g["done"] == 1]
+        # 누적 수익: 슬롯 10분할 가정(라이브와 동일) — 매매당 자본의 1/10 을 태운다
+        cum = float(np.prod([1 + v / 1000.0 for v in d["net_pct"].dropna()]) - 1) * 100
+        out["rules"].append({
+            "rule": rule,
+            "n": int(len(g)), "done": int(len(d)), "open": int((g["done"] == 0).sum()),
+            "avg": round(float(d["net_pct"].mean()), 2) if len(d) else None,
+            "med": round(float(d["net_pct"].median()), 2) if len(d) else None,
+            "win": round(float((d["net_pct"] > 0).mean() * 100), 1) if len(d) else None,
+            "worst": round(float(d["net_pct"].min()), 2) if len(d) else None,
+            "cum": round(cum, 2) if len(d) else None,
+            "kiwoom": int((g["acct"] == "kiwoom").sum()),
+            "kis": int((g["acct"] == "kis").sum()),
+            "strats": int(g["strategy"].nunique()),
+        })
+
+    dd = df[df["done"] == 1]
+    if len(dd):
+        for (rule, strat), g in dd.groupby(["rule", "strategy"]):
+            out["by_strategy"].append({
+                "rule": rule, "strategy": strat, "n": int(len(g)),
+                "avg": round(float(g["net_pct"].mean()), 2),
+                "win": round(float((g["net_pct"] > 0).mean() * 100), 1)})
+    for sd, g in df.groupby("signal_date"):
+        row = {"date": sd}
+        for rule in df["rule"].unique():
+            row[rule] = int((g["rule"] == rule).sum())
+        out["daily"].append(row)
+    out["daily"] = out["daily"][-30:]
+
+    cols = ["rule", "signal_date", "entry_date", "acct", "strategy", "code", "name",
+            "score", "entry_price", "exit_date", "net_pct", "why", "done"]
+    cols = [c for c in cols if c in df.columns]
+    out["rows"] = (df.sort_values(["signal_date", "rule"], ascending=[False, True])
+                     .head(limit)[cols].fillna("").to_dict("records"))
+    return out
+
+
 def get_strength(limit=300):
     """
     strength_logger.py 가 누적한 신호 강도 원천값을 요약+최근기록으로 반환.
@@ -1864,6 +1933,7 @@ def api_all():
             "mock":       _safe(get_kiwoom_mock, df, dt),
             "kis":        _safe(get_kis_mock, df, dt),
             "strength":   _safe(get_strength),
+            "cutmon":     _safe(get_cut_monitor),
             "ai_paper":   _safe(get_ai_paper),
             "pvbt":       _safe(get_paper_vs_bt),
             "ai":         _safe(get_ai_status),
@@ -2259,6 +2329,7 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
   <div class="tab"         onclick="showTab('cheonok')">&#x1F4CC; &#xCC9C;&#xC5B5;&#xC774;</div>
   <div class="tab"         onclick="showTab('mock')">&#x1F3E6; &#xBAA8;&#xC758;&#xACC4;&#xC88C;</div>
   <div class="tab"         onclick="showTab('strength')">&#x1F4AA; &#xAC15;&#xB3C4;&#xB9E4;&#xB9E4;</div>
+  <div class="tab"         onclick="showTab('cutmon')">&#x1F9EA; &#xC784;&#xACC4;&#xBAA8;&#xB2C8;&#xD130;</div>
   <div class="tab"         onclick="showTab('backtest')">&#x1F4C8; &#xBC31;&#xD14C;&#xC2A4;&#xD2B8;</div>
   <div class="tab"         onclick="showTab('aimodel')">&#x1F916; AI&#xBAA8;&#xB378;</div>
   <div class="tab"         onclick="showTab('datalogs')">&#x1F4DC; &#xB370;&#xC774;&#xD130;+&#xB85C;&#xADF8;</div>
@@ -2462,6 +2533,50 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
   </div>
 </div>
 
+<!-- ===== 임계 모니터 (Phase 1, 모니터 전용) ===== -->
+<div id="tab-cutmon" class="tab-content">
+  <div class="section">
+    <h2>&#xC804;&#xB7B5;&#xBCC4; &#xC784;&#xACC4; &#xBAA8;&#xB2C8;&#xD130; <span style="color:#f0883e;font-size:12px;font-weight:700">&mdash; &#xBAA8;&#xB2C8;&#xD130; &#xC804;&#xC6A9; &middot; &#xC2E4;&#xAC70;&#xB798;&#xC5D0; &#xAC1C;&#xC785;&#xD558;&#xC9C0; &#xC54A;&#xC74C;</span></h2>
+    <div style="color:#8b949e;font-size:12px;margin-bottom:10px;line-height:1.7">
+      &#xD604;&#xD589;&#xC740; <b>&#xAC15;&#xB3C4; 5.7 &#xB2E8;&#xC77C; &#xC808;&#xB300;&#xC784;&#xACC4;</b>&#xB2E4;. &#xADF8;&#xB7F0;&#xB370; &#xD559;&#xC2B5;&#xBD84;&#xD3EC; &#xC0C1;&#xC704; 30% &#xCEF7;&#xC774;
+      high_52w_filt 3.16 ~ rsi_reversal 6.83 &#xB85C; <b>3.7&#xC810;</b> &#xBC8C;&#xC5B4;&#xC838; &#xC788;&#xC5B4;,
+      5.7 &#xD558;&#xB098;&#xB294; &#xBAA8;&#xBA58;&#xD140; 4&#xC804;&#xB7B5;&#xC744; &#xD1B5;&#xACFC;&#xC728; 0%&#xB85C; &#xB044;&#xBA74;&#xC11C; rsi_reversal &#xC740; &#xC624;&#xD788;&#xB824; &#xB290;&#xC2AC;&#xAC8C; &#xD1B5;&#xACFC;&#xC2DC;&#xD0A8;&#xB2E4;.
+      &#xC5EC;&#xAE30;&#xC11C;&#xB294; <b>&#xC804;&#xB7B5;&#xBCC4;&#xB85C; &#xB208;&#xAE08;&#xC744; &#xB9DE;&#xCD98; &#xC784;&#xACC4;</b>&#xC600;&#xB2E4;&#xBA74; &#xBB34;&#xC5C7;&#xC744; &#xC0C0;&#xC744;&#xC9C0;&#xB9CC; &#xAE30;&#xB85D;&#xD55C;&#xB2E4;.
+      &#xB9E4;&#xB9E4; &#xCF54;&#xB4DC;&#xB294; &#xAC74;&#xB4DC;&#xB9AC;&#xC9C0; &#xC54A;&#xC558;&#xB2E4; &mdash; &#xC21C;&#xC218; &#xC9D1;&#xACC4;&#xB2E4;. (&#xC2DC;&#xC2A4;&#xD15C;_&#xC124;&#xBA85;&#xC11C; &sect;39)
+      <br>&#xD310;&#xB2E8; &#xAE30;&#xC900;: <b>&#xD3C9;&#xADE0; net% &#xC640; &#xB204;&#xC801;&#xC744; &#xBD84;&#xB9AC;&#xD574; &#xBCF8;&#xB2E4;.</b> &#xC2B9;&#xB960;&#xC740; &#xC775;&#xC808;&#xADDC;&#xCE59;&#xC758; &#xC0B0;&#xBB3C;&#xC774;&#xB77C; &#xADFC;&#xAC70;&#xB85C; &#xC4F0;&#xC9C0; &#xC54A;&#xB294;&#xB2E4;.
+    </div>
+    <div style="color:#8b949e;font-size:12px" id="cm-meta"></div>
+  </div>
+  <div class="section">
+    <h2>&#xADDC;&#xCE59;&#xBCC4; &#xBE44;&#xAD50;</h2>
+    <table><thead><tr>
+      <th>&#xADDC;&#xCE59;</th><th class="r">&#xB9E4;&#xC218;</th><th class="r">&#xC644;&#xB8CC;</th><th class="r">&#xBCF4;&#xC720;&#xC911;</th>
+      <th class="r">&#xD3C9;&#xADE0; net%</th><th class="r">&#xC911;&#xC559;</th><th class="r">&#xB204;&#xC801;(10&#xBD84;&#xD560;)</th>
+      <th class="r">&#xCD5C;&#xC545;</th><th class="r">&#xD0A4;&#xC6C0;</th><th class="r">KIS</th><th class="r">&#xC804;&#xB7B5;&#xC218;</th>
+    </tr></thead>
+    <tbody id="cm-rules"><tr><td colspan="11" style="color:#8b949e;text-align:center">&#xC9D1;&#xACC4; &#xC5C6;&#xC74C;</td></tr></tbody>
+    </table>
+  </div>
+  <div class="section">
+    <h2>&#xADDC;&#xCE59;&times;&#xC804;&#xB7B5; &#xC131;&#xACFC; <span style="color:#8b949e;font-size:12px;font-weight:400">&mdash; &#xC644;&#xB8CC; &#xB9E4;&#xB9E4;&#xB9CC;</span></h2>
+    <div id="cm-bystrat" style="color:#8b949e;font-size:13px">&#xB370;&#xC774;&#xD130; &#xC5C6;&#xC74C;</div>
+  </div>
+  <div class="section">
+    <h2>&#xC77C;&#xC790;&#xBCC4; &#xB9E4;&#xC218; &#xAC74;&#xC218; <span style="color:#8b949e;font-size:12px;font-weight:400">&mdash; &#xCD5C;&#xADFC; 30&#xC77C;</span></h2>
+    <div id="cm-daily" style="color:#8b949e;font-size:13px">&#xB370;&#xC774;&#xD130; &#xC5C6;&#xC74C;</div>
+  </div>
+  <div class="section">
+    <h2>&#xAC00;&#xC0C1; &#xB9E4;&#xB9E4; &#xB0B4;&#xC5ED; <span style="color:#8b949e;font-size:12px;font-weight:400">&mdash; &#xCD5C;&#xADFC; 200&#xAC74;</span></h2>
+    <table><thead><tr>
+      <th>&#xADDC;&#xCE59;</th><th class="r">&#xC2E0;&#xD638;&#xC77C;</th><th class="r">&#xC9C4;&#xC785;&#xC77C;</th><th>&#xACC4;&#xC88C;</th><th>&#xC804;&#xB7B5;</th>
+      <th>&#xC885;&#xBAA9;</th><th class="r">&#xAC15;&#xB3C4;</th><th class="r">&#xC9C4;&#xC785;&#xAC00;</th><th class="r">&#xCCAD;&#xC0B0;&#xC77C;</th>
+      <th class="r">net%</th><th>&#xC0AC;&#xC720;</th>
+    </tr></thead>
+    <tbody id="cm-rows"><tr><td colspan="11" style="color:#8b949e;text-align:center">&#xB0B4;&#xC5ED; &#xC5C6;&#xC74C;</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
 <!-- ===== 백테스트 ===== -->
 <div id="tab-backtest" class="tab-content">
   <div class="section">
@@ -2661,7 +2776,7 @@ function safe(v,fallback='-'){return (v===null||v===undefined||v==='')?fallback:
 function fmtB(n){const v=Number(n||0);if(v>=1e8)return (v/1e8).toFixed(1)+'억';if(v>=1e4)return (v/1e4).toFixed(0)+'만';return fmt(v)}
 
 function showTab(id){
-  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',['overview','cheonok','mock','strength','backtest','aimodel','datalogs','intraday'][i]===id));
+  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',['overview','cheonok','mock','strength','cutmon','backtest','aimodel','datalogs','intraday'][i]===id));
   document.querySelectorAll('.tab-content').forEach(t=>t.classList.toggle('active',t.id==='tab-'+id));
 }
 
@@ -2867,6 +2982,73 @@ function fillRunButtons(d){
   document.querySelectorAll('.runbtn[data-sig]').forEach(b=>{
     b.classList.toggle('stale', sigStale);
   });
+}
+
+function fillCutMonitor(cm){
+  if(!cm) return;
+  if(cm.note||cm.error){
+    setHtml('cm-meta','<span style="color:#f0883e">'+(cm.error||cm.note)+'</span>');
+    return;
+  }
+  setHtml('cm-meta', `집계 ${cm.generated||'-'} · 신호일 ${cm.days||0}일 (${cm.span||'-'})`);
+
+  const rules=cm.rules||[];
+  // 현행을 기준으로 삼아 신규 규칙의 우열을 색으로 표시한다
+  const base=rules.find(r=>String(r.rule).indexOf('현행')>=0);
+  setHtml('cm-rules', rules.length? rules.map(r=>{
+    const isBase=(base&&r.rule===base.rule);
+    const d=(base&&r.avg!=null&&base.avg!=null&&!isBase)?(r.avg-base.avg):null;
+    const dtxt=(d==null)?'':` <span class="${d>0?'pos':'neg'}" style="font-size:11px">(${d>0?'+':''}${d.toFixed(2)}%p)</span>`;
+    return `<tr${isBase?' style="background:rgba(88,166,255,.07)"':''}>
+      <td style="font-weight:600">${r.rule||''}${isBase?' <span style="color:#58a6ff;font-size:11px">기준</span>':''}</td>
+      <td class="r">${fmt(r.n)}</td><td class="r">${fmt(r.done)}</td>
+      <td class="r" style="color:#8b949e">${fmt(r.open)}</td>
+      <td class="r ${clr(r.avg)}" style="font-weight:700">${r.avg!=null?pct(r.avg):'-'}${dtxt}</td>
+      <td class="r ${clr(r.med)}">${r.med!=null?pct(r.med):'-'}</td>
+      <td class="r ${clr(r.cum)}" style="font-weight:600">${r.cum!=null?pct(r.cum):'-'}</td>
+      <td class="r neg">${r.worst!=null?pct(r.worst):'-'}</td>
+      <td class="r">${fmt(r.kiwoom)}</td><td class="r">${fmt(r.kis)}</td>
+      <td class="r">${fmt(r.strats)}</td></tr>`;
+  }).join('') : '<tr><td colspan="11" style="color:#8b949e;text-align:center">집계 없음</td></tr>');
+
+  const bs=cm.by_strategy||[];
+  if(bs.length){
+    const byRule={};
+    bs.forEach(x=>{ (byRule[x.rule]=byRule[x.rule]||[]).push(x); });
+    setHtml('cm-bystrat', Object.keys(byRule).map(k=>{
+      const items=byRule[k].sort((a,b)=>b.n-a.n).map(x=>
+        `<span style="display:inline-block;margin:2px 10px 2px 0">${x.strategy}
+          <b class="${clr(x.avg)}">${pct(x.avg)}</b>
+          <span style="color:#8b949e;font-size:11px">(${x.n}건)</span></span>`).join('');
+      return `<div style="margin-bottom:8px"><span style="color:#c9d1d9;font-weight:600">${k}</span><br>${items}</div>`;
+    }).join(''));
+  }
+
+  const dl=cm.daily||[];
+  if(dl.length){
+    const keys=rules.map(r=>r.rule);
+    setHtml('cm-daily',
+      '<table style="margin-top:4px"><thead><tr><th class="r">신호일</th>'+
+      keys.map(k=>'<th class="r">'+k+'</th>').join('')+'</tr></thead><tbody>'+
+      dl.slice().reverse().map(r=>'<tr><td class="r">'+r.date+'</td>'+
+        keys.map(k=>'<td class="r">'+(r[k]||0)+'</td>').join('')+'</tr>').join('')+
+      '</tbody></table>');
+  }
+
+  const rows=cm.rows||[];
+  setHtml('cm-rows', rows.length? rows.map(r=>`<tr>
+      <td style="font-size:12px">${r.rule||''}</td>
+      <td class="r" style="font-size:12px">${r.signal_date||''}</td>
+      <td class="r" style="font-size:12px">${r.entry_date||''}</td>
+      <td style="font-size:12px;color:#94a3b8">${r.acct||''}</td>
+      <td style="font-size:12px;color:#94a3b8">${r.strategy||''}</td>
+      <td style="font-weight:500">${r.code||''} ${r.name||''}</td>
+      <td class="r">${r.score!=null?r.score:'-'}</td>
+      <td class="r">${fmt(r.entry_price)}</td>
+      <td class="r" style="font-size:12px">${r.exit_date||''}</td>
+      <td class="r ${clr(r.net_pct)}" style="font-weight:600">${r.net_pct!=null?pct(r.net_pct):'-'}</td>
+      <td style="font-size:12px;color:${String(r.why)==='보유중'?'#8b949e':'#c9d1d9'}">${r.why||''}</td>
+    </tr>`).join('') : '<tr><td colspan="11" style="color:#8b949e;text-align:center">내역 없음</td></tr>');
 }
 
 function fillStrength(st){
@@ -3275,6 +3457,7 @@ async function load(){
   _r(fillCheonok, d.cheonok);
   _r(fillMock, d.mock, d.kis);
   _r(fillStrength, d.strength);
+  _r(fillCutMonitor, d.cutmon);
   _r(fillAiPaper, d.ai_paper);
   _r(fillRunButtons, d);
   _r(fillBacktest, d.bt, d.sc);

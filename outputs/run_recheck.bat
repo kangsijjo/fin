@@ -48,6 +48,12 @@ goto :report
 !PYEXE! recollect_guard.py >> "!LOGFILE!" 2>&1
 set "EXITCODE=!ERRORLEVEL!"
 
+REM [2026-09-19] Phase-1 per-strategy threshold monitor. Aggregation only.
+REM   Never changes EXITCODE - this is a reference tally, not a watched job.
+REM   Writes db/strength_cut_monitor.csv, shown on the dashboard cutmon tab.
+!PYEXE! strength_cut_monitor.py >> "!LOGFILE!" 2>&1
+echo [cutmon] exit=!ERRORLEVEL! (monitor only) >> "!LOGFILE!"
+
 :report
 echo  Exit code: !EXITCODE! (time: %TIME%) >> "!LOGFILE!"
 echo Exit code: !EXITCODE!
