@@ -3123,16 +3123,26 @@ function fillAiPaper(ap){
     const p=P[k]; const bs=(p&&p.by_strategy)||[];
     if(!bs.length) return '';
     const label=k==='ai'?'🤖 AI':'💪 강도';
-    const tr=bs.map(s=>`<tr>
+    // [2026-10-09 §44] 중앙값·최대기여일·그날 제외 평균 — 평균이 하루 이벤트에 좌우되는지 보이게.
+    // 하루가 손익(절대값)의 50% 이상이고 2건 이상이면 ⚠. 구버전 JSON(필드 없음)은 '-' 표시.
+    const tr=bs.map(s=>{
+      const conc=s.top_day_share!=null&&s.top_day_share>=50&&s.n>=2;
+      const td=s.top_day?`${s.top_day.slice(4,6)}/${s.top_day.slice(6,8)}`:'';
+      const topCell=s.top_day?`<span style="${conc?'color:#fbbf24;font-weight:700':'color:#94a3b8'}">${conc?'⚠ ':''}${td} · ${s.top_day_n}건 · ${s.top_day_share}%</span>`:'-';
+      return `<tr>
       <td style="color:#cbd5e1;font-weight:500">${s.strategy||''}</td>
       <td class="r">${s.n}</td>
       <td class="r" style="font-weight:600">${s.win_pct!=null?s.win_pct+'%':'-'}</td>
       <td class="r ${clr(s.avg_net)}" style="font-weight:600">${pct(s.avg_net)}</td>
-      <td class="r ${clr(s.pnl)}" style="font-weight:600">${fmt(s.pnl)}원</td></tr>`).join('');
+      <td class="r ${s.med_net!=null?clr(s.med_net):''}">${s.med_net!=null?pct(s.med_net):'-'}</td>
+      <td class="r" style="font-size:12px">${topCell}</td>
+      <td class="r ${s.avg_ex_top!=null?clr(s.avg_ex_top):''}">${s.avg_ex_top!=null?pct(s.avg_ex_top):'-'}</td>
+      <td class="r ${clr(s.pnl)}" style="font-weight:600">${fmt(s.pnl)}원</td></tr>`;}).join('');
     return `<div style="margin-bottom:16px;background:#1f2937;padding:16px;border-radius:10px;border:1px solid #374151">
       <div style="font-size:13px;font-weight:700;margin-bottom:12px;color:${k==='ai'?'#a78bfa':'#f87171'}">${label}</div>
-      <table><thead><tr><th>전략</th><th class="r">완료</th><th class="r">승률</th><th class="r">평균%</th><th class="r">실현손익</th></tr></thead>
-      <tbody>${tr}</tbody></table></div>`;
+      <table><thead><tr><th>전략</th><th class="r">완료</th><th class="r">승률</th><th class="r">평균%</th><th class="r">중앙값%</th><th class="r" title="손익(절대값) 기여가 가장 큰 진입일 · 그날 건수 · 전체 손익 중 비중">최대기여일</th><th class="r">그날 제외 평균%</th><th class="r">실현손익</th></tr></thead>
+      <tbody>${tr}</tbody></table>
+      <div style="font-size:11px;color:#64748b;margin-top:8px">⚠ = 하루 진입분이 손익의 절반 이상 — 평균보다 중앙값·그날 제외 평균을 보세요 (§44)</div></div>`;
   }).join('');
   setHtml('ap-bystrat', bsHtml||'완료 거래 없음');
 

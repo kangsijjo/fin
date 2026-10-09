@@ -189,15 +189,28 @@ def simulate(sig, cal_all, cal, closes, rank_col, min_score=None):
     done = pd.DataFrame(trades)
 
     # 전략별 집계(2026-07-13) — 완료 거래 기준 건수/승률/평균순%/실현손익합
+    # [2026-10-09] 중앙값·최대기여일·그날 제외 평균 추가(§44). AI×rsi_reversal 이
+    # 평균 +15.94% 로 보였는데 17건 중 7건이 7/29(폭락 바닥) 하루 진입분이었고 그날
+    # 제외 시 평균이 크게 낮았다 — 평균만 보면 '하루 이벤트'를 '전략 실력'으로 오독한다.
     by_strategy = []
     if len(done):
         for strat, g in done.groupby("strategy"):
+            day = g.groupby("entry_date")["pnl"].sum()
+            top_day = str(day.abs().idxmax())
+            abs_sum = float(day.abs().sum())
+            rest = g[g["entry_date"] != top_day]
             by_strategy.append({
                 "strategy": str(strat),
                 "n": int(len(g)),
                 "win_pct": round(float((g["net_pct"] > 0).mean() * 100), 1),
                 "avg_net": round(float(g["net_pct"].mean()), 2),
+                "med_net": round(float(g["net_pct"].median()), 2),
                 "pnl": int(g["pnl"].sum()),
+                "top_day": top_day,                                   # 손익 기여(절대값) 최대 진입일
+                "top_day_n": int((g["entry_date"] == top_day).sum()),
+                "top_day_pnl": int(day[top_day]),
+                "top_day_share": round(abs(float(day[top_day])) / abs_sum * 100, 1) if abs_sum else None,
+                "avg_ex_top": round(float(rest["net_pct"].mean()), 2) if len(rest) else None,
             })
         by_strategy.sort(key=lambda r: -r["pnl"])
 
