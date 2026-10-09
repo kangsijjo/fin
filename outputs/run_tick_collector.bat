@@ -29,6 +29,14 @@ if "!DOW!"=="6" (
     exit /b 0
 )
 
+REM -- [2026-10-09] KRX holiday skip (krx_holidays.txt via is_krx_holiday.ps1; fail-open) --
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0is_krx_holiday.ps1" >nul 2>&1
+if errorlevel 10 (
+    echo [%date% %time%] [SKIP] KRX holiday - no market. >> logs\tick_collector.log
+    endlocal
+    exit /b 0
+)
+
 REM -- [2026-08-20] log rotation. This was the ONLY daily log with no cleanup:
 REM    a single tick_collector.log had grown to 229 MB ("[DB] 1 tick stored" per
 REM    line, every trading day since June, never rotated). Every other runner

@@ -13,6 +13,9 @@ REM -- weekend skip --
 for /f %%I in ('powershell -NoProfile -Command "(Get-Date).DayOfWeek.value__"') do set "DOW=%%I"
 if "!DOW!"=="0" echo [SKIP] Sunday & endlocal & exit /b 0
 if "!DOW!"=="6" echo [SKIP] Saturday & endlocal & exit /b 0
+REM -- [2026-10-09] KRX holiday skip (krx_holidays.txt via is_krx_holiday.ps1; fail-open) --
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0is_krx_holiday.ps1" >nul 2>&1
+if errorlevel 10 echo [SKIP] KRX holiday & endlocal & exit /b 0
 
 REM -- log setup --
 if not exist "C:\fin\logs" mkdir "C:\fin\logs"

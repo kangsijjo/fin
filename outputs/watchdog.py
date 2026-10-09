@@ -51,6 +51,17 @@ TODAY = NOW.date()
 TODAY_STR = TODAY.strftime("%Y%m%d")
 IS_WEEKDAY = TODAY.weekday() < 5
 
+# [2026-10-09] KRX 휴장일 반영. 종전엔 '평일=거래일'이라 공휴일마다 오경보가 났다:
+#   추석(09-24·25)을 영업일로 세서 '전섹터 지표 7~8영업일 미갱신'(실제론 정상) →
+#   사용자가 수동으로 ai_dataset 재실행(10-02). 휴장일엔 매매 bat 이 스킵하므로
+#   '오늘 매매 미실행' 판정도 거래일에만 해야 한다. 목록 없으면 빈 집합 = 종전 동작.
+try:
+    import market_calendar as _mc
+    _HOLIDAYS = _mc.load_holidays()
+except Exception:
+    _HOLIDAYS = set()
+IS_TRADING_DAY = IS_WEEKDAY and TODAY_STR not in _HOLIDAYS
+
 
 # ── 유틸 ──────────────────────────────────────────────────────────────────────
 def _after(hhmm: str) -> bool:
@@ -110,7 +121,10 @@ def _age_bdays(datestr):
         import numpy as np
         fmt = "%Y-%m-%d" if "-" in datestr else "%Y%m%d"
         d = datetime.strptime(datestr[:10], fmt).date()
-        return int(np.busday_count(d, TODAY))
+        # [2026-10-09] 공휴일도 제외(krx_holidays.txt) — 주말만 빼던 근사가 추석·대체공휴일
+        # 주간에 1~2일씩 과대계산해 오경보를 냈다.
+        hol = [f"{h[:4]}-{h[4:6]}-{h[6:8]}" for h in _HOLIDAYS]
+        return int(np.busday_count(d, TODAY, holidays=hol))
     except Exception:
         return _age_days(datestr)
 
@@ -248,7 +262,12 @@ def check_data():
     specs = [("korea_stocks", "date", 5, True), ("supply_demand", "date", 5, True),
              ("korea_indicators", "date", 7, True), ("foreign_ratio", "date", 5, True),
              ("usa_stocks", "date", 6, False), ("macro_indicators", "date", 6, False),
-             ("credit_balance", "date", 10, False), ("news", "pubDate", 6, False)]
+             ("credit_balance", "date", 8, True), ("news", "pubDate", 6, False)]
+    # [2026-10-09] credit_balance 10달력일 → 8영업일(휴장일 제외). 주 1회(토 08:00) 수집 +
+    # 공표 지연(T+2 안팎)이라 토요일 아침 수집 직전엔 정상이어도 8영업일 안팎이 된다.
+    # 달력일 기준은 연휴 주간에 이를 넘겨 10-03 07:45 에 오경보(수집은 08:00 정상 완료)
+    # → 사용자가 run_credit 수동 실행(55분, 0행 추가). 영업일 기준이면 연휴 길이와 무관.
+    # 한 주 수집이 실패하면 다음 주 월요일쯤 9영업일을 넘겨 경보 — 감지력은 유지.
     for tbl, col, thr, use_bday in specs:
         latest = _max_date(con, tbl, col)
         age = _age_bdays(latest) if use_bday else _age_days(latest)
@@ -317,10 +336,24 @@ def check_indicator_coverage():
              f"있음. 복구: python -m src.processor.indicators all")]
 
 
+def check_holiday_calendar():
+    """[2026-10-09] krx_holidays.txt 가 비었거나, 12월인데 다음해 휴장일이 없으면 알림.
+    목록이 없으면 휴장일을 거래일로 취급(=종전 동작)할 뿐 매매가 깨지진 않지만,
+    휴장일 매매·오경보가 되살아나므로 KRX 공고(매년 12월) 반영을 상기시킨다."""
+    if not _HOLIDAYS:
+        return [("holiday_cal", "휴장일 달력", False,
+                 "krx_holidays.txt 가 없거나 비어 있음 — 공휴일을 거래일로 취급 중")]
+    if TODAY.month == 12 and not any(h.startswith(str(TODAY.year + 1)) for h in _HOLIDAYS):
+        return [("holiday_cal", "휴장일 달력", False,
+                 f"{TODAY.year + 1}년 KRX 휴장일이 krx_holidays.txt 에 없음 — "
+                 f"KRX 공고 확인 후 추가 필요(1월 1일부터 공휴일을 거래일로 오판)")]
+    return []
+
+
 def check_signals():
     """신호 생성 — 평일 18:35 이후, 오늘 live_signal/kis_signal 로그가 있나(=작업 실행됨)."""
     out = []
-    if IS_WEEKDAY and _after("18:35"):
+    if IS_TRADING_DAY and _after("18:35"):
         out.append(("sig_kiwoom", "키움 신호생성(18:30)", _ran_today("live_signal_*.log"),
                     "오늘 live_signal 미실행"))
         out.append(("sig_kis", "KIS 신호생성(18:31)", _ran_today("kis_signal_*.log"),
@@ -351,7 +384,7 @@ def check_idle_buying(days=5):
     주문 CSV 는 주문이 있는 날에만 생기므로 그것만 세면 창이 실제보다 길어져 둔감해진다.
     """
     out = []
-    if not (IS_WEEKDAY and _after("09:30")):
+    if not (IS_TRADING_DAY and _after("09:30")):
         return out
     try:
         # 최근 N 거래일(트레이더가 실제로 돈 날)
@@ -548,6 +581,12 @@ _TASK_OK_RESULTS = {
     267011:     "아직 실행된 적 없음",       # 0x41303
     267014:     "사용자가 종료",             # 0x41306
     2147750687: "이미 실행 중(중복 방지)",    # 0x8004131F
+    # [2026-10-09] 0x800710E0 '요청 거부' — 트리거가 떴는데 시작이 거부됨. 두 경우뿐이다:
+    #  (a) 이전 인스턴스가 아직 실행 중(IgnoreNew) — 상주형 KIS_Tick_Collector 가 부팅 때
+    #      AtLogOn+밀린 트리거 2개를 받으며 매번 이 코드 → 10-02 이후 매일 오경보.
+    #  (b) 배터리 조건 거부 — fix_task_power.bat / register_tasks.ps1(@pw)로 제거됨.
+    # 어느 쪽이든 '실제로 안 돈 매매'는 check_trading/check_signals 가 결과물로 따로 잡는다.
+    2147946720: "시작 거부(이미 실행 중)",   # 0x800710E0
 }
 
 # 자주 보는 실패 코드는 뜻을 붙여준다(숫자만 보면 아무도 조치하지 않는다).
@@ -708,12 +747,12 @@ def check_trading():
     [2026-07-07] 키움 추가 — 기존엔 KIS 만 감시해 키움 매매(09:03)가 조용히
     죽어도 못 잡았음. 키움 로그는 outputs\\logs\\kiwoom_YYYYMMDD.log."""
     out = []
-    if IS_WEEKDAY and _after("09:10"):
+    if IS_TRADING_DAY and _after("09:10"):
         out.append(("trade_kis", "KIS 매매(09:01)", _ran_today("kis_trader_*.log"),
                     "오늘 kis_trader 미실행"))
         out.append(("trade_kiwoom", "키움 매매(09:03)", _ran_today(f"kiwoom_{TODAY_STR}.log"),
                     "오늘 kiwoom_trader 미실행"))
-    if IS_WEEKDAY and _after("15:35"):
+    if IS_TRADING_DAY and _after("15:35"):
         # [2026-07-12] 로그 '파일 존재'는 09:03 매수 실행이 이미 만족시킴 — 15:21 매도
         # (만기+서킷브레이커, 키움의 유일한 청산 경로)가 죽어도 무경보이던 사각지대.
         # 오후 실행이 남기는 '오후 모드' 마커로 실행 여부를 직접 확인.
@@ -738,7 +777,7 @@ def check_snapshots():
     [2026-07-07] 키움 snapshot.json 추가 — 15:40 run_kis_status.bat 가 키움 status 도
     함께 갱신하므로 같은 시각 기준으로 점검(기존엔 KIS 만 감시)."""
     out = []
-    if IS_WEEKDAY and _after("15:45"):
+    if IS_TRADING_DAY and _after("15:45"):
         out.append(("snap_kis", "KIS 잔고 스냅샷(15:40)", _snap_date("kis_snapshot.json") == TODAY_STR,
                     f"오늘 미갱신(최신 {_snap_date('kis_snapshot.json') or '없음'})"))
         out.append(("snap_kiwoom", "키움 잔고 스냅샷(15:40)", _snap_date("snapshot.json") == TODAY_STR,
@@ -811,7 +850,7 @@ def _no_run_days(pattern, look=6):
     n = 0
     d = TODAY
     for _ in range(look):
-        if d.weekday() < 5:
+        if d.weekday() < 5 and d.strftime("%Y%m%d") not in _HOLIDAYS:   # 휴장일 제외(10-09)
             if d.strftime("%Y%m%d") in have:
                 break
             n += 1
@@ -846,6 +885,7 @@ def run_all_checks():
     results.append(check_scheduler())
     results += check_data()
     results += check_indicator_coverage()   # 전섹터 지표 붕괴(2026-09-04 신설)
+    results += check_holiday_calendar()     # 휴장일 목록 누락(2026-10-09 신설)
     results += check_signals()
     results += check_trading()
     results += check_snapshots()

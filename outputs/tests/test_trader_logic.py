@@ -693,13 +693,111 @@ def test_universe_gap_ignores_weekend_and_holiday_marker(tmp_path):
     (tmp_path / "20260817.csv.holiday").write_text("", encoding="utf-8")  # 대체휴일
 
     # 금 → 화(주말 + 휴장일 마커) = 빠진 거래일 없음
-    assert mc.universe_gap("20260814", "20260818", d) == (0, [])
-    assert mc.check_signal_freshness("20260814", "T", "20260818", d) == (True, None)
+    # [2026-10-09] holidays=set() — 08-17 은 krx_holidays.txt 에도 있으므로, 이 테스트는
+    # '마커' 경로만 격리해서 본다(목록 경로는 아래 test_universe_gap_uses_holiday_list).
+    assert mc.universe_gap("20260814", "20260818", d, holidays=set()) == (0, [])
+    assert mc.check_signal_freshness("20260814", "T", "20260818", d,
+                                     holidays=set()) == (True, None)
 
     # 마커가 없으면 그 평일은 '빠진 거래일'
     (tmp_path / "20260817.csv.holiday").unlink()
-    n, missing = mc.universe_gap("20260814", "20260818", d)
+    n, missing = mc.universe_gap("20260814", "20260818", d, holidays=set())
     assert (n, missing) == (1, ["20260817"])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# KRX 휴장일 목록 + 신선도 대기 — 2026-10-09 신설
+#   실사고: (1) .holiday 마커는 수집기가 '사후'에 만들어, PC 가 꺼져 있던 10-05(개천절
+#   대체공휴일)를 10-06 아침 '빠진 거래일'로 오판. (2) 부팅 직후 신호 작업이 수집보다
+#   1분 먼저 돌아 10-02 데이터로 '신규 0건'(10-08) → 수동 재실행.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_universe_gap_uses_holiday_list_without_marker(tmp_path):
+    import market_calendar as mc
+    d = str(tmp_path)
+    (tmp_path / "20261002.csv").write_text("x", encoding="utf-8")         # 금
+    # 10-05(월) 마커 없음 — 목록에 있으면 휴장, 없으면 누락
+    assert mc.universe_gap("20261002", "20261006", d, holidays={"20261005"}) == (0, [])
+    assert mc.universe_gap("20261002", "20261006", d, holidays=set()) == (1, ["20261005"])
+
+
+def test_holiday_file_loads_and_covers_2026_markers():
+    """실파일 형식 회귀 — 주석/설명 허용, 앞 8자리만. 2026 확정 휴장일 포함."""
+    import market_calendar as mc
+    h = mc.load_holidays()
+    for ds in ("20260924", "20260925", "20261005", "20261009", "20261231"):
+        assert ds in h
+    assert not any(len(x) != 8 for x in h)
+    assert mc.load_holidays(os.path.join(OUTPUTS, "no_such_file.txt")) == set()  # fail-open
+
+
+def test_trading_day_helpers():
+    import market_calendar as mc
+    from datetime import date, datetime
+    hol = {"20261005", "20261009"}
+    assert mc.is_trading_day(date(2026, 10, 8), hol)
+    assert not mc.is_trading_day(date(2026, 10, 9), hol)          # 한글날
+    assert not mc.is_trading_day(date(2026, 10, 10), hol)         # 토
+    assert mc.prev_trading_day(date(2026, 10, 6), hol) == date(2026, 10, 2)   # 주말+대체휴일
+    # 16:00 전엔 직전 거래일, 거래일 16:00 이후엔 당일, 휴장일엔 직전 거래일
+    assert mc.expected_universe_date(datetime(2026, 10, 8, 11, 20), hol) == "20261007"
+    assert mc.expected_universe_date(datetime(2026, 10, 8, 18, 30), hol) == "20261008"
+    assert mc.expected_universe_date(datetime(2026, 10, 9, 18, 30), hol) == "20261008"
+
+
+def test_wait_until_fresh_returns_when_data_arrives(tmp_path, monkeypatch):
+    """10-08 재현: 11:20 에 10-02 까지만 있음 → 대기 중 10-07 파일 도착 → 0 반환."""
+    import market_calendar as mc
+    from datetime import datetime
+    monkeypatch.setattr(mc, "load_holidays", lambda path=None: {"20261005"})
+    (tmp_path / "20261002.csv").write_text("x", encoding="utf-8")
+    calls = []
+
+    def fake_sleep(sec):
+        calls.append(sec)
+        if len(calls) == 2:                                   # 2분 뒤 수집 완료
+            (tmp_path / "20261007.csv").write_text("x", encoding="utf-8")
+
+    rc = mc.wait_until_fresh(30, 60, data_dir=str(tmp_path), notify=False,
+                             _now=lambda: datetime(2026, 10, 8, 11, 20), _sleep=fake_sleep)
+    assert rc == 0 and len(calls) == 2
+
+
+def test_wait_until_fresh_times_out_but_does_not_raise(tmp_path, monkeypatch):
+    import market_calendar as mc
+    from datetime import datetime
+    monkeypatch.setattr(mc, "load_holidays", lambda path=None: set())
+    (tmp_path / "20261002.csv").write_text("x", encoding="utf-8")
+    rc = mc.wait_until_fresh(3, 60, data_dir=str(tmp_path), notify=False,
+                             _now=lambda: datetime(2026, 10, 8, 11, 20), _sleep=lambda s: None)
+    assert rc == 3
+
+
+def test_wait_until_fresh_immediate_when_fresh(tmp_path, monkeypatch):
+    import market_calendar as mc
+    from datetime import datetime
+    monkeypatch.setattr(mc, "load_holidays", lambda path=None: set())
+    (tmp_path / "20261008.csv").write_text("x", encoding="utf-8")
+    slept = []
+    rc = mc.wait_until_fresh(30, 60, data_dir=str(tmp_path), notify=False,
+                             _now=lambda: datetime(2026, 10, 8, 18, 30), _sleep=slept.append)
+    assert rc == 0 and slept == []
+
+
+def test_watchdog_business_age_skips_holidays(monkeypatch):
+    """추석 주간 오경보 재현: 마지막 full 09-23 → 10-02 는 5영업일(연휴 2일 제외)."""
+    import watchdog as wd
+    from datetime import date
+    monkeypatch.setattr(wd, "TODAY", date(2026, 10, 2))
+    monkeypatch.setattr(wd, "_HOLIDAYS", {"20260924", "20260925"})
+    assert wd._age_bdays("20260923") == 5
+    monkeypatch.setattr(wd, "_HOLIDAYS", set())
+    assert wd._age_bdays("20260923") == 7          # 종전 계산(오경보 원인)
+
+
+def test_watchdog_task_refused_code_is_not_failure():
+    import watchdog as wd
+    assert 2147946720 in wd._TASK_OK_RESULTS       # 0x800710E0
 
 
 def test_signal_freshness_warns_then_blocks(tmp_path):
@@ -827,6 +925,71 @@ def test_probe_cancel_helper_parses_order_no():
     import preopen_probe as pp
     assert "취소 생략" in pp._cancel_kiwoom("", "005930")
     assert "취소 생략" in pp._cancel_kiwoom("접수됨", "005930")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 탐침 주문 취소 — 2026-10-09
+#   실사고 09-28: 탐침 −29% 지정가 1주가 양 계좌에서 체결(0010S0 신규상장주 급락).
+#   ① 키움 주문번호가 "0001671)" 로 파싱돼 즉시취소·잔재회수가 매번 실패
+#   ② KIS 는 취소 경로가 없었고 주문번호도 소문자 키로 읽어 빈 값
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _FakeKiwoomApi:
+    def __init__(self, unfilled=()):
+        self.cancelled = []
+        outer = self
+
+        class _Order:
+            def stock_cancel_order_request_kt10003(self, **kw):
+                outer.cancelled.append(kw["orig_ord_no"])
+                return {"return_code": 0}
+
+        class _Acct:
+            def unfilled_orders_request_ka10075(self, **kw):
+                return {"oso": [dict(u) for u in unfilled]}
+
+        self.order, self.acct = _Order(), _Acct()
+
+
+def test_probe_kiwoom_cancel_strips_closing_bracket(monkeypatch, tmp_path):
+    import preopen_probe as pp
+    import kiwoom_trader as kt
+    api = _FakeKiwoomApi()
+    monkeypatch.setattr(kt, "get_api", lambda: api)
+    monkeypatch.setattr(pp, "PROBE_ORDER_LOG", str(tmp_path / "orders.json"))
+    res = pp._cancel_kiwoom("접수됨(주문번호 0001671)", "0010S0")
+    assert api.cancelled == ["0001671"], "닫는 괄호가 주문번호에 섞이면 취소가 형식오류로 거부된다"
+    assert res == "취소됨(0001671)"
+
+
+def test_probe_cleanup_matches_legacy_bracketed_records(monkeypatch, tmp_path):
+    """과거에 '0004542)' 로 저장된 기록도 미체결 '0004542' 와 매칭돼 회수돼야 한다."""
+    import json
+    import preopen_probe as pp
+    import kiwoom_trader as kt
+    log = tmp_path / "orders.json"
+    log.write_text(json.dumps([{"at": "2026-10-06 08:50:05", "code": "468670",
+                                "ord_no": "0004542)"}]), encoding="utf-8")
+    api = _FakeKiwoomApi(unfilled=[{"ord_no": "0004542", "stk_cd": "468670", "stk_nm": "x"},
+                                   {"ord_no": "0009999", "stk_cd": "005930", "stk_nm": "user"}])
+    monkeypatch.setattr(kt, "get_api", lambda: api)
+    monkeypatch.setattr(pp, "PROBE_ORDER_LOG", str(log))
+    assert pp.cleanup_leftover_probe_orders(verbose=False) == 1
+    assert api.cancelled == ["0004542"], "탐침이 아닌 주문(0009999)은 절대 건드리면 안 된다"
+
+
+def test_probe_kis_cancel_without_order_no_alerts(captured_notifications):
+    import preopen_probe as pp
+    pp._LAST_KIS_ORDER.clear()
+    assert "취소 생략" in pp._cancel_kis("접수됨(주문번호 )", "0010S0")
+    assert any("취소 실패" in m for m in captured_notifications), "살아 있는 주문을 알리지 않았다"
+
+
+def test_probe_kis_is_wired_to_canceller():
+    import inspect
+    import preopen_probe as pp
+    src = inspect.getsource(pp.main)
+    assert '("kis", probe_kis, _cancel_kis)' in src, "KIS 탐침이 접수돼도 취소하지 않는다"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

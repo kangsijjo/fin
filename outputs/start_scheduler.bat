@@ -22,4 +22,4 @@ echo [%date% %time%] Starting scheduler >> "%LOG%"
 start "StockAI-Scheduler" /min cmd /c "venv\Scripts\python.exe -u scheduler.py >> C:\fin\logs\scheduler.log 2>&1"
 echo [%date% %time%] done >> "%LOG%"
 endlocal
-
+

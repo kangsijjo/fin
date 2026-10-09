@@ -159,10 +159,29 @@ def _is_weekday():
     매매/모니터 작업은 평일에만 동작하도록 차단한다."""
     return datetime.now().weekday() < 5
 
+_KRX_HOLIDAY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "..", "outputs", "krx_holidays.txt")
+
+
+def _is_krx_holiday():
+    """[2026-10-09] KRX 휴장일(천억이 outputs/krx_holidays.txt — 단일 출처) 여부.
+    10-09 한글날 휴장에도 스캐너가 분당 KIS 를 폴링해 트레이더와 초당 호출한도
+    (EGW00201)를 다퉜다. 파일 없음/읽기 실패 = False(종전 동작, fail-open)."""
+    today = datetime.now().strftime("%Y%m%d")
+    try:
+        with open(_KRX_HOLIDAY_FILE, encoding="utf-8-sig") as f:
+            return any(line.strip()[:8] == today for line in f)
+    except Exception:
+        return False
+
+
 def korea_market_scanner_job():
     """매일 09:00 - 거래량/등락률 상위 종목 분당 폴링 (live_movers 누적, 15:30 자동 종료).
     매수에는 미연결, 데이터 누적만."""
     if not _is_weekday():
+        return
+    if _is_krx_holiday():
+        log("한국 시장 스캐너 건너뜀 — KRX 휴장일")
         return
     log("===== 한국 시장 스캐너 시작 =====")
     subprocess.Popen(

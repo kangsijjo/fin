@@ -10,6 +10,9 @@ REM -- skip weekends --
 for /f %%I in ('powershell -NoProfile -Command "(Get-Date).DayOfWeek.value__"') do set "DOW=%%I"
 if "!DOW!"=="0" endlocal & exit /b 0
 if "!DOW!"=="6" endlocal & exit /b 0
+REM -- [2026-10-09] KRX holiday skip (krx_holidays.txt via is_krx_holiday.ps1; fail-open) --
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0is_krx_holiday.ps1" >nul 2>&1
+if errorlevel 10 endlocal & exit /b 0
 
 REM -- market hours only. [2026-07-12 fix] '0915' fails octal parse -> string
 REM    compare bug skipped ALL 09:xx runs daily; '1' prefix forces decimal compare.

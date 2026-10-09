@@ -4,6 +4,11 @@ REM Runs ~18:10, after the 16:00-18:00 after-hours session. Args pass through to
 setlocal EnableExtensions
 set PYTHONIOENCODING=utf-8
 cd /d "%~dp0"
+REM -- [2026-10-09] KRX holiday skip, scheduled run only (--probe etc. still run) --
+if "%~1"=="" (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0is_krx_holiday.ps1" >nul 2>&1
+    if errorlevel 10 ( echo [SKIP] KRX holiday & endlocal & exit /b 0 )
+)
 if not exist "C:\fin\logs" mkdir "C:\fin\logs"
 for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmm"') do set "DT=%%I"
 set "LOG=C:\fin\logs\after_market_%DT%.log"

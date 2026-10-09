@@ -30,6 +30,14 @@ endlocal
 exit /b 0
 
 :weekday
+REM -- [2026-10-09] KRX holiday skip (krx_holidays.txt via is_krx_holiday.ps1; fail-open) --
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0is_krx_holiday.ps1" >nul 2>&1
+if errorlevel 10 (
+    echo [SKIP] KRX holiday.
+    if /i not "%1"=="auto" pause
+    endlocal
+    exit /b 0
+)
 set "LOGDIR=logs"
 if not exist "!LOGDIR!" mkdir "!LOGDIR!"
 set "LOGFILE=!LOGDIR!\kiwoom_!TODAY!.log"

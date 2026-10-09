@@ -21,6 +21,19 @@ preopen_probe.py — '장 시작 동시호가(08:30~09:00) 주문 수용 여부'
       탐침이 1회성일 땐 눈에 안 띄었지만 계좌 이상 시 매일 재탐침하도록 바꾸면서
       매일 24.1만원이 하루 종일 잠기는 문제가 됐다(실측 08-21: 9,158,011 -> 8,916,171).
       KIS 는 취소 경로를 안 쓴다 — 애초에 접수가 안 되는 상태라 취소할 주문이 없다.
+      [2026-10-09] ↑ 두 전제가 모두 깨져 **탐침 주문이 실제로 체결됐다**(09-28, 양 계좌
+      0010S0 1주씩 32,850원 — 신규상장주가 그날 −30% 가까이 급락).
+        ① 키움 즉시취소가 한 번도 성공한 적이 없었다 — 주문번호를 메시지에서
+           `주문번호\\s*(\\S+)` 로 뽑아 "0001671)" 처럼 ')' 까지 붙었고, 취소 API 가
+           "입력 값 형식 오류(orig_ord_no)"로 매번 거부. 같은 값이 잔재 회수 기록에도
+           저장돼 다음날 회수도 매칭 실패. → 영숫자만 추출 + 저장값 정규화.
+        ② KIS 계좌가 재발급돼 탐침을 '수용'하기 시작했는데 취소 경로가 없었고,
+           주문번호도 소문자 'odno' 로 읽어 빈 값이었다(응답 키는 'ODNO').
+           → ODNO/KRX_FWDG_ORD_ORGNO 파싱 + 정정취소(VTTC0803U)로 즉시 취소.
+        ③ 취소 실패 시 텔레그램 경보(주문이 장중 내내 살아 체결될 수 있으므로).
+        ④ −29% 는 가격제한폭(±30%) **안쪽**이라 '체결 불가'가 아니다. 즉시 취소가
+           본 대책이고, 보조로 전일 등락 10% 이상 종목(신규상장·테마 급변)은 탐침
+           종목에서 뺀다.
 
 결과는 db/preopen_probe_result.json 에 기록되며, 기록이 있으면 다시 탐침하지 않는다.
 단, 계좌 단위 이상(fatal)이 기록된 계좌만 매일 재탐침한다 — 정상 계좌는 다시 찌르지
@@ -88,6 +101,13 @@ def _pick_probe_stock():
     d = d[(d["close"] > 1000) & (d["trading_value"] > 0)]      # 저가주 제외(호가단위 안정)
     if not len(d):
         return None, None
+    # [2026-10-09] 전일 급변 종목 제외 — 09-28 탐침이 상장 직후 신규주를 골랐다가 그날
+    # 급락으로 −29% 지정가가 체결됐다. 조용했던 종목일수록 하루 −29% 도달 확률이 낮다.
+    # (본 대책은 즉시 취소. 걸러서 비면 종전처럼 전체에서 고른다)
+    if "change_pct" in d.columns:
+        calm = d[pd.to_numeric(d["change_pct"], errors="coerce").abs() < 10]
+        if len(calm):
+            d = calm
     top = d.nlargest(1, "trading_value").iloc[0]
     return str(top["code"]).zfill(6), float(top["close"])
 
@@ -110,6 +130,24 @@ def probe_kiwoom(price, code):
 
 
 PROBE_ORDER_LOG = "./db/preopen_probe_orders.json"
+
+
+def _norm_ono(v):
+    """주문번호 정규화 — 영숫자만. 과거 기록엔 '0001671)' 처럼 괄호가 붙어 저장돼 있다."""
+    import re as _re
+    return _re.sub(r"[^0-9A-Za-z]", "", str(v or ""))
+
+
+def _alert_cancel_fail(label, code, ono, err):
+    """탐침 주문 취소 실패 = 주문이 장중 살아 있어 체결될 수 있음 → 즉시 알린다."""
+    try:
+        import notifier
+        notifier.safe_send(
+            f"⚠ [탐침] {label} 탐침 주문 취소 실패 — {code} 1주(주문번호 {ono or '미상'})가 "
+            f"살아 있습니다.\n  급락 시 체결될 수 있으니 HTS/MTS 미체결에서 직접 취소해 주세요.\n"
+            f"  사유: {str(err)[:100]}")
+    except Exception:
+        pass
 
 
 def _remember_probe_order(code, ono):
@@ -145,7 +183,7 @@ def cleanup_leftover_probe_orders(verbose=True):
         rec = _j.load(open(PROBE_ORDER_LOG, encoding="utf-8"))
     except Exception:
         rec = []
-    mine = {str(r.get("ord_no")): r for r in rec if r.get("ord_no")}
+    mine = {_norm_ono(r.get("ord_no")): r for r in rec if _norm_ono(r.get("ord_no"))}
     if not mine:
         return 0
 
@@ -162,7 +200,7 @@ def cleanup_leftover_probe_orders(verbose=True):
 
     n = 0
     for x in rows:
-        ono = str(x.get("ord_no", ""))
+        ono = _norm_ono(x.get("ord_no", ""))
         if ono not in mine:
             continue                      # 탐침이 낸 주문이 아니면 절대 건드리지 않는다
         code = str(x.get("stk_cd", "")).zfill(6)
@@ -177,8 +215,8 @@ def cleanup_leftover_probe_orders(verbose=True):
             print(f"[probe][cleanup][warn] {ono} 취소 실패: {str(e)[:80]}")
     if n:
         try:
-            keep = [r for r in rec if str(r.get("ord_no")) not in
-                    {str(x.get("ord_no")) for x in rows}]
+            keep = [r for r in rec if _norm_ono(r.get("ord_no")) not in
+                    {_norm_ono(x.get("ord_no")) for x in rows}]
             with open(PROBE_ORDER_LOG, "w", encoding="utf-8") as f:
                 _j.dump(keep, f, ensure_ascii=False, indent=2)
         except Exception:
@@ -197,8 +235,10 @@ def _cancel_kiwoom(msg, code):
     cleanup_leftover_probe_orders 가 다음 실행에서 회수하므로 예외는 던지지 않는다.
     """
     import re as _re
-    m = _re.search(r"주문번호\s*(\S+)", msg or "")
+    # [2026-10-09] (\S+) 는 "0001671)" 처럼 닫는 괄호까지 잡아 취소가 매번 형식오류였다.
+    m = _re.search(r"주문번호\s*([0-9A-Za-z]+)", msg or "")
     if not m:
+        _alert_cancel_fail("kiwoom", code, "", "응답에서 주문번호를 찾지 못함")
         return "주문번호 미상 — 취소 생략"
     ono = m.group(1)
     _remember_probe_order(code, ono)      # 취소가 실패해도 나중에 회수할 수 있게
@@ -213,6 +253,7 @@ def _cancel_kiwoom(msg, code):
     except Exception as e:
         print(f"[probe][kiwoom][warn] 탐침 주문 {ono} 취소 실패({str(e)[:80]}) "
               f"— 주문번호를 남겼으니 다음 탐침 실행이 회수한다(그때까지 예수금 묶임)")
+        _alert_cancel_fail("kiwoom", code, ono, e)
         return f"취소실패: {str(e)[:80]}"
 
 
@@ -259,9 +300,53 @@ def probe_kis(price, code):
         data = r.json()
         if data.get("rt_cd") != "0":
             return False, f"거부: {data.get('msg_cd','')} {data.get('msg1','')}"[:200]
-        return True, f"접수됨(주문번호 {data.get('output', {}).get('odno', '')})"
+        # [2026-10-09] 응답 키는 대문자(ODNO / KRX_FWDG_ORD_ORGNO) — 종전 소문자 'odno' 는
+        # 항상 빈 값이라 로그가 "접수됨(주문번호 )" 였고 취소할 근거도 없었다.
+        out = data.get("output", {}) or {}
+        odno = str(out.get("ODNO") or out.get("odno") or "")
+        orgno = str(out.get("KRX_FWDG_ORD_ORGNO") or out.get("krx_fwdg_ord_orgno") or "")
+        _LAST_KIS_ORDER.clear()
+        _LAST_KIS_ORDER.update({"odno": odno, "orgno": orgno})
+        return True, f"접수됨(주문번호 {odno})"
     except Exception as e:
         return False, str(e)[:200]
+
+
+_LAST_KIS_ORDER = {}     # probe_kis → _cancel_kis 전달용(ODNO + 주문조직번호)
+
+
+def _cancel_kis(msg, code):
+    """[2026-10-09 신설] 접수된 KIS 탐침 주문을 즉시 취소(국내주식 정정취소, 모의 VTTC0803U).
+
+    09-28 KIS 탐침이 취소 경로 없이 살아 있다가 0010S0 급락으로 체결됐다. KIS 일반
+    주문은 당일 유효라 장 마감엔 사라지지만 **장중엔 살아 있어** 체결 위험이 있다.
+    """
+    import requests
+    odno, orgno = _LAST_KIS_ORDER.get("odno", ""), _LAST_KIS_ORDER.get("orgno", "")
+    if not odno or not orgno:
+        _alert_cancel_fail("kis", code, odno, "응답에 주문번호/주문조직번호 없음")
+        return "주문번호 미상 — 취소 생략"
+    try:
+        import kis_trader as kx
+        cl = kx.KISMockClient()
+        body = {"CANO": kx._CANO, "ACNT_PRDT_CD": kx._ACNT_PRDT_CD,
+                "KRX_FWDG_ORD_ORGNO": orgno, "ORGN_ODNO": odno,
+                "ORD_DVSN": "00", "RVSE_CNCL_DVSN_CD": "02",       # 02 = 취소
+                "ORD_QTY": "0", "ORD_UNPR": "0", "QTY_ALL_ORD_YN": "Y"}
+        hk = cl._hashkey(body)
+        r = requests.post(
+            f"{kx.MOCK_URL}/uapi/domestic-stock/v1/trading/order-rvsecncl",
+            headers=cl._hdrs("VTTC0803U", hk), json=body, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        if data.get("rt_cd") != "0":
+            raise RuntimeError(f"{data.get('msg_cd','')} {data.get('msg1','')}")
+        print(f"[probe][kis] 탐침 주문 {odno} 취소 완료")
+        return f"취소됨({odno})"
+    except Exception as e:
+        print(f"[probe][kis][warn] 탐침 주문 {odno} 취소 실패({str(e)[:80]}) — 장중 체결 위험")
+        _alert_cancel_fail("kis", code, odno, e)
+        return f"취소실패: {str(e)[:80]}"
 
 
 def probe_targets(prev):
@@ -359,7 +444,7 @@ def main():
 
     fatal = []
     for label, fn, canceller in (("kiwoom", probe_kiwoom, _cancel_kiwoom),
-                                 ("kis", probe_kis, None)):
+                                 ("kis", probe_kis, _cancel_kis)):
         if label not in targets:
             # 이번엔 찌르지 않는다 — 직전 실측을 그대로 승계(주문을 아끼는 것이 목적)
             keep = prev_res.get(label)
@@ -423,8 +508,9 @@ def main():
         else:
             notifier.safe_send(
                 f"🔬 [장전 동시호가 탐침] {res['verdict']}\n"
-                f"  키움: {res['kiwoom']['msg'][:60]}\n  KIS: {res['kis']['msg'][:60]}\n"
-                f"  (체결불가 지정가 1주 — 미체결분은 장 마감 시 자동 실효)")
+                f"  키움: {res['kiwoom']['msg'][:60]} / {res['kiwoom'].get('cancelled', '-')}\n"
+                f"  KIS: {res['kis']['msg'][:60]} / {res['kis'].get('cancelled', '-')}\n"
+                f"  (−29% 지정가 1주 — 접수 즉시 취소. 취소 실패 시 별도 경보)")
     except Exception:
         pass
 

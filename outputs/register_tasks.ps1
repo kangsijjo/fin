@@ -14,12 +14,20 @@ try {
     $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
     $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
 
+    # [2026-10-09] Power condition: allow start/continue on battery for EVERY task.
+    # Default settings = "start only on AC power". On battery each trigger was refused
+    # (LastTaskResult 0x800710E0) and all missed jobs fired in one burst when AC returned
+    # (10-09: 07:45/08:50/09:00/09:05/09:15/09:20 jobs all ran at 11:02).
+    # Splatted into every New-ScheduledTaskSettingsSet @pw below. Legacy root KIS_* tasks:
+    # use fix_task_power.bat (patches existing tasks in place).
+    $pw = @{ AllowStartIfOnBatteries = $true; DontStopIfGoingOnBatteries = $true }
+
     # 1. Data collector scheduler: at logon + daily 06:10 (crash recovery)
     Write-Host "[1/3] Registering data collector scheduler..."
     $a1 = New-ScheduledTaskAction -Execute "C:\fin\outputs\start_scheduler.bat"
     $t1a = New-ScheduledTaskTrigger -AtLogOn
     $t1b = New-ScheduledTaskTrigger -Daily -At "06:10"
-    $s1  = New-ScheduledTaskSettingsSet `
+    $s1  = New-ScheduledTaskSettingsSet @pw `
                -MultipleInstances IgnoreNew `
                -ExecutionTimeLimit ([TimeSpan]::Zero) `
                -StartWhenAvailable
@@ -32,7 +40,7 @@ try {
     $a2 = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_live_signal.bat"
     $t2  = New-ScheduledTaskTrigger -Weekly `
                -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "18:30"
-    $s2  = New-ScheduledTaskSettingsSet `
+    $s2  = New-ScheduledTaskSettingsSet @pw `
                -StartWhenAvailable `
                -ExecutionTimeLimit (New-TimeSpan -Hours 2)
     Register-ScheduledTask -TaskName "StockAI\LiveSignal" `
@@ -43,7 +51,7 @@ try {
     Write-Host "[3/6] Registering weekly report..."
     $a3 = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_paper_audit.bat"
     $t3  = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At "09:00"
-    $s3  = New-ScheduledTaskSettingsSet `
+    $s3  = New-ScheduledTaskSettingsSet @pw `
                -StartWhenAvailable `
                -ExecutionTimeLimit (New-TimeSpan -Hours 1)
     Register-ScheduledTask -TaskName "StockAI\PaperAudit" `
@@ -55,7 +63,7 @@ try {
     $a4 = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_kis_signal.bat"
     $t4  = New-ScheduledTaskTrigger -Weekly `
                -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "18:31"
-    $s4  = New-ScheduledTaskSettingsSet `
+    $s4  = New-ScheduledTaskSettingsSet @pw `
                -StartWhenAvailable `
                -ExecutionTimeLimit (New-TimeSpan -Hours 2)
     Register-ScheduledTask -TaskName "StockAI\KisSignal" `
@@ -70,7 +78,7 @@ try {
     # [2026-07-21] RestartOnFailure: bat 재시도 루프(5분x2)의 OS 레벨 백스톱 —
     # bat 프로세스 자체가 못 뜨거나 강제종료돼 exit!=0 인 경우 스케줄러가 재시작.
     # 매수는 orders CSV 멱등키, 매도는 재계산이라 재실행 안전(설계 확인됨).
-    $s5  = New-ScheduledTaskSettingsSet `
+    $s5  = New-ScheduledTaskSettingsSet @pw `
                -MultipleInstances IgnoreNew `
                -StartWhenAvailable `
                -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 5) `
@@ -102,7 +110,7 @@ try {
     # [2026-07-12] 12h 한도 제거 — start 로 띄운 상주 서버가 잡 오브젝트에 남으면
     # 로그온 12시간 뒤 트리 강제종료로 대시보드가 죽고 재로그온까지 미복구.
     # 상주 데몬 패턴은 Scheduler 작업과 동일하게 무제한이 맞음.
-    $s6  = New-ScheduledTaskSettingsSet `
+    $s6  = New-ScheduledTaskSettingsSet @pw `
                -MultipleInstances IgnoreNew `
                -ExecutionTimeLimit ([TimeSpan]::Zero)
     Register-ScheduledTask -TaskName "StockAI\Dashboard" `
@@ -115,7 +123,7 @@ try {
     $a7  = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_kis_status.bat" -Argument "auto"
     $t7  = New-ScheduledTaskTrigger -Weekly `
                -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "15:40"
-    $s7  = New-ScheduledTaskSettingsSet `
+    $s7  = New-ScheduledTaskSettingsSet @pw `
                -StartWhenAvailable `
                -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
     Register-ScheduledTask -TaskName "StockAI\KisBalance" `
@@ -131,7 +139,7 @@ try {
                 -RepetitionInterval (New-TimeSpan -Minutes 15) `
                 -RepetitionDuration (New-TimeSpan -Hours 6 -Minutes 15)).Repetition
     $t8.Repetition = $rep
-    $s8 = New-ScheduledTaskSettingsSet `
+    $s8 = New-ScheduledTaskSettingsSet @pw `
               -MultipleInstances IgnoreNew `
               -StartWhenAvailable `
               -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
@@ -146,7 +154,7 @@ try {
     #    ※ 인자 'auto' 없으면 bat 이 pause 로 멈춤 → 반드시 -Argument.
     Write-Host "[9/9] Registering Kiwoom trader (AM/PM split)..."
     Unregister-ScheduledTask -TaskName "KiwoomTrader" -TaskPath "\StockAI\" -Confirm:$false -ErrorAction SilentlyContinue
-    $s9  = New-ScheduledTaskSettingsSet `
+    $s9  = New-ScheduledTaskSettingsSet @pw `
                -MultipleInstances IgnoreNew `
                -StartWhenAvailable `
                -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 5) `
@@ -173,7 +181,7 @@ try {
                   -RepetitionInterval (New-TimeSpan -Minutes 15) `
                   -RepetitionDuration (New-TimeSpan -Hours 5 -Minutes 45)).Repetition
     $t10.Repetition = $rep10
-    $s10 = New-ScheduledTaskSettingsSet `
+    $s10 = New-ScheduledTaskSettingsSet @pw `
                -MultipleInstances IgnoreNew `
                -StartWhenAvailable `
                -ExecutionTimeLimit (New-TimeSpan -Minutes 14)
@@ -185,7 +193,7 @@ try {
     Write-Host "[11/11] Registering weekly AI pipeline..."
     $a11 = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_ai_pipeline.bat" -Argument "auto"
     $t11 = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At "03:00"
-    $s11 = New-ScheduledTaskSettingsSet `
+    $s11 = New-ScheduledTaskSettingsSet @pw `
                -StartWhenAvailable `
                -ExecutionTimeLimit (New-TimeSpan -Hours 3)
     Register-ScheduledTask -TaskName "StockAI\AIPipeline" `
@@ -199,7 +207,7 @@ try {
     $a11b = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_pretrade_warmup.bat"
     $t11b = New-ScheduledTaskTrigger -Weekly `
                 -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "08:50"
-    $s11b = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable `
+    $s11b = New-ScheduledTaskSettingsSet @pw -MultipleInstances IgnoreNew -StartWhenAvailable `
                 -ExecutionTimeLimit (New-TimeSpan -Minutes 8)
     Register-ScheduledTask -TaskName "StockAI\PretradeWarmup" `
         -Action $a11b -Trigger $t11b -Settings $s11b -Principal $principal -Force | Out-Null
@@ -211,7 +219,7 @@ try {
     $t12a = New-ScheduledTaskTrigger -Daily -At "07:45"
     $t12b = New-ScheduledTaskTrigger -Daily -At "09:20"
     $t12c = New-ScheduledTaskTrigger -Daily -At "18:50"
-    $s12  = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+    $s12  = New-ScheduledTaskSettingsSet @pw -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
     Register-ScheduledTask -TaskName "StockAI\Watchdog" `
         -Action $a12 -Trigger $t12a,$t12b,$t12c -Settings $s12 -Principal $principal -Force | Out-Null
     Write-Host "[OK] StockAI\Watchdog (07:45/09:20/18:50, alert on problems)" -ForegroundColor Green
@@ -220,7 +228,7 @@ try {
     Write-Host "[13/13] Registering watchdog daily heartbeat..."
     $a13 = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_watchdog.bat" -Argument "--daily"
     $t13 = New-ScheduledTaskTrigger -Daily -At "23:00"
-    $s13 = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+    $s13 = New-ScheduledTaskSettingsSet @pw -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
     Register-ScheduledTask -TaskName "StockAI\WatchdogDaily" `
         -Action $a13 -Trigger $t13 -Settings $s13 -Principal $principal -Force | Out-Null
     Write-Host "[OK] StockAI\WatchdogDaily (daily 23:00 heartbeat)" -ForegroundColor Green
@@ -230,7 +238,7 @@ try {
     $a14 = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_after_market.bat"
     $t14 = New-ScheduledTaskTrigger -Weekly `
                -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "18:10"
-    $s14 = New-ScheduledTaskSettingsSet `
+    $s14 = New-ScheduledTaskSettingsSet @pw `
                -StartWhenAvailable `
                -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
     Register-ScheduledTask -TaskName "StockAI\AfterMarket" `

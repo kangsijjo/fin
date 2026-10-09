@@ -1,0 +1,4 @@
+# 2026-10-09: cmd.exe needs CRLF (LF-only .bat can break goto/call label lookup).
+# Stored as LF in the repo, checked out as CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
