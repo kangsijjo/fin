@@ -90,6 +90,8 @@ def simulate_capital(trades, initial_capital=10_000_000, max_concurrent=10,
     positions = []  # {code, exit_date, invested_value, entry_price, net_pct}
     equity_curve = []
     n_skipped = 0
+    taken_nets = []   # [2026-10-12] 슬롯이 실제로 산 매매의 net% — 신호 전체 평균과 다를 수 있다
+                      # (rsi_reversal: 신호 전체 +0.71% vs 슬롯 실매매 −1.62% → 자본 −100%)
     util_sum = 0.0
     days_recorded = 0
 
@@ -122,6 +124,7 @@ def simulate_capital(trades, initial_capital=10_000_000, max_concurrent=10,
                 "entry_price": row["entry_price"],
                 "net_pct": row["net_pct"],
             })
+            taken_nets.append(float(row["net_pct"]))
             cash -= invest
 
         # 3. 일별 equity 기록
@@ -179,6 +182,8 @@ def simulate_capital(trades, initial_capital=10_000_000, max_concurrent=10,
         "n_trades":        len(df),
         "years":           round(years, 2),
         "mtm":             use_mtm,
+        "taken_n":         len(taken_nets),
+        "taken_avg_net":   round(sum(taken_nets) / len(taken_nets), 2) if taken_nets else None,
     }
 
 

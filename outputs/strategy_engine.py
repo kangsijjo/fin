@@ -231,6 +231,86 @@ def verify_top(df_res, trades_by_name, top_n, oos_years, d_max):
     return pd.DataFrame(rows)
 
 
+# 라이브 운용 중인 전략 ↔ 엔진 이름 (대시보드 ★ 표시용)
+LIVE_MAP = {
+    "star_high_52w_20_filt": "키움 high_52w_filt",
+    "rsi_reversal":          "키움 rsi_reversal",
+    "rsi_vol":               "키움 rsi_vol",
+    "h52w_for3d_mkt":        "KIS h52w_for3d_mkt",
+    "for_high20_mkt":        "KIS for_high20_mkt",
+    "gc_for3d":              "KIS gc_for3d",
+}
+
+
+def run_full(strategies, df_all, oos_years=2.0, log=print):
+    """[2026-10-12] 전 전략 과거 백테스트 — **진짜 지표**(자본곡선, 10슬롯, 일별 MTM) + 최근 N년 표본외.
+
+    비교표(_stats)의 sharpe/mdd 는 매매목록 근사치라 실제와 크게 다를 수 있고, 무엇보다
+    '신호 평균'은 슬롯이 실제로 사는 매매와 다르다 — rsi_reversal 은 신호 전체 평균 +0.71%
+    인데 10슬롯이 실제로 산 매매(거래대금 큰 순)는 평균 −1.62%, 자본곡선 −100% 였다.
+    그래서 신호 평균(avg_net)과 슬롯 실매매 평균(slot_avg_net)을 나란히 남긴다.
+    한계: 엔진 전략은 손절/익절 없이 보유일 만기(라이브 KIS 손절·키움 익절 미반영).
+    반환: 전략별 1행 DataFrame (real_cagr_pct 내림차순).
+    """
+    import gc
+    import time
+    from capital_simulator import simulate_capital, build_price_lookup
+    # 메모리: 일봉(≈0.8GB) + 전체 가격조회표(≈0.45GB) + 백테스트 작업복사본이 겹치면 3GB 환경에서
+    # OOM(ma_ribbon_new 실측). → 조회표는 '백테스트가 끝난 뒤, 그 전략이 산 종목만'으로 만들고
+    # 시뮬 직후 해제한다. 달력(trading_dates)은 전체 기준 1회.
+    tds = sorted(df_all["date"].astype(str).unique().tolist())
+    d_min, d_max = str(df_all["date"].min()), str(df_all["date"].max())
+    cutoff = (datetime.strptime(d_max, "%Y%m%d")
+              - timedelta(days=int(oos_years * 365.25))).strftime("%Y%m%d")
+    log(f"  거래일 {len(tds):,}일 / 표본외 기준일 {cutoff}")
+
+    def _avg(ts):
+        return round(sum(t.net_pct for t in ts) / len(ts), 2) if ts else None
+
+    rows = []
+    for strat in strategies:
+        t1 = time.time()
+        try:
+            trades = strat.backtest(df_all.copy(), DEFAULT_COSTS) or []
+        except Exception as e:
+            log(f"  > {strat.name}: ERROR {e}")
+            rows.append({"strategy": strat.name, "live": LIVE_MAP.get(strat.name, ""),
+                         "n_trades": 0, "error": str(e)[:120]})
+            continue
+        gc.collect()                                   # 백테스트 작업복사본 해제 후 조회표 생성
+        st = _stats(trades, None, None)
+        oos = [t for t in trades if str(t.entry_date) >= cutoff]
+        ins = [t for t in trades if str(t.entry_date) < cutoff]
+        pm = {}
+        if trades:
+            codes = {str(t.code) for t in trades}
+            pm, _ = build_price_lookup(df_all[df_all["code"].astype(str).isin(codes)])
+        sa = simulate_capital(trades, price_map=pm, trading_dates=tds) or {}
+        so = simulate_capital(oos, price_map=pm, trading_dates=tds) or {}
+        del pm
+        gc.collect()
+        rows.append({
+            "strategy": strat.name, "live": LIVE_MAP.get(strat.name, ""),
+            "n_trades": st["n_trades"] or 0, "annual_trades": st["annual_trades"],
+            "avg_hold": st["avg_hold"], "avg_net": st["avg_net"], "win_rate": st["win_rate"],
+            "profit_factor": st["profit_factor"],
+            "slot_n": sa.get("taken_n"), "slot_avg_net": sa.get("taken_avg_net"),
+            "real_cagr_pct": sa.get("cagr_pct"), "real_total_ret_pct": sa.get("total_ret_pct"),
+            "real_mdd_pct": sa.get("real_mdd_pct"), "real_sharpe": sa.get("real_sharpe"),
+            "is_avg_net": _avg(ins), "oos_avg_net": _avg(oos), "oos_n": len(oos),
+            "oos_slot_avg_net": so.get("taken_avg_net"),
+            "oos_cagr_pct": so.get("cagr_pct"), "oos_mdd_pct": so.get("real_mdd_pct"),
+            "period_start": d_min, "period_end": d_max, "oos_cutoff": cutoff,
+        })
+        log(f"  > {strat.name}: {len(trades):,}건 평균 {st['avg_net']}% | 슬롯실매매 "
+            f"{sa.get('taken_avg_net')}% CAGR {sa.get('cagr_pct')}% MDD {sa.get('real_mdd_pct')}% | "
+            f"최근{oos_years:g}년 평균 {_avg(oos)}% CAGR {so.get('cagr_pct')}% ({time.time() - t1:.0f}s)")
+    df = pd.DataFrame(rows)
+    if "real_cagr_pct" in df.columns:
+        df = df.sort_values("real_cagr_pct", ascending=False, na_position="last")
+    return df.reset_index(drop=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description="전략 비교 백테스트 엔진")
     parser.add_argument("--start",    type=str, default=None)
@@ -243,9 +323,34 @@ def main():
                              "최근 N년 표본외(OOS) 로 재검증해 별도 표로 출력")
     parser.add_argument("--oos-years", type=float, default=2.0,
                         help="--verify 의 표본외 구간 길이(년). 기본 2")
+    parser.add_argument("--full", action="store_true",
+                        help="[2026-10-12] 전 전략 진짜 지표(10슬롯 자본곡선·MTM) + 최근 --oos-years 년 "
+                             "표본외 → results/strategy_full_YYYYMMDD.csv (대시보드 백테스트 탭)")
+    parser.add_argument("--names", type=str, default=None,
+                        help="정확한 전략명 목록(쉼표 구분) — --strategy 는 부분일치")
     args = parser.parse_args()
 
     strategies = ALL_STRATEGIES
+    if args.names:
+        want = {n.strip() for n in args.names.split(",") if n.strip()}
+        strategies = [s for s in strategies if s.name in want]
+        missing = want - {s.name for s in strategies}
+        if missing:
+            print(f"[ERROR] --names 에 없는 전략: {sorted(missing)}")
+            sys.exit(1)
+    if args.full:
+        print(f"\n=== 전체 전략 과거 백테스트(진짜 지표) — {len(strategies)}전략 ===")
+        df_all = load_macro_daily(start_date=args.start, end_date=args.end).reset_index(drop=True)
+        print(f"  일봉 {len(df_all):,}행 / {df_all['date'].min()} ~ {df_all['date'].max()}")
+        df_full = run_full(strategies, df_all, args.oos_years)
+        os.makedirs("results", exist_ok=True)
+        out_path = args.out or f"results/strategy_full_{datetime.now().strftime('%Y%m%d')}.csv"
+        tmp = out_path + ".tmp"
+        df_full.to_csv(tmp, index=False, encoding="utf-8-sig")
+        os.replace(tmp, out_path)                 # 원자적 교체 — 대시보드가 반쪽 파일을 읽지 않게
+        print(f"\n  -> 저장: {out_path} ({len(df_full)}전략)\n완료.\n")
+        return df_full
+
     if args.strategy:
         strategies = [s for s in strategies if args.strategy.lower() in s.name.lower()]
         if not strategies:

@@ -1779,10 +1779,16 @@ def _indicator_db(rows):
 
 
 def _bdays_ago(n):
-    """오늘로부터 n 영업일 전 날짜(YYYYMMDD). 테스트를 오늘 기준으로 고정."""
+    """오늘로부터 n 영업일 전 날짜(YYYYMMDD). 테스트를 오늘 기준으로 고정.
+
+    [2026-10-12] 휴장일도 제외 — 워치독 _age_bdays 가 krx_holidays.txt 를 반영하게 된 뒤
+    (10-09), 주말만 빼는 이 헬퍼와 기준이 어긋나 '창 안에 공휴일이 2개'인 날(10-12: 10-05·10-09)
+    8영업일 전 = 워치독 기준 6영업일이 되어 테스트가 날짜에 따라 깨졌다. 같은 달력을 쓴다."""
     import numpy as np
     from datetime import date
-    d = np.busday_offset(date.today(), -n, roll="backward")
+    import watchdog as w
+    hol = [f"{h[:4]}-{h[4:6]}-{h[6:8]}" for h in w._HOLIDAYS]
+    d = np.busday_offset(date.today(), -n, roll="backward", holidays=hol)
     return str(d).replace("-", "")
 
 
@@ -2163,3 +2169,42 @@ def test_account_blocked_no_release_record_keeps_old_behavior(tmp_path, monkeypa
                   {"20260916": [rej]})
     out = w.check_account_blocked(3)
     assert out[0][2] is False, "정지 중일 때는 필터가 걸리면 안 된다"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 전체 전략 과거 백테스트(strategy_engine --full) — 2026-10-12
+#   신호 평균과 '슬롯이 실제로 산 매매' 평균이 다르다(rsi_reversal +0.71% vs −1.62%).
+#   대시보드는 날짜형 파일만 읽어야 한다(구 비교표가 _xover_ 실험파일을 최신으로 잡았던 사고).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_capital_simulator_reports_taken_trade_average():
+    from types import SimpleNamespace as T
+    from capital_simulator import simulate_capital
+    tr = [T(entry_date="20260105", exit_date="20260110", code="A", entry_price=100,
+            net_pct=10.0, gross_pct=10.0, score=1.0),          # 슬롯 1개 → score 큰 이것만 진입
+          T(entry_date="20260105", exit_date="20260110", code="B", entry_price=100,
+            net_pct=-50.0, gross_pct=-50.0, score=0.5)]
+    r = simulate_capital(tr, max_concurrent=1)
+    assert r["taken_n"] == 1 and r["taken_avg_net"] == 10.0, r
+
+
+def test_strategy_full_live_map_names_exist():
+    import strategy_engine as E
+    names = {s.name for s in E.ALL_STRATEGIES}
+    assert set(E.LIVE_MAP) <= names, f"★ 매핑이 엔진에 없는 이름을 가리킨다: {set(E.LIVE_MAP) - names}"
+
+
+def test_dashboard_strategy_full_picks_dated_file_and_fixes_float_dates(tmp_path, monkeypatch):
+    import integrated_dashboard_server as D
+    (tmp_path / "strategy_full_20261005.csv").write_text(
+        "strategy,n_trades,period_start,period_end,oos_cutoff\nold,1,20180614,20261005,20241005\n",
+        encoding="utf-8-sig")
+    (tmp_path / "strategy_full_20261012.csv").write_text(
+        "strategy,n_trades,period_start,period_end,oos_cutoff\n"
+        "a,10,20180614.0,20261012.0,20241012.0\nb,,,,\n", encoding="utf-8-sig")
+    (tmp_path / "strategy_full_xover_20261099.csv").write_text("strategy\nx\n", encoding="utf-8-sig")
+    monkeypatch.setattr(D, "RESULTS_DIR", tmp_path)
+    o = D.get_strategy_full()
+    assert o["source"] == "strategy_full_20261012.csv", "실험 파일이 최신으로 잡혔다"
+    assert o["period"] == "20180614~20261012" and o["oos_cutoff"] == "20241012", o
+    assert [r["strategy"] for r in o["rows"]] == ["a", "b"] and o["rows"][1]["n_trades"] is None

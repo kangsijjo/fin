@@ -117,6 +117,17 @@ echo [5/5] ci_gate.py gate (post-train pytest) ... >> "%LOG%"
 if errorlevel 1 ( echo [ABORT] post-train tests failed ^(exit !ERRORLEVEL!^) >> "%LOG%" & echo [X] post-train tests FAILED & goto :fail )
 echo [%time%] [5/5] done.
 
+REM ---- 6 (NOT gated) full strategy backtest for the dashboard (2026-10-12) ----
+REM   strategy_engine.py --full : all strategies, 10-slot equity curve (MTM) + last 2y OOS
+REM   -> results\strategy_full_YYYYMMDD.csv (backtest tab). ~20-30 min. A failure here only
+REM   logs a warning: the AI pipeline result stands and the dashboard keeps the last table.
+echo [%time%] [6] Full strategy backtest (strategy_engine --full, 20-30 min)...
+echo [6] strategy_engine.py --full ... >> "%LOG%"
+cd /d "%OUT%"
+"%PYEXE%" -u strategy_engine.py --full >> "%LOG%" 2>&1
+if errorlevel 1 ( echo [WARN] full strategy backtest failed ^(exit !ERRORLEVEL!^) - dashboard keeps last table >> "%LOG%" )
+echo [%time%] [6] done.
+
 echo [%date% %time%] AI pipeline DONE >> "%LOG%"
 del "%LOCK%" 2>nul
 Forfiles /P "C:\fin\logs" /M ai_pipeline_*.log /D -60 /C "cmd /c del @file" 2>nul

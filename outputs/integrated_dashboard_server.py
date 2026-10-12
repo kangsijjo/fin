@@ -629,6 +629,38 @@ def get_strategy_compare():
     return out
 
 
+def get_strategy_full():
+    """[2026-10-12] 전체 전략 과거 백테스트(진짜 지표) — strategy_engine.py --full 산출
+    results/strategy_full_YYYYMMDD.csv 최신본. 이름이 정확히 날짜형인 파일만 고른다
+    (구 '전략별 비교'는 strategy_compare_xover_*.csv 같은 실험 파일이 정렬상 최신으로 잡혀
+    2행짜리 표가 떠 있었다)."""
+    import re as _re
+    out = {"rows": [], "updated": "", "source": ""}
+    if not RESULTS_DIR.exists():
+        return out
+    files = sorted(f for f in RESULTS_DIR.glob("strategy_full_*.csv")
+                   if _re.fullmatch(r"strategy_full_\d{8}\.csv", f.name))
+    if not files:
+        return out
+    latest = files[-1]
+    out["source"] = latest.name
+    out["updated"] = latest.name[len("strategy_full_"):-4]
+    try:
+        df = pd.read_csv(latest, encoding="utf-8-sig",
+                         dtype={"period_start": str, "period_end": str, "oos_cutoff": str})
+        df = df.astype(object).where(pd.notnull(df), None)
+        out["rows"] = df.to_dict("records")
+        if len(df) and "period_start" in df.columns:
+            # 미계산 행(NaN)이 섞이면 CSV 에 '20180614.0' 처럼 실수로 저장된다 → '.0' 제거
+            _d = lambda col: [str(r).split(".")[0] for r in df.get(col, pd.Series(dtype=object)).tolist() if r]
+            ps, pe, oc = _d("period_start"), _d("period_end"), _d("oos_cutoff")
+            out["period"] = f"{min(ps)}~{max(pe)}" if ps and pe else ""
+            out["oos_cutoff"] = max(oc) if oc else ""
+    except Exception as e:
+        out["error"] = str(e)[:80]
+    return out
+
+
 def get_strategy_lab():
     """전략 랩 — strategy_lab.py 가 만든 forward(OOS) 전략별 성과. results/strategy_lab_*.csv 최신본."""
     out = {"rows": [], "updated": ""}
@@ -1930,6 +1962,7 @@ def api_all():
             "bt":         _safe(get_backtest_trades, df, dt),
             "sc":         _safe(get_strategy_compare),
             "lab":        _safe(get_strategy_lab),
+            "sfull":      _safe(get_strategy_full),
             "mock":       _safe(get_kiwoom_mock, df, dt),
             "kis":        _safe(get_kis_mock, df, dt),
             "strength":   _safe(get_strength),
@@ -2110,6 +2143,7 @@ _RUN_TASKS = {
     "ai_train":      [_VENV_PYTHON, str(BASE / "ai_trainer_v4.py")],                 # meta_model_v4 재학습
     "ai_pipeline":   ["cmd", "/c", str(BASE / "run_ai_pipeline.bat"), "auto"],       # 주1회 경량 AI 갱신(수집→데이터셋→학습, 게이팅)
     "strategy_lab":  [_VENV_PYTHON, str(BASE / "strategy_lab.py")],                  # 전략 랩 forward 집계
+    "strategy_full": [_VENV_PYTHON, str(BASE / "strategy_engine.py"), "--full"],     # 전 전략 과거 백테스트(진짜 지표, 20~30분)
     "preview":       [_VENV_PYTHON, str(BASE / "intraday_preview.py")],              # 장중 잠정 예비후보
     "market_grid":   [_VENV_PYTHON, str(BASE / "market_grid.py")],                   # 장중시황 2x6 그리드(키움)
     "daily_summary": [_VENV_PYTHON, str(BASE / "daily_summary.py")],                  # 텔레그램 하루요약 수동 전송
@@ -2586,14 +2620,22 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
     </div>
   </div>
   <div class="section">
-    <h2>&#xC804;&#xB7B5;&#xBCC4; &#xBE44;&#xAD50; (strategy_compare_*.csv)</h2>
-    <table><thead><tr>
-      <th>&#xC804;&#xB7B5;</th><th>&#xBAA8;&#xB4DC;</th><th class="r">&#xAC74;</th>
-      <th class="r">&#xC2B9;&#xB960;</th><th class="r">&#xD3C9;&#xADE0;%</th>
-      <th class="r">PF</th><th class="r">&#xC0E4;&#xD504;</th><th class="r">&#xD3C9;&#xADE0; &#xBCF4;&#xC720;</th><th class="r">&#xB370;&#xC774; &#xCC28;&#xC774;</th>
+    <h2>전체 전략 과거 백테스트 — 10슬롯 자본곡선 기준 <span id="sfull-meta" style="color:#8b949e;font-size:11px;font-weight:400"></span>
+      <button class="runbtn" style="margin-left:8px" onclick="runTask('strategy_full','전체 전략 백테스트')">다시 계산(20~30분)</button></h2>
+    <div style="font-size:12px;color:#94a3b8;margin:4px 0 10px;line-height:1.6">
+      <b>신호 평균%</b> = 신호가 뜬 매매 전체의 평균 · <b>슬롯 실매매%</b> = 10슬롯이 실제로 산 매매(거래대금 큰 순)의 평균 —
+      두 값이 다르면 자본곡선은 슬롯 쪽을 따른다(예: rsi_reversal 신호 +0.71% / 실매매 −1.62% → 자본 −100%).
+      CAGR·MDD·샤프는 일별 평가(MTM) 자본곡선. <b>최근2년</b> = 표본외 구간(과거에만 좋았던 전략 판별).<br>
+      ⚠ 엔진 가정: 한 전략이 10슬롯을 단독 사용, 보유일 만기 청산(라이브의 KIS 손절·키움 익절 미반영), 비용 0.245%.
+      라이브 포트(전략 혼합 4/4/2·강도 정렬)와 같지 않다 — 전략 간 '상대 비교'용. ★ = 라이브 운용 중. 매주 일요일 AI 파이프라인 뒤 자동 갱신.
+    </div>
+    <div style="overflow-x:auto"><table><thead><tr>
+      <th>전략</th><th class="r">매매수</th><th class="r">승률</th><th class="r">신호 평균%</th>
+      <th class="r">슬롯 실매매%</th><th class="r">CAGR%</th><th class="r">MDD%</th><th class="r">샤프</th>
+      <th class="r">과거 평균%</th><th class="r">최근2년 평균%</th><th class="r">최근2년 CAGR%</th><th class="r">보유일</th>
     </tr></thead>
-    <tbody id="sc-rows"><tr><td colspan="9" style="color:#8b949e;text-align:center">strategy_engine.py &#xBA3C;&#xC800; &#xC2E4;&#xD589;&#xD558;&#xC138;&#xC694;</td></tr></tbody>
-    </table>
+    <tbody id="sfull-rows"><tr><td colspan="12" style="color:#8b949e;text-align:center">'다시 계산' 버튼 또는 python strategy_engine.py --full</td></tr></tbody>
+    </table></div>
   </div>
   <div class="section">
     <h2>&#xAC70;&#xB798; &#xB0B4;&#xC5ED; (&#xCD5C;&#xC2E0; 500&#xAC74;)</h2>
@@ -3261,6 +3303,35 @@ function fillBacktest(bt, sc){
   }).join(''):'<tr><td colspan="9" style="color:#9ca3af;text-align:center">strategy_engine.py 먼저 실행하세요</td></tr>');
 }
 
+// [2026-10-12] 전체 전략 과거 백테스트(strategy_engine --full) — CAGR 내림차순, ★ 라이브
+function fillStrategyFull(sf){
+  const rows=(sf&&sf.rows)||[];
+  const n=v=>(v===null||v===undefined||v==='')?null:Number(v);
+  const f=(v,d)=>{const x=n(v);return x===null||isNaN(x)?'-':(x>0?'+':'')+x.toFixed(d===undefined?2:d)+'%';};
+  const c=v=>{const x=n(v);return x===null||isNaN(x)?'':clr(x);};
+  const done=rows.filter(r=>n(r.n_trades)!==null).length;
+  setHtml('sfull-meta', sf&&sf.updated?`— ${sf.updated} 계산 · 기간 ${sf.period||'-'} · 최근2년 기준 ${sf.oos_cutoff||'-'}~ · ${done}/${rows.length}전략`+
+    (done<rows.length?' <span style="color:#fbbf24">(미계산 '+(rows.length-done)+'개 — 다시 계산 필요)</span>':''):'');
+  setHtml('sfull-rows', rows.length?rows.map(r=>{
+    if(n(r.n_trades)===null) return `<tr><td style="color:#94a3b8">${r.live?'★ ':''}${r.strategy}</td><td colspan="11" style="color:#64748b;font-size:12px">${r.error||'미계산'}</td></tr>`;
+    const live=r.live?`<span title="${r.live}" style="color:#fbbf24">★ </span>`:'';
+    const gap=n(r.slot_avg_net)!==null&&n(r.avg_net)!==null&&(n(r.avg_net)-n(r.slot_avg_net))>=1;
+    return `<tr${r.live?' style="background:rgba(251,191,36,0.06)"':''}>
+      <td style="font-weight:500">${live}${r.strategy}${r.live?`<div style="font-size:10px;color:#94a3b8">${r.live}</div>`:''}</td>
+      <td class="r" style="color:#94a3b8">${Number(r.n_trades).toLocaleString()}</td>
+      <td class="r">${n(r.win_rate)!==null?Number(r.win_rate).toFixed(1)+'%':'-'}</td>
+      <td class="r ${c(r.avg_net)}">${f(r.avg_net)}</td>
+      <td class="r ${c(r.slot_avg_net)}" style="font-weight:600${gap?';text-decoration:underline dotted':''}" title="${gap?'신호 평균보다 1%p 이상 낮음 — 슬롯이 사는 매매가 더 나쁘다':''}">${f(r.slot_avg_net)}</td>
+      <td class="r ${c(r.real_cagr_pct)}" style="font-weight:800">${f(r.real_cagr_pct,1)}</td>
+      <td class="r neg">${f(r.real_mdd_pct,1)}</td>
+      <td class="r">${n(r.real_sharpe)!==null?Number(r.real_sharpe).toFixed(2):'-'}</td>
+      <td class="r ${c(r.is_avg_net)}">${f(r.is_avg_net)}</td>
+      <td class="r ${c(r.oos_avg_net)}" style="font-weight:600">${f(r.oos_avg_net)}</td>
+      <td class="r ${c(r.oos_cagr_pct)}">${f(r.oos_cagr_pct,1)}</td>
+      <td class="r" style="color:#94a3b8">${n(r.avg_hold)!==null?Number(r.avg_hold).toFixed(0)+'d':'-'}</td></tr>`;
+  }).join(''):'<tr><td colspan="12" style="color:#9ca3af;text-align:center">[다시 계산] 버튼 또는 python strategy_engine.py --full</td></tr>');
+}
+
 function fillLab(lab){
   const rows=((lab&&lab.rows)||[]).slice(0,200);
   setHtml('lab-rows', rows.length?rows.map(r=>
@@ -3472,6 +3543,7 @@ async function load(){
   _r(fillRunButtons, d);
   _r(fillBacktest, d.bt, d.sc);
   _r(fillLab, d.lab);
+  _r(fillStrategyFull, d.sfull);
   _r(fillAI, d.ai);
   _r(fillAIRegistry, d.ai_registry);
   _r(fillLogs, d.logs, d.files);
