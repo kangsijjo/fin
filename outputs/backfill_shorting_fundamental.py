@@ -94,7 +94,13 @@ def main():
     ap.add_argument("--start", default="20210101")
     ap.add_argument("--end", default=datetime.now().strftime("%Y%m%d"))
     ap.add_argument("--days", type=int, default=None, help="최근 N 거래일만(파일럿)")
+    # [2026-10-12] 일일 자동 갱신용(run_recheck.bat 20:00) — 당일분은 공표 전일 수 있어 어제까지만.
+    ap.add_argument("--until-yesterday", action="store_true",
+                    help="--end 를 어제로 고정(당일 미공표분을 반쪽 파일로 확정하지 않게)")
     a = ap.parse_args()
+    if a.until_yesterday:
+        from datetime import timedelta
+        a.end = min(a.end, (datetime.now() - timedelta(days=1)).strftime("%Y%m%d"))
     out_dir = os.path.join(HERE, "macro_data", f"shortfund_{a.market.lower()}")
     os.makedirs(out_dir, exist_ok=True)
 
@@ -117,6 +123,10 @@ def main():
     t0, ok, fail = time.time(), 0, 0
     for i, d in enumerate(todo, 1):
         df = fetch_day(d, a.market)
+        # [2026-10-12] 공매도 컬럼이 빠진 날(재무만 성공)을 저장하면 '수집 완료'로 간주돼 다시는
+        # 재시도되지 않는다 → 공매도 결측이 영구화. 실패로 취급해 다음 실행이 다시 받게 한다.
+        if df is not None and "short_ratio" not in df.columns:
+            df = None
         if df is None:
             fail += 1
             if fail >= 10 and fail / i > 0.3:

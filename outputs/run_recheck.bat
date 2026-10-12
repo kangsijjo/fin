@@ -54,6 +54,13 @@ REM   Writes db/strength_cut_monitor.csv, shown on the dashboard cutmon tab.
 !PYEXE! strength_cut_monitor.py >> "!LOGFILE!" 2>&1
 echo [cutmon] exit=!ERRORLEVEL! (monitor only) >> "!LOGFILE!"
 
+REM [2026-10-12] KOSDAQ short-selling volume share + fundamentals -> macro_data\shortfund_kosdaq
+REM   (input of strategy h52w_short_dec). Last 30 trading days, existing days skipped, so a
+REM   missed evening self-heals. Up to yesterday only (today may be unpublished at 20:00).
+REM   pykrx/KRX web path - independent of KIS/Kiwoom keys. Never changes EXITCODE.
+!PYEXE! -u backfill_shorting_fundamental.py --market KOSDAQ --days 30 --until-yesterday >> "!LOGFILE!" 2>&1
+echo [shortfund] exit=!ERRORLEVEL! (data refresh only) >> "!LOGFILE!"
+
 :report
 echo  Exit code: !EXITCODE! (time: %TIME%) >> "!LOGFILE!"
 echo Exit code: !EXITCODE!

@@ -2208,3 +2208,35 @@ def test_dashboard_strategy_full_picks_dated_file_and_fixes_float_dates(tmp_path
     assert o["source"] == "strategy_full_20261012.csv", "실험 파일이 최신으로 잡혔다"
     assert o["period"] == "20180614~20261012" and o["oos_cutoff"] == "20241012", o
     assert [r["strategy"] for r in o["rows"]] == ["a", "b"] and o["rows"][1]["n_trades"] is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 백테스트 0건 전략 2종 — 2026-10-12
+#   h52w_cred_dec: 0바이트 outputs/db/stock.db 를 읽음 + DB 날짜 '2022-01-03' vs 일봉 '20220103' 불일치
+#   h52w_short_dec: db/short 가 코스피 전용(코스닥 유니버스와 0종목 겹침) → 코스닥 거래비중으로 전환
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_credit_loader_normalizes_dates_and_skips_empty_stub(tmp_path):
+    import sqlite3
+    import strategies.high52w_credit_decrease as C
+    stub = tmp_path / "stub.db"
+    stub.write_bytes(b"")
+    assert C._load_credit_ratio_db(str(stub)).empty, "0바이트 빈 DB 는 건너뛰어야 한다"
+    real = tmp_path / "stock.db"
+    con = sqlite3.connect(real)
+    con.execute("CREATE TABLE credit_balance (date TEXT, ticker TEXT, credit_remain REAL, credit_remain_rt REAL)")
+    con.execute("INSERT INTO credit_balance VALUES ('2022-01-03','20',0,1.5)")
+    con.commit(); con.close()
+    df = C._load_credit_ratio_db(str(real))
+    assert df.to_dict("records") == [{"date": "20220103", "code": "000020", "credit_ratio": 1.5}]
+
+
+def test_short_loader_reads_kosdaq_volume_share(tmp_path):
+    import strategies.high52w_short_decrease as S
+    (tmp_path / "20240102.csv").write_text(
+        "code,short_vol,buy_vol,short_ratio,PER,date\n000250,10,100,4.5,10.0,20240102\n",
+        encoding="utf-8-sig")
+    (tmp_path / "20240103.csv").write_text("code,PER,date\n000250,10.0,20240103\n", encoding="utf-8-sig")
+    df = S._load_short_ratio(str(tmp_path))
+    assert df.to_dict("records") == [{"code": "000250", "short_ratio": 4.5, "date": "20240102"}], \
+        "공매도 컬럼 없는 날(재무만)은 건너뛰어야 한다"

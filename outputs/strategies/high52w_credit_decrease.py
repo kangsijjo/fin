@@ -30,12 +30,32 @@ from .base import BaseStrategy
 from ._swing_base import _make_trades_for_signals, _make_trades_with_stops
 
 
-def _load_credit_ratio_db(db_path="./db/stock.db") -> pd.DataFrame:
+def _default_stock_db():
+    """실제 stock.db 경로. [2026-10-12] 종전 기본값 './db/stock.db' 는 outputs/db 의 **0바이트 빈 파일**
+    (06-17 생성)이라 쿼리가 늘 실패 → CSV 폴백(2026-06~ 뿐) → 이 전략이 8년 백테스트에서 0건이었다.
+    실데이터는 Stock_AI_Project/data/stock.db (credit_balance 2022-01~, 296만 행)."""
+    cands = []
+    try:
+        from fin_paths import STOCK_DB          # FIN_ROOT 기반 단일 출처
+        cands.append(str(STOCK_DB))
+    except Exception:
+        pass
+    here = os.path.dirname(os.path.abspath(__file__))
+    cands += [os.path.join(here, "..", "..", "Stock_AI_Project", "data", "stock.db"),
+              "./db/stock.db"]
+    for p in cands:
+        if os.path.exists(p) and os.path.getsize(p) > 0:   # 0바이트 빈 파일은 건너뛴다
+            return p
+    return cands[-1]
+
+
+def _load_credit_ratio_db(db_path=None) -> pd.DataFrame:
     """stock.db credit_balance 테이블에서 (code, date, credit_remain_rt) 로드."""
-    if not os.path.exists(db_path):
+    db_path = db_path or _default_stock_db()
+    if not os.path.exists(db_path) or os.path.getsize(db_path) == 0:
         return pd.DataFrame()
     try:
-        con = sqlite3.connect(db_path)
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)   # 읽기 전용(수집기와 경합 방지)
         df = pd.read_sql(
             "SELECT date, ticker AS code, credit_remain_rt FROM credit_balance "
             "WHERE credit_remain_rt IS NOT NULL",
@@ -43,7 +63,8 @@ def _load_credit_ratio_db(db_path="./db/stock.db") -> pd.DataFrame:
         )
         con.close()
         df["code"] = df["code"].astype(str).str.zfill(6)
-        df["date"] = df["date"].astype(str)
+        # [2026-10-12] DB 는 '2022-01-03'(대시형), 일봉은 '20220103' — 그대로 병합하면 한 건도 안 맞는다.
+        df["date"] = df["date"].astype(str).str.replace("-", "", regex=False).str[:8]
         df = df.rename(columns={"credit_remain_rt": "credit_ratio"})
         return df
     except Exception:
