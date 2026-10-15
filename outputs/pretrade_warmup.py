@@ -79,11 +79,18 @@ def warm_kis():
     else:
         strength = kx._strength_map(sigs)
         strength, missing = kx.verify_strength(sigs, strength)
-        ok = [v for k, v in strength.items() if v >= kx.MIN_STRENGTH_SCORE]
+        # [2026-10-15] 강도 면제 전략(kx.STRENGTH_EXEMPT, gc_for3d)은 임계와 무관하게 매수 후보
+        exempt = getattr(kx, "STRENGTH_EXEMPT", set())
+        n_ex = sum(1 for s in sigs if str(s.get("strategy", "")) in exempt)
+        ok = [v for k, v in strength.items()
+              if v >= kx.MIN_STRENGTH_SCORE and (not isinstance(k, tuple) or k[-1] not in exempt)]
         print(f"[warmup][KIS] 신호 {len(sigs)}건 / 강도확보 {len(strength)}건 / "
-              f"임계 {kx.MIN_STRENGTH_SCORE} 통과 {len(ok)}건 / 미확보 {len(missing)}건")
-        if missing:
-            problems.append(f"KIS 강도 미확보 {len(missing)}건(해당 후보 매수 차단 예정)")
+              f"임계 {kx.MIN_STRENGTH_SCORE} 통과 {len(ok)}건 + 면제({', '.join(sorted(exempt)) or '-'}) {n_ex}건"
+              f" / 미확보 {len(missing)}건")
+        blocked_missing = [m for m in missing
+                           if not (isinstance(m, tuple) and m[-1] in exempt)]
+        if blocked_missing:
+            problems.append(f"KIS 강도 미확보 {len(blocked_missing)}건(해당 후보 매수 차단 예정)")
 
     try:
         cl = kx.KISMockClient()

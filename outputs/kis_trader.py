@@ -112,6 +112,25 @@ STRATEGY_STOP = {
 # 2026-07-21) — 종전 fail-open 이 6 미만 체결의 잔여 경로였음.
 MIN_STRENGTH_SCORE = 5.7
 
+# [2026-10-15 사용자 결정] 강도 필터 면제 전략 — 신호 전량 매수 후보(정렬은 강도순 유지, 무기록이면 tv순).
+# 근거(§48): gc_for3d 는 강도가 높을수록 오히려 나빴다(워크포워드 900건: 필터없음 +0.36% /
+# ≥4.0 −0.80% / ≥5.7 −5.50%). 강도점수가 역추세(RSI 저) 선호라 추세형 골든크로스와 맞지 않는다.
+# 5.7 은 이 전략 분포 밖이라 06-30 이후 신호 28건 중 매수 0건이었다.
+# ⚠ 고지된 단점: 필터를 없애도 2슬롯 계좌 6년 −73%(라이브 청산규칙), 최근 2년 건당 +0.88%.
+# ai_paper_trader.STRENGTH_EXEMPT 와 동기(테스트로 고정).
+STRENGTH_EXEMPT = {"gc_for3d"}
+
+
+def _strength_gate(strat, sc):
+    """주문 직전 강도 게이트 → (통과여부, 사유). 면제 전략은 강도와 무관하게 통과."""
+    if strat in STRENGTH_EXEMPT:
+        return True, (f"강도 면제({sc:.2f})" if sc is not None else "강도 면제(무기록)")
+    if sc is None:
+        return False, "강도 확인 불가(재계산 실패) → 차단"
+    if sc < MIN_STRENGTH_SCORE:
+        return False, f"강도 {sc:.2f} < {MIN_STRENGTH_SCORE}"
+    return True, f"강도 {sc:.2f} ≥ {MIN_STRENGTH_SCORE}"
+
 
 # ── 환경변수 로드 ──────────────────────────────────────────────────────────────
 def _load_dotenv(path=".env"):
@@ -1315,10 +1334,12 @@ def cmd_buy():
     strength = _strength_map(sigs)
     if strength:
         n_weak = sum(1 for s in sigs
-                     if (strength.get((str(s.get("code", "")).zfill(6),
-                                       str(s.get("strategy", "")))) or 99) < MIN_STRENGTH_SCORE)
+                     if str(s.get("strategy", "")) not in STRENGTH_EXEMPT
+                     and (strength.get((str(s.get("code", "")).zfill(6),
+                                        str(s.get("strategy", "")))) or 99) < MIN_STRENGTH_SCORE)
         print(f"[buy] 후보 정렬: 강도(score_ic) 내림차순 — 기록 {len(strength)}건")
-        print(f"[buy] 강도 필터: score_ic < {MIN_STRENGTH_SCORE} 스킵 예정 {n_weak}건")
+        print(f"[buy] 강도 필터: score_ic < {MIN_STRENGTH_SCORE} 스킵 예정 {n_weak}건"
+              f" (면제: {', '.join(sorted(STRENGTH_EXEMPT))})")
     else:
         print("[buy] 강도 기록 없음 — 재확인 단계에서 재계산 시도")
     # 매매 전 사전점검 ①: 강도 재확인(무기록이면 즉석 재계산, 그래도 없으면 차단)
@@ -1365,11 +1386,9 @@ def cmd_buy():
             # 강도 필터(2026-07-21 신설) — 주문 직전 최종 게이트. verify_strength 가 이미
             # 무기록을 재계산했으므로 여기서 None 이면 확인 불가로 차단(fail-closed).
             _sc = strength.get((code, str(sig.get("strategy", strat))))
-            if _sc is None:
-                print(f"    [skip] {code} {name} — 강도 확인 불가(재계산 실패) → 차단")
-                continue
-            if _sc < MIN_STRENGTH_SCORE:
-                print(f"    [skip] {code} {name} — 강도 {_sc:.2f} < {MIN_STRENGTH_SCORE}")
+            _ok, _why = _strength_gate(strat, _sc)       # 면제 전략(gc_for3d)은 통과 — 2026-10-15
+            if not _ok:
+                print(f"    [skip] {code} {name} — {_why}")
                 continue
             # NaN 방어: 'close <= 0' 은 NaN 에서 False 라 통과 후 int(NaN) 크래시로
             # cmd_buy 전체가 죽음 — 'not (close > 0)' 은 NaN 도 걸러냄(2026-07-10)
@@ -1395,7 +1414,7 @@ def cmd_buy():
             if _need > remaining_dep:
                 print(f"    [skip] {code} {name} — 잔고 부족(필요 {_need:,.0f} > 잔여 {remaining_dep:,.0f})")
                 continue
-            print(f"    [verify] {code} {name} — 강도 {_sc:.2f} ≥ {MIN_STRENGTH_SCORE} / "
+            print(f"    [verify] {code} {name} — {_why} / "
                   f"잔여 {remaining_dep:,.0f} ≥ 주문 {_need:,.0f} → 주문 실행")
 
             try:

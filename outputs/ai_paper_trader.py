@@ -36,6 +36,9 @@ CAPITAL0 = 10_000_000
 SLOTS    = 10
 COST_PCT = 0.33              # 왕복
 OUT_JSON = "./db/ai_paper_result.json"
+# [2026-10-15] 라이브 강도 필터 면제 전략 — kis_trader.STRENGTH_EXEMPT 와 동기(테스트로 고정).
+# strength 포트는 '라이브 룰 쌍둥이'라 면제도 똑같이 재현한다(정렬은 강도순, 임계 미적용).
+STRENGTH_EXEMPT = {"gc_for3d"}
 STRENGTH_LOG = "./db/signal_strength_log.csv"
 
 
@@ -143,7 +146,8 @@ def simulate(sig, cal_all, cal, closes, rank_col, min_score=None):
                 # (fail-open — 로거 장애가 매수 전면 중단으로 번지지 않게). 기존 시뮬은
                 # notna 로 무기록을 전부 제외(fail-closed)해 방향이 라이브와 반대였음.
                 # 무기록은 통과시키되 정렬 맨 뒤(NaN last) — 라이브의 tv순 폴백 근사.
-                cand = g[(g[rank_col].isna()) | (g[rank_col] >= min_score)]
+                cand = g[(g[rank_col].isna()) | (g[rank_col] >= min_score)
+                         | (g["strategy"].isin(STRENGTH_EXEMPT))]
                 cand = cand.sort_values(rank_col, ascending=False, na_position="last")
             else:
                 # ai 포트는 ai_prob 자체가 비교 대상 지표라 무기록 제외(기존 유지)

@@ -2240,3 +2240,38 @@ def test_short_loader_reads_kosdaq_volume_share(tmp_path):
     df = S._load_short_ratio(str(tmp_path))
     assert df.to_dict("records") == [{"code": "000250", "short_ratio": 4.5, "date": "20240102"}], \
         "공매도 컬럼 없는 날(재무만)은 건너뛰어야 한다"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# gc_for3d 강도 필터 면제 — 2026-10-15 사용자 결정 (§48)
+#   워크포워드 900건: 필터없음 +0.36% / ≥4.0 −0.80% / ≥5.7 −5.50% — 강도가 높을수록 나빴다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_kis_strength_gate_exempts_only_gc_for3d():
+    import kis_trader as kx
+    assert kx._strength_gate("gc_for3d", 3.1)[0] is True
+    assert kx._strength_gate("gc_for3d", None)[0] is True, "면제 전략은 무기록이어도 통과"
+    assert kx._strength_gate("for_high20_mkt", 3.1)[0] is False
+    assert kx._strength_gate("for_high20_mkt", None)[0] is False, "비면제는 fail-closed 유지"
+    assert kx._strength_gate("h52w_for3d_mkt", 5.7)[0] is True
+    assert kx.MIN_STRENGTH_SCORE == 5.7
+
+
+def test_strength_exempt_in_sync_with_paper_mirror():
+    import kis_trader as kx
+    import ai_paper_trader as ap
+    assert kx.STRENGTH_EXEMPT == ap.STRENGTH_EXEMPT == {"gc_for3d"}
+
+
+def test_paper_strength_portfolio_buys_exempt_low_score():
+    import pandas as pd
+    import ai_paper_trader as ap
+    sig = pd.DataFrame([
+        {"signal_date": "20260105", "code": "000001", "name": "a", "strategy": "gc_for3d",
+         "holding_days": 2, "entry_price_close": 100.0, "score_ic": 3.0, "ai_prob": 0.1},
+        {"signal_date": "20260105", "code": "000002", "name": "b", "strategy": "rsi_reversal",
+         "holding_days": 2, "entry_price_close": 100.0, "score_ic": 3.0, "ai_prob": 0.1}])
+    cal = ["20260105", "20260106", "20260107", "20260108"]
+    closes = {d: {"000001": 110.0, "000002": 110.0} for d in cal}
+    r = ap.simulate(sig, cal, cal, closes, "score_ic", min_score=5.7)
+    assert [t["code"] for t in r["trades"]] == ["000001"], r["trades"]
