@@ -2263,7 +2263,8 @@ def _pbt_names():
 
 
 def _pbt_parse(req):
-    """요청 본문 검증 → (start, end, names, luck) 또는 (None, 오류문구)."""
+    """요청 본문 검증 → (start, end, names, luck, strength) 또는 (None, 오류문구).
+    strength: 강도 비교 임계 목록(예 [4.0, 5.0, 5.7]) — period_backtest.parse_strength 로 검증(0~10, 최대 5개)."""
     b = req.get_json(silent=True) or {}
     start, end = str(b.get("start", "")), str(b.get("end", ""))
     if not (_DATE_RE.fullmatch(start) and _DATE_RE.fullmatch(end)):
@@ -2275,7 +2276,12 @@ def _pbt_parse(req):
     bad = [n for n in names if n not in valid]
     if bad:
         return None, f"알 수 없는 전략: {', '.join(map(str, bad[:5]))}"
-    return (start, end, names, bool(b.get("luck"))), None
+    try:
+        import period_backtest as P
+        strength = P.parse_strength(b.get("strength", ""))
+    except ValueError as e:
+        return None, str(e)
+    return (start, end, names, bool(b.get("luck")), strength), None
 
 
 @app.route("/api/pbt/meta")
@@ -2321,9 +2327,10 @@ def api_pbt_check():
     parsed, err = _pbt_parse(request)
     if err:
         return jsonify({"ok": False, "msg": err}), 400
-    start, end, names, luck = parsed
+    start, end, names, luck, strength = parsed
+    st_arg = ["--strength", ",".join(f"{v:g}" for v in strength)] if strength else []
     cmd = [_VENV_PYTHON, str(BASE / "period_backtest.py"), "--check", "--start", start,
-           "--end", end, "--names", ",".join(names)] + (["--luck"] if luck else [])
+           "--end", end, "--names", ",".join(names)] + (["--luck"] if luck else []) + st_arg
     try:
         r = _sp.run(cmd, cwd=str(BASE), capture_output=True, timeout=180, creationflags=_NO_WIN)
         out = r.stdout.decode("utf-8", errors="replace")
@@ -2349,21 +2356,23 @@ def api_pbt_run():
     parsed, err = _pbt_parse(request)
     if err:
         return jsonify({"ok": False, "msg": err}), 400
-    start, end, names, luck = parsed
+    start, end, names, luck, strength = parsed
+    st_arg = ["--strength", ",".join(f"{v:g}" for v in strength)] if strength else []
     p = _PBT_PROC["proc"]
     if p is not None and p.poll() is None:
         return jsonify({"ok": False, "msg": f"이미 실행 중({_PBT_PROC['job']}) — 끝난 뒤 다시 시도",
                         "job": _PBT_PROC["job"]}), 409
     job = datetime.now().strftime("pbt_%Y%m%d_%H%M%S")
     cmd = [_VENV_PYTHON, str(BASE / "period_backtest.py"), "--start", start, "--end", end,
-           "--names", ",".join(names), "--job", job] + (["--luck"] if luck else [])
+           "--names", ",".join(names), "--job", job] + (["--luck"] if luck else []) + st_arg
     try:
         (BASE / "logs").mkdir(exist_ok=True)
         logf = open(BASE / "logs" / "run_period_backtest.log", "w", encoding="utf-8", errors="replace")
         _PBT_PROC["proc"] = _sp.Popen(cmd, cwd=str(BASE), stdout=logf, stderr=_sp.STDOUT,
                                       creationflags=_NO_WIN)
         _PBT_PROC["job"] = job
-        return jsonify({"ok": True, "job": job, "msg": f"시작됨 — {len(names)}전략"})
+        return jsonify({"ok": True, "job": job, "msg": f"시작됨 — {len(names)}전략"
+                        + (f" × 강도 {len(strength) + 1}줄" if strength else "")})
     except Exception as e:
         return jsonify({"ok": False, "msg": str(e)[:150]}), 500
 
@@ -2846,6 +2855,8 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
       <label style="font-size:13px;color:#cbd5e1">종료 <input type="date" id="pbt-end" style="background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"></label>
       <span style="font-size:12px;color:#64748b" id="pbt-range"></span>
       <span style="flex:1"></span>
+      <label style="font-size:13px;color:#cbd5e1"><span class="pbt-tip" data-tip="강도 비교(선택)|쉼표로 여러 값: 예 4, 5, 5.7 → 전략마다 [강도 없음] + [≥4] [≥5] [≥5.7] 줄이 나란히 나옴|강도 줄은 그날 후보를 강도 높은 순으로 담음(모의매매와 같은 규칙) · 0 = 거르지 않고 강도순으로만 담기|강도는 신호마다 그날 데이터로 다시 계산 — 가중치는 해마다 그 이전 매매로만 학습(미래 미사용)|처음 한 번은 수 분, 같은 날 다시 돌리면 저장분 사용">강도 비교</span>
+        <input type="text" id="pbt-strength" placeholder="예: 4, 5, 5.7" style="width:110px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"></label>
       <label style="font-size:13px;color:#cbd5e1" title="전략 5개 이상·거래일 80일 이상일 때 SPA·PBO·DSR 수행(1~2분 추가)"><input type="checkbox" id="pbt-luck"> 운 검정(SPA·PBO)</label>
     </div>
     <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px">
@@ -3655,7 +3666,8 @@ function pbtSel(p){
 }
 function _pbtBody(){
   return {start:document.getElementById('pbt-start').value.replace(/-/g,''), end:document.getElementById('pbt-end').value.replace(/-/g,''),
-          names:[...document.querySelectorAll('#pbt-list input:checked')].map(i=>i.value), luck:document.getElementById('pbt-luck').checked};
+          names:[...document.querySelectorAll('#pbt-list input:checked')].map(i=>i.value), luck:document.getElementById('pbt-luck').checked,
+          strength:(document.getElementById('pbt-strength')||{}).value||''};
 }
 async function _pbtPost(url){
   const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Action':'1'},body:JSON.stringify(_pbtBody())});
@@ -3778,7 +3790,12 @@ function pbtRender(d){
     <div style="flex:1;max-width:260px;height:6px;background:#1e293b;border-radius:3px"><div style="width:${pct}%;height:6px;background:#2563eb;border-radius:3px"></div></div>
     <span style="color:#64748b">${_pbtEsc(d.job||'')}</span></div>`+(d.error?`<div style="color:#ef4444;margin-top:4px">${_pbtEsc(d.error)}</div>`:''));
   if(d.warnings&&d.warnings.length) setHtml('pbt-warn', _pbtWarnHtml(d.warnings,'데이터·표본 경고 (텔레그램에도 전송됨)'));
-  const rs=(d.results||[]).slice().sort((a,b)=>(b.cagr==null?-1e9:b.cagr)-(a.cagr==null?-1e9:a.cagr));
+  let rs=(d.results||[]).slice().sort((a,b)=>(b.cagr==null?-1e9:b.cagr)-(a.cagr==null?-1e9:a.cagr));
+  if((p.strength||[]).length){   // 강도 비교: 기본 줄 CAGR 순 + 그 아래에 같은 전략의 강도 줄(낮은 임계부터)
+    const base=rs.filter(r=>r.strength_min==null), sub={};
+    rs.filter(r=>r.strength_min!=null).forEach(r=>{ (sub[r.base]=sub[r.base]||[]).push(r); });
+    rs=base.flatMap(b=>[b,...(sub[b.strategy]||[]).sort((x,y)=>x.strength_min-y.strength_min)]);
+  }
   if(!rs.length&&!d.market){ setHtml('pbt-res',''); return; }
   const years=[...new Set([...(d.market?Object.keys(d.market.yearly||{}):[]),...rs.flatMap(r=>Object.keys(r.yearly||{}))])].sort();
   const f=(v,k)=>v==null||isNaN(v)?'-':(v>0?'+':'')+Number(v).toFixed(k==null?2:k)+'%';
@@ -3786,8 +3803,9 @@ function pbtRender(d){
   const wmap={}; (d.warnings||[]).forEach(w=>{ if(w.strategy){ (wmap[w.strategy]=wmap[w.strategy]||[]).push(w.msg); } });
   // ★ 는 '지금' 운용 중인 전략 기준(작업 파일의 live 는 실행 당시 값이라 교체 후엔 틀릴 수 있다)
   const _live=n=>{ const x=((_pbtMeta&&_pbtMeta.strategies)||[]).find(z=>z.name===n); return x?x.live:''; };
-  const row=(r,isM)=>`<tr${!isM&&_live(r.strategy)?' style="background:rgba(251,191,36,0.06)"':''}${isM?' style="background:#111827;font-style:italic"':''}>
-    <td style="font-weight:500">${!isM&&_live(r.strategy)?'<span style="color:#fbbf24">★ </span>':''}${isM?_pbtEsc(r.name):`<a href="javascript:void(0)" onclick="pbtExplain('${_pbtEsc(r.strategy)}')" style="color:#93c5fd;text-decoration:underline dotted" title="눌러서 전략 설명 보기">${_pbtEsc(r.strategy)}</a>`}${wmap[r.strategy]?` <span title="${_pbtEsc(wmap[r.strategy].join(' / '))}" style="color:#fbbf24;cursor:help">⚠</span>`:''}${r.error?` <span style="color:#ef4444" title="${_pbtEsc(r.error)}">오류</span>`:''}</td>
+  const row=(r,isM)=>`<tr${r.strength_min!=null?' style="background:#0b1220;font-size:12px"':(!isM&&_live(r.strategy)?' style="background:rgba(251,191,36,0.06)"':'')}${isM?' style="background:#111827;font-style:italic"':''}>
+    <td style="font-weight:500">${r.strength_min!=null?`<span style="color:#64748b;padding-left:14px">└ 강도 ≥${r.strength_min}</span> <span style="color:#64748b;font-size:11px" title="이 전략 신호 중 강도 기준을 넘은 비율">(통과 ${r.pass_pct??'-'}%)</span>`:
+      `${!isM&&_live(r.strategy)?'<span style="color:#fbbf24">★ </span>':''}${isM?_pbtEsc(r.name):`<a href="javascript:void(0)" onclick="pbtExplain('${_pbtEsc(r.strategy)}')" style="color:#93c5fd;text-decoration:underline dotted" title="눌러서 전략 설명 보기">${_pbtEsc(r.strategy)}</a>`}`}${wmap[r.strategy]?` <span title="${_pbtEsc(wmap[r.strategy].join(' / '))}" style="color:#fbbf24;cursor:help">⚠</span>`:''}${r.error?` <span style="color:#ef4444" title="${_pbtEsc(r.error)}">오류</span>`:''}</td>
     <td class="r" style="color:#94a3b8">${isM?'-':(r.n_trades??'-')}${!isM&&r.n_open?`<span style="font-size:10px" title="기간 안에 신호가 났지만 종료일 뒤에 청산되는 매매 — 신호 평균·승률에서 제외, 자본곡선에선 실제로 보유 중인 것만 종료일 종가로 평가"> (미완료 ${r.n_open})</span>`:''}</td>
     <td class="r">${isM||r.win==null?'-':r.win.toFixed(1)+'%'}</td>
     <td class="r ${c(r.avg_net)}">${isM?'-':f(r.avg_net)}</td>
@@ -3803,7 +3821,8 @@ function pbtRender(d){
   setHtml('pbt-res', `<table><thead><tr><th><span class="pbt-tip" data-tip="${_pbtEsc(_PBT_TIPS.strategy)}">전략</span></th>${th('n','매매수')}${th('win','승률')}${th('avg','신호 평균')}${th('slot','슬롯 실매매')}
     ${th('tot','총수익')}${th('cagr','CAGR')}${th('mdd','MDD')}${th('sharpe','샤프')}${th('vs','시장 대비')}${years.map(y=>`<th class="r"><span class="pbt-tip" data-tip="${_pbtEsc(_PBT_TIPS.year)}">${y}</span></th>`).join('')}</tr></thead>
     <tbody>${d.market?row(d.market,true):''}${rs.map(r=>row(r,false)).join('')}</tbody></table>
-    <div style="font-size:11px;color:#64748b;margin-top:6px">전략마다 10슬롯 단독 · 다음날 시가 진입·보유일 만기·손절/익절/강도필터 없음·비용 0.245% · 일별 평가(MTM) · 시장 = 코스닥 유니버스 동일가중 · 연도별은 기간 안 각 해의 자본 증감</div>`);
+    <div style="font-size:11px;color:#64748b;margin-top:6px">전략마다 10슬롯 단독 · 다음날 시가 진입·보유일 만기·손절/익절 없음·비용 0.245% · 일별 평가(MTM) · 시장 = 코스닥 유니버스 동일가중 · 연도별은 기간 안 각 해의 자본 증감${(p.strength||[]).length?' · <b>강도 줄</b> = 강도 기준 넘은 신호만, 강도 높은 순으로 담음(기본 줄은 강도 무관·전략 점수순)':''}</div>
+    ${d.strength_info&&Object.keys(d.strength_info).length?`<div style="font-size:11px;color:#64748b;margin-top:3px">강도 가중치(워크포워드) — ${Object.entries(d.strength_info).map(([y,v])=>v.skipped?`${y}: 학습 ${v.n_train}건 부족 → 채점 안 함`:`${y}: ${y}년 이전 매매 ${Number(v.n_train).toLocaleString()}건으로 학습(${_pbtEsc((v.top||[]).join(', '))})`).join(' · ')}</div>`:''}`);
   const L=d.luck;
   if(L&&!L.error&&L.pbo!=null){
     const pass=(L.spa_cash!=null&&L.spa_cash<0.05)||(L.dsr!=null&&L.dsr>=0.95);

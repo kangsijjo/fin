@@ -463,3 +463,138 @@ def test_dashboard_has_strategy_popup_and_metric_tips(dash):
         assert k in src[src.index("const _PBT_TIPS={"):src.index("function _pbtTipInit")], k
     assert "function pbtExplain(name)" in src and "onclick=\"pbtExplain(" in src
     assert "th('cagr','CAGR')" in src and "th('mdd','MDD')" in src and "th('sharpe','샤프')" in src
+
+
+# ── 강도 비교 (2026-10-19) ──
+def test_parse_strength_validates_and_normalizes():
+    import period_backtest as P
+    assert P.parse_strength("") == [] and P.parse_strength(None) == []
+    assert P.parse_strength("5.7, 4,5 4") == [4.0, 5.0, 5.7]
+    for bad in ("11", "-1", "5;rm", "1,2,3,4,5,6", "abc"):
+        with pytest.raises(ValueError):
+            P.parse_strength(bad)
+
+
+def test_check_data_warns_years_without_strength_training():
+    import period_backtest as P
+    import strategy_engine as E
+    smap = {s.name: s for s in E.ALL_STRATEGIES}
+    cal = [d.strftime("%Y%m%d") for d in __import__("pandas").bdate_range("20180102", "20211230")]
+    cov = {k: [cal[0], cal[-1]] for k in ("foreign", "inst", "individual", "short", "credit")}
+    w, _, ok = P.check_data("20190102", "20211230", ["rsi_reversal"], cal, cov, False, smap,
+                            [5.7], {"2018": 1500, "2019": 8000, "2020": 9000})
+    msgs = " | ".join(x["msg"] for x in w)
+    assert ok and "2019년은 강도 학습 표본이 1,500건" in msgs and "2020년은" not in msgs
+    assert "≥5.7" in msgs
+    w, _, ok = P.check_data("20190102", "20211230", ["rsi_reversal"], cal, cov, False, smap, [5.7], None)
+    assert not ok, "학습 데이터가 없으면 실행 거부"
+
+
+def test_score_rows_matches_factor_scorer_formula():
+    """백테스트 채점식 = 라이브 factor_scorer.score_ic (available-only·커버리지 가드·0~10)."""
+    import numpy as np
+    import pandas as pd
+    import strength_backtest as SB
+    from factor_scorer import FactorScorer
+    rng = np.random.default_rng(0)
+    feats = ["rsi14", "vix", "tv_ratio", "crd_remn_rt"]
+    train = pd.DataFrame({f: rng.normal(size=500) for f in feats})
+    train["net_pct"] = train["rsi14"] * -0.5 + train["tv_ratio"] * 0.3 + rng.normal(size=500)
+    ic, ref = SB.fit_scorer(train, feats)
+    fs = FactorScorer.__new__(FactorScorer)
+    fs.ic_weights, fs.feat_stats = dict(ic), {k: list(v) for k, v in ref.items()}
+    X = pd.DataFrame({f: rng.normal(size=40) for f in feats})
+    X.loc[:9, "rsi14"] = np.nan                       # 일부 결측 → available-only 분모
+    X.loc[10:12, ["rsi14", "tv_ratio", "crd_remn_rt"]] = np.nan   # 커버리지 미달 → 전체 분모
+    mine = SB.score_rows(X, ic, ref, 0.40)
+    theirs = [fs.score_ic({f: (None if np.isnan(v) else float(v)) for f, v in r.items()})["total"]
+              for r in X.to_dict("records")]
+    assert np.allclose(mine, theirs, atol=0.006)
+
+
+def test_asof_takes_latest_row_on_or_before_signal_date():
+    import pandas as pd
+    import strength_backtest as SB
+    L = pd.DataFrame({"code": ["A", "A", "B"], "date": ["20240105", "20240103", "20240105"]})
+    R = pd.DataFrame({"code": ["A", "A", "B"], "date": ["20240102", "20240104", "20240106"], "v": [1.0, 2.0, 9.0]})
+    m = SB._asof(L, R, ["v"]).set_index(["code", "date"])["v"]
+    assert m[("A", "20240105")] == 2.0 and m[("A", "20240103")] == 1.0
+    assert m.isna()[("B", "20240105")], "미래 행(01-06)을 끌어오면 안 된다"
+
+
+def test_walk_forward_uses_only_prior_years(monkeypatch):
+    import numpy as np
+    import pandas as pd
+    import strength_backtest as SB
+    seen = []
+    monkeypatch.setattr(SB, "fit_scorer", lambda tr, feats: (seen.append(tr["entry_date"].max()) or ({}, {})))
+    monkeypatch.setattr(SB, "_ic_constants", lambda: (["rsi14"], 0.4, {"rsi_reversal"}))
+    hist = pd.DataFrame({"entry_date": ["20220601"] * 2500 + ["20230601"] * 2500, "strategy": "rsi_reversal",
+                         "net_pct": 0.0, "rsi14": 1.0})
+    X = pd.DataFrame({"rsi14": [1.0, 1.0, 1.0]})
+    sc, info = SB.walk_forward_scores(X, ["2022", "2023", "2024"], hist)
+    assert info["2022"]["skipped"] and np.isnan(sc[0]), "2022 이전 표본 0건 → 채점 안 함"
+    assert seen == ["20220601", "20230601"], "각 해는 그 이전 매매로만 학습"
+
+
+def test_run_job_strength_rows(monkeypatch, tmp_path):
+    """강도 모드: 기본 줄 + 임계별 줄, 강도 미달·무채점 신호 제외, 강도순 배정."""
+    import numpy as np
+    import period_backtest as P
+    import strength_backtest as SB
+    cal = _cal(140, start=20240101)
+    import pandas as pd
+    rows = [{"code": c, "date": d, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0 + i * (0.5 if c == "A" else -0.2),
+             "change_pct": 0.1, "trading_value": 5e9, "volume": 1e5}
+            for i, d in enumerate(cal) for c in ("A", "B", "C")]
+    df = pd.DataFrame(rows)
+    trs = [NS(entry_date=cal[100], exit_date=cal[110], code=c, entry_price=100.0, net_pct=n, gross_pct=n, score=1)
+           for c, n in (("A", 5.0), ("B", -3.0), ("C", 1.0))]
+
+    class S:
+        name = "fake"
+        holding_days = 10
+
+        def backtest(self, d, costs):
+            return list(trs)
+
+    monkeypatch.setattr(P, "OUT_DIR", str(tmp_path))
+    monkeypatch.setattr(P, "trading_calendar", lambda: cal)
+    monkeypatch.setattr(P, "strategies_by_name", lambda: ({"fake": S()}, {}))
+    monkeypatch.setattr(P, "aux_coverage", lambda c, d=None, force=False: {})
+    monkeypatch.setattr(P, "history_years", lambda: {"2023": 9999})
+    monkeypatch.setattr(P, "_notify", lambda t: None)
+    import strategies.daily_loader as DL
+    monkeypatch.setattr(DL, "load_macro_daily", lambda *a, **k: df.copy())
+    monkeypatch.setattr(SB, "score_trades", lambda d, t, log=print: (np.array([6.0, 4.5, np.nan]), {"2024": {"n_train": 9999}}))
+    P.run_job("pbt_20991231_000001", cal[90], cal[-1], ["fake"], False, [4.0, 5.7])
+    st = json.load(open(P._job_path("pbt_20991231_000001"), encoding="utf-8"))
+    r = {x["strategy"]: x for x in st["results"]}
+    assert set(r) == {"fake", "fake ≥4", "fake ≥5.7"}
+    assert r["fake"]["n_trades"] == 3 and r["fake ≥4"]["n_trades"] == 2 and r["fake ≥5.7"]["n_trades"] == 1
+    assert r["fake ≥5.7"]["avg_net"] == 5.0 and r["fake ≥4"]["pass_pct"] == round(2 / 3 * 100, 1)
+    assert st["params"]["strength"] == [4.0, 5.7] and st["strength_info"]["2024"]["n_train"] == 9999
+    assert any("강도를 매기지 못한 신호 1건" in w["msg"] for w in st["warnings"])
+
+
+def test_pbt_api_passes_strength(dash, monkeypatch):
+    calls = []
+
+    class FakeProc:
+        pid = 1
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(dash._sp, "Popen", lambda cmd, **kw: calls.append(cmd) or FakeProc())
+    monkeypatch.setattr(dash, "_PBT_PROC", {"proc": None, "job": None})
+    body = {"start": "20240101", "end": "20241231", "names": ["rsi_reversal"], "strength": "5.7, 4"}
+    with dash.app.test_client() as c:
+        assert c.post("/api/pbt/run", json={**body, "strength": "4;x"}, environ_base=LOCAL,
+                      headers=ACTION).status_code == 400
+        r = c.post("/api/pbt/run", json=body, environ_base=LOCAL, headers=ACTION).get_json()
+        assert r["ok"]
+        cmd = calls[0]
+        assert cmd[cmd.index("--strength") + 1] == "4,5.7"
+    src = open(os.path.join(OUTPUTS, "integrated_dashboard_server.py"), encoding="utf-8").read()
+    assert 'id="pbt-strength"' in src and "strength:(document.getElementById('pbt-strength')" in src

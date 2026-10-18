@@ -141,7 +141,30 @@ def aux_coverage(cal, df=None, force=False):
     return items
 
 
-def check_data(start, end, names, cal, cov, luck=False, strat_map=None):
+def parse_strength(text):
+    """'4, 5, 5.7' → [4.0, 5.0, 5.7] (0~10, 최대 5개, 중복 제거·정렬). 빈 값 → []. 잘못되면 ValueError."""
+    if text is None or str(text).strip() == "":
+        return []
+    vals = []
+    for tok in re.split(r"[,\s]+", str(text).strip()):
+        if not tok:
+            continue
+        if not re.fullmatch(r"\d{1,2}(\.\d{1,2})?", tok):
+            raise ValueError(f"강도 값 '{tok[:10]}' — 0~10 숫자만(예: 4, 5, 5.7)")
+        v = float(tok)
+        if not 0 <= v <= 10:
+            raise ValueError(f"강도 값 {v:g} — 0~10 범위여야 합니다")
+        vals.append(v)
+    vals = sorted(set(vals))
+    if len(vals) > 5:
+        raise ValueError("강도 값은 최대 5개까지")
+    return vals
+
+
+STRENGTH_PAD = 280      # 강도 피처(RSI·ATR 지수평활) 안정화용 기간 앞 여유 거래일
+
+
+def check_data(start, end, names, cal, cov, luck=False, strat_map=None, strength=None, hist_years=None):
     """데이터 충분성 점검 → (경고 목록, 실제 종료일, 실행 가능 여부).
     경고 = {"level": error|warn|info, "strategy": 이름|"", "msg": 문장}"""
     W = []
@@ -204,6 +227,21 @@ def check_data(start, end, names, cal, cov, luck=False, strat_map=None):
                     add("warn", n, f"{lab} 데이터가 {c[1]} 에서 멈춰 있습니다 — 이후 {len(gap)}거래일은 신호 없음"
                                    f"(수집 중단 의심)")
                     W[-1]["collect"] = {"aux": k, "start": gap[0], "end": gap[-1]}
+    if strength:
+        # 강도는 해마다 '그 이전' 매매(trades_history_v3)로 가중치를 다시 만든다 — 학습 표본이 모자란 해는 채점 불가
+        if hist_years is None:
+            add("error", "", "강도 학습 데이터(trades_history_v3.csv)가 없습니다 — AI 파이프라인(주 1회)이 만듭니다")
+        else:
+            from strength_backtest import MIN_TRAIN
+            for Y in sorted({d[:4] for d in win}):
+                n = sum(v for y, v in hist_years.items() if y < Y)
+                if n < MIN_TRAIN:
+                    add("warn", "", f"{Y}년은 강도 학습 표본이 {n:,}건(필요 {MIN_TRAIN:,}건)이라 채점할 수 없습니다 — "
+                                    f"그 해 신호는 강도 줄에서 빠집니다(라이브처럼 '강도 없음 = 안 삼')")
+        add("info", "", f"강도 비교: 전략마다 [강도 없음] + " + " / ".join(f"≥{v:g}" for v in strength) +
+            " 줄 — 강도 줄은 후보를 강도 높은 순으로 담음(모의매매와 같은 규칙). 처음 한 번은 강도 계산에 수 분")
+        if luck:
+            add("info", "", f"운 검정 시도 수 = 전략 수 × {len(strength) + 1} (강도 줄도 하나의 시도로 셈)")
     if luck:
         if len(names) < 5:
             add("info", "", "운 검정은 전략 5개 이상일 때만 의미가 있어 생략합니다")
@@ -211,6 +249,18 @@ def check_data(start, end, names, cal, cov, luck=False, strat_map=None):
             add("info", "", "운 검정은 거래일 80일 이상일 때만 수행합니다 — 생략")
     ok = not any(x["level"] == "error" for x in W)
     return W, eff_end, ok
+
+
+def history_years():
+    """trades_history_v3 의 진입 연도별 '라이브 전략' 행 수(없으면 전체) — 강도 학습 표본 점검용. 파일 없으면 None."""
+    from strength_backtest import HIST_CSV, _ic_constants
+    if not os.path.exists(HIST_CSV):
+        return None
+    h = pd.read_csv(HIST_CSV, usecols=["entry_date", "strategy"], dtype=str)
+    _, _, live = _ic_constants()
+    lv = h[h["strategy"].isin(live)]
+    h = lv if len(lv) >= 2000 else h
+    return h["entry_date"].str.replace("-", "").str[:4].value_counts().to_dict()
 
 
 # ── 시뮬 ─────────────────────────────────────────────────────────────────────
@@ -370,10 +420,40 @@ def _notify(text):
         pass
 
 
-def run_job(job, start, end, names, luck):
+def _result_row(n, live_label, warm, tw, eff_end, win, df, market_cagr):
+    """기간 안 진입 매매(tw) → 결과 행 + 일수익(%) 시계열. (score 큰 순으로 슬롯 배정)"""
+    from capital_simulator import build_price_lookup
+    done = [t for t in tw if str(t.exit_date) <= eff_end]
+    pm = {}
+    if tw:
+        codes = {str(t.code) for t in tw}
+        pm, _ = build_price_lookup(df[df["code"].astype(str).isin(codes) & df["date"].isin(win)])
+    eq, taken = equity_curve(tw, pm, win)
+    del pm
+    nets = [t.net_pct for t in done]
+    row = {"strategy": n, "live": live_label, "warmup": warm,
+           "n_trades": len(tw), "n_done": len(done), "n_open": len(tw) - len(done),
+           "win": round(sum(x > 0 for x in nets) / len(nets) * 100, 1) if nets else None,
+           "avg_net": round(float(np.mean(nets)), 2) if nets else None,
+           "slot_n": len(taken), "slot_avg": round(float(np.mean(taken)), 2) if taken else None,
+           **curve_stats(eq)}
+    row["vs_mkt"] = round(row["cagr"] - market_cagr, 2)
+    return row, eq.pct_change().fillna(0) * 100, len(done)
+
+
+def _with_score(t, sc):
+    """매매 복사본 — 슬롯 배정 순서를 강도로 바꾼다(원본은 그대로)."""
+    from types import SimpleNamespace
+    return SimpleNamespace(entry_date=t.entry_date, exit_date=t.exit_date, code=t.code,
+                           entry_price=t.entry_price, net_pct=t.net_pct,
+                           gross_pct=getattr(t, "gross_pct", t.net_pct), score=float(sc))
+
+
+def run_job(job, start, end, names, luck, strength=None):
     t0 = time.time()
+    strength = list(strength or [])
     state = {"job": job, "status": "running", "params": {"start": start, "end": end, "names": names,
-             "luck": luck}, "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+             "luck": luck, "strength": strength}, "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
              "progress": [0, len(names)], "current": "", "warnings": [], "results": [],
              "market": None, "luck": None}
     _write(job, state)
@@ -385,7 +465,8 @@ def run_job(job, start, end, names, luck):
     df = load_macro_daily()
     df["date"] = df["date"].astype(str)
     cov = aux_coverage(cal, df)
-    warns, eff_end, ok = check_data(start, end, names, cal, cov, luck, smap)
+    warns, eff_end, ok = check_data(start, end, names, cal, cov, luck, smap, strength,
+                                    history_years() if strength else None)
     state["warnings"] = warns
     state["params"]["eff_end"] = eff_end
     if warns:
@@ -400,6 +481,8 @@ def run_job(job, start, end, names, luck):
     win = [d for d in cal if start <= d <= eff_end]
     i0 = cal.index(win[0])
     need = max(warmup_days(smap[n]) for n in names)
+    if strength:
+        need = max(need, STRENGTH_PAD)          # 강도 피처(RSI·ATR 지수평활) 안정화 여유
     # 종료일 뒤 45거래일까지 남긴다 — 엔진은 청산가가 있어야 매매를 만들므로, 종료일에서 자르면
     # 기간 막바지 진입분이 통째로 사라져 마지막 몇 주가 '현금'으로 계산된다. 기간 안 진입만 집계하고,
     # 종료일에 미청산이면 그날 종가로 평가(자본곡선은 종료일에서 끝남).
@@ -409,40 +492,75 @@ def run_job(job, start, end, names, luck):
     m = df[df["date"].isin(win)].groupby("date")["change_pct"].mean().reindex(win).fillna(0)
     meq = (1 + m / 100).cumprod() * CAPITAL0
     state["market"] = {"name": "시장(코스닥 유니버스 동일가중)", **curve_stats(meq)}
-    from capital_simulator import build_price_lookup
     import strategy_engine as E
     R = {}
+    kept = {}                                   # 강도 모드: 전략별 기간 내 매매(강도는 한꺼번에 계산)
     for k, n in enumerate(names, 1):
         state["current"] = n
         state["progress"] = [k - 1, len(names)]
         _write(job, state)
         s = smap[n]
-        row = {"strategy": n, "live": live.get(n, ""), "warmup": warmup_days(s)}
         try:
             trs = s.backtest(df.copy(), E.DEFAULT_COSTS) or []
             gc.collect()
             tw = [t for t in trs if win[0] <= str(t.entry_date) <= eff_end]
-            done = [t for t in tw if str(t.exit_date) <= eff_end]
-            pm = {}
-            if tw:
-                codes = {str(t.code) for t in tw}
-                pm, _ = build_price_lookup(df[df["code"].astype(str).isin(codes) & df["date"].isin(win)])
-            eq, taken = equity_curve(tw, pm, win)
-            del pm
-            nets = [t.net_pct for t in done]
-            row.update(n_trades=len(tw), n_done=len(done), n_open=len(tw) - len(done),
-                       win=round(sum(x > 0 for x in nets) / len(nets) * 100, 1) if nets else None,
-                       avg_net=round(float(np.mean(nets)), 2) if nets else None,
-                       slot_n=len(taken), slot_avg=round(float(np.mean(taken)), 2) if taken else None,
-                       **curve_stats(eq))
-            row["vs_mkt"] = round(row["cagr"] - state["market"]["cagr"], 2)
-            if len(done) < MIN_TRADES:
+            del trs
+            row, R[n], n_done = _result_row(n, live.get(n, ""), warmup_days(s), tw, eff_end, win, df,
+                                            state["market"]["cagr"])
+            if n_done < MIN_TRADES:
                 state["warnings"].append({"level": "warn", "strategy": n,
-                                          "msg": f"기간 내 완료 매매 {len(done)}건 — 표본 부족(결과 신뢰도 낮음)"})
-            R[n] = eq.pct_change().fillna(0) * 100
+                                          "msg": f"기간 내 완료 매매 {n_done}건 — 표본 부족(결과 신뢰도 낮음)"})
+            if strength:
+                row["strength_min"] = None
+                row["base"] = n
+                kept[n] = tw
         except Exception as e:
-            row["error"] = f"{type(e).__name__}: {str(e)[:120]}"
+            row = {"strategy": n, "live": live.get(n, ""), "warmup": warmup_days(s),
+                   "error": f"{type(e).__name__}: {str(e)[:120]}"}
         state["results"].append(row)
+        gc.collect()
+    if strength and kept:
+        # 모든 전략의 신호를 모아 강도를 한 번에 계산(DB 를 한 번만 읽는다) → 임계별 줄 추가
+        state["current"] = "강도 계산(처음엔 수 분 — 이후 같은 날은 저장분 사용)"
+        state["progress"] = [len(names), len(names)]
+        _write(job, state)
+        import strength_backtest as SB
+        allt = [t for n in kept for t in kept[n]]
+        try:
+            scores, info = SB.score_trades(df, allt, log=print)
+        except Exception as e:
+            scores, info = None, {}
+            state["warnings"].append({"level": "error", "strategy": "",
+                                      "msg": f"강도 계산 실패 — {type(e).__name__}: {str(e)[:150]}"})
+        state["strength_info"] = info
+        if scores is not None:
+            pos = 0
+            for n in kept:
+                tw = kept[n]
+                sc = scores[pos:pos + len(tw)]
+                pos += len(tw)
+                n_un = int(np.isnan(sc).sum())
+                if n_un:
+                    state["warnings"].append({"level": "info", "strategy": n,
+                                              "msg": f"강도를 매기지 못한 신호 {n_un:,}건(학습 표본 부족한 해) — 강도 줄에서 제외"})
+                for th in strength:
+                    lab = f"{n} ≥{th:g}"
+                    state["current"] = lab
+                    _write(job, state)
+                    sel = [_with_score(t, v) for t, v in zip(tw, sc) if v == v and v >= th]
+                    try:
+                        row, R[lab], n_done = _result_row(lab, "", warmup_days(smap[n]), sel, eff_end, win, df,
+                                                          state["market"]["cagr"])
+                        row.update(base=n, strength_min=th, pass_pct=round(len(sel) / len(tw) * 100, 1) if tw else None)
+                        if n_done < MIN_TRADES:
+                            state["warnings"].append({"level": "warn", "strategy": lab,
+                                                      "msg": f"강도 ≥{th:g} 통과 완료 매매 {n_done}건 — 표본 부족(결과 신뢰도 낮음)"})
+                    except Exception as e:
+                        row = {"strategy": lab, "base": n, "strength_min": th,
+                               "error": f"{type(e).__name__}: {str(e)[:120]}"}
+                    state["results"].append(row)
+            del scores
+        kept.clear()
         gc.collect()
     state["progress"] = [len(names), len(names)]
     if luck and len(R) >= 5 and len(win) >= 80:
@@ -479,13 +597,21 @@ def main():
     ap.add_argument("--job", default=None)
     ap.add_argument("--luck", action="store_true")
     ap.add_argument("--check", action="store_true", help="데이터 점검만 하고 JSON 출력")
+    ap.add_argument("--strength", default="", help="강도 비교 임계(쉼표 구분, 예: 4,5,5.7)")
     a = ap.parse_args()
     names = [n.strip() for n in a.names.split(",") if n.strip()]
     if a.check:
         cal = trading_calendar()
         cov = aux_coverage(cal)
         smap, _ = strategies_by_name()
-        warns, eff_end, ok = check_data(a.start, a.end, names, cal, cov, a.luck, smap)
+        try:
+            sv = parse_strength(a.strength)
+        except ValueError as e:
+            print("PBT_CHECK " + json.dumps({"ok": False, "warnings": [{"level": "error", "strategy": "",
+                                                                          "msg": str(e)}]}, ensure_ascii=False))
+            return
+        warns, eff_end, ok = check_data(a.start, a.end, names, cal, cov, a.luck, smap, sv,
+                                        history_years() if sv else None)
         win = [d for d in cal if a.start <= d <= eff_end]
         print("PBT_CHECK " + json.dumps({"ok": ok, "warnings": warns, "eff_end": eff_end,
                                          "n_days": len(win), "data": [cal[0], cal[-1]] if cal else None,
@@ -493,7 +619,7 @@ def main():
         return
     job = a.job or datetime.now().strftime("pbt_%Y%m%d_%H%M%S")
     try:
-        run_job(job, a.start, a.end, names, a.luck)
+        run_job(job, a.start, a.end, names, a.luck, parse_strength(a.strength))
     except Exception as e:
         try:
             st = json.load(open(_job_path(job), encoding="utf-8"))
