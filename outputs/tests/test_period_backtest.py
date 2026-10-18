@@ -275,3 +275,123 @@ def test_collect_status_marks_dead_runner_stale(dash, monkeypatch, tmp_path):
     st = {k["kind"]: k["state"] for k in d["kinds"]}
     assert st["short"]["status"] == "stale" and st["individual"] is None
     assert d["aux_to_kind"]["individual"] == "individual"
+
+
+# ── 부족분 한 번에 수집 + 완료/미완료 보고 (2026-10-18) ──
+def test_verdict_and_report_lines(monkeypatch):
+    import collect_aux as C
+    cal = _cal(30)
+    monkeypatch.setattr(C, "_cal", lambda: cal)
+    monkeypatch.setattr(C, "have_days", lambda k, s, e: set(cal) - {cal[3], cal[4], cal[5], cal[9]})
+    v = C._verdict("individual", cal[0], cal[-1], 0)
+    assert v["status"] == "partial" and v["missing_n"] == 4 and v["n_days"] == 30
+    assert v["ranges"] == f"{cal[3]}~{cal[5]}(3일), {cal[9]}"
+    line = C.step_line(v)
+    assert line.startswith("⚠ 개인 순매수") and "4/30거래일 미완료" in line
+    monkeypatch.setattr(C, "have_days", lambda k, s, e: set(cal))
+    assert C.step_line(C._verdict("short", cal[0], cal[-1], 0)).startswith("✅")
+    monkeypatch.setattr(C, "have_days", lambda k, s, e: set())
+    v = C._verdict("credit", cal[0], cal[-1], 1)
+    assert v["status"] == "failed" and "(rc=1)" in C.step_line(v)
+
+
+def test_short_ban_days_not_counted_as_missing(monkeypatch):
+    import collect_aux as C
+    cal = _cal(40, start=20200309)                # 금지기간(2020-03-16~) 걸침
+    monkeypatch.setattr(C, "_cal", lambda: cal)
+    monkeypatch.setattr(C, "have_days", lambda k, s, e: {d for d in cal if d < "20200316"})
+    v = C._verdict("short", cal[0], cal[-1], 0)
+    assert v["status"] == "done" and "금지기간" in v["note"]
+
+
+def test_plan_all_ranges():
+    import collect_aux as C
+    cal = ["20180614", "20180615"] + [f"2021010{i}" for i in (4, 5, 6, 7, 8)] + ["20261014", "20261015", "20261016"]
+    plan = dict((k, (s, e)) for k, s, e in C.plan_all(cal))
+    assert list(dict.fromkeys(k for k, _, _ in C.plan_all(cal))) == ["flow", "individual", "short", "credit"]
+    assert plan["individual"] == ("20180614", "20261015")      # 오늘분은 다음 자동수집이 채움
+    assert plan["credit"] == ("20210104", "20261014")          # 신용은 2일 늦게 나옴
+
+
+def test_run_all_reports_done_and_missing(monkeypatch, tmp_path):
+    import collect_aux as C
+    cal = _cal(30)
+    sent, calls = [], []
+    monkeypatch.setattr(C, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(C, "_cal", lambda: cal)
+    monkeypatch.setattr(C, "plan_all", lambda c, now=None: [("individual", cal[0], cal[-1]),
+                                                            ("short", cal[0], cal[-1]),
+                                                            ("credit", cal[0], cal[-1])])
+    monkeypatch.setattr(C, "_exec", lambda kind, cmd, cwd, st, key, log_mode="w": calls.append((kind, cmd)) or 0)
+    monkeypatch.setattr(C, "invalidate_caches", lambda k: None)
+    monkeypatch.setattr(C, "_refresh_coverage", lambda st: None)
+    monkeypatch.setattr(C, "_market_hours", lambda now=None: False)
+    monkeypatch.setattr(C, "_credit_pre2022_rows", lambda: 0)            # 키움이 2022 이전을 안 줌
+    monkeypatch.setattr(C, "_notify", sent.append)
+    have = {"individual": set(cal), "short": set(cal[:20]), "credit": set()}
+    monkeypatch.setattr(C, "have_days", lambda k, s, e: have[k])
+    rc = C.run_all()
+    rep = sent[-1]
+    assert "완료 1 · 일부 미완료 1 · 실패 1" in rep, rep
+    assert "✅ 개인 순매수" in rep and "⚠ 공매도 거래비중" in rep and "10/30거래일 미완료" in rep
+    assert "❌ 신용잔고" in rep and "FHPST04760000" in rep
+    assert [k for k, _ in calls] == ["individual", "short", "credit"]
+    assert "--limit" in calls[-1][1], "신용은 시험 수집만 하고 본 수집은 생략"
+    assert rc == 1
+    st = json.loads((tmp_path / "collect_all.json").read_text(encoding="utf-8"))
+    assert st["status"] == "done" and [s["status"] for s in st["steps"]] == ["done", "partial", "failed"]
+
+
+def test_credit_skipped_during_market_hours(monkeypatch, tmp_path):
+    import collect_aux as C
+    cal = _cal(10)
+    sent = []
+    monkeypatch.setattr(C, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(C, "_cal", lambda: cal)
+    monkeypatch.setattr(C, "plan_all", lambda c, now=None: [("credit", cal[0], cal[-1])])
+    monkeypatch.setattr(C, "_exec", lambda *a, **k: (_ for _ in ()).throw(AssertionError("장중엔 실행 금지")))
+    monkeypatch.setattr(C, "_refresh_coverage", lambda st: None)
+    monkeypatch.setattr(C, "_market_hours", lambda now=None: True)
+    monkeypatch.setattr(C, "_notify", sent.append)
+    assert C.run_all() == 0
+    assert "⏭ 신용잔고" in sent[-1] and "건너뜀 1" in sent[-1]
+
+
+def test_collect_lock_blocks_second_runner(monkeypatch, tmp_path):
+    import collect_aux as C
+    monkeypatch.setattr(C, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(C, "LOCK_PATH", str(tmp_path / "collect.lock"))
+    assert C._acquire_lock() and not C._acquire_lock()
+    old = __import__("time").time() - 600
+    os.utime(C.LOCK_PATH, (old, old))
+    assert C._acquire_lock(), "죽은 실행기의 자물쇠는 넘겨받는다"
+    C._release_lock()
+    assert not os.path.exists(C.LOCK_PATH)
+
+
+def test_collect_all_endpoint_and_bat(dash, monkeypatch, tmp_path):
+    import collect_aux as C
+    calls = []
+
+    class FakeProc:
+        pid = 1
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(dash._sp, "Popen", lambda cmd, **kw: calls.append(cmd) or FakeProc())
+    monkeypatch.setattr(dash, "_COLLECT_PROC", {"proc": None, "kind": None})
+    monkeypatch.setattr(C, "LOCK_PATH", str(tmp_path / "collect.lock"))
+    with dash.app.test_client() as c:
+        r = c.post("/api/pbt/collect", json={"kind": "all"}, environ_base=LOCAL, headers=ACTION).get_json()
+        assert r["ok"] and calls[0][-2:] == ["--kind", "all"]
+    # bat 이 돌고 있으면(자물쇠 신선) 대시보드 버튼은 409
+    monkeypatch.setattr(dash, "_COLLECT_PROC", {"proc": None, "kind": None})
+    (tmp_path / "collect.lock").write_text("1")
+    with dash.app.test_client() as c:
+        assert c.post("/api/pbt/collect", json={"kind": "all"}, environ_base=LOCAL,
+                      headers=ACTION).status_code == 409
+        assert c.get("/api/pbt/collect_status", environ_base=LOCAL).get_json()["running"] == "external"
+    raw = open(os.path.join(OUTPUTS, "collect_all.bat"), "rb").read()
+    raw.decode("ascii")
+    assert b"collect_aux.py --kind all" in raw and raw.count(b"\n") == raw.count(b"\r\n")

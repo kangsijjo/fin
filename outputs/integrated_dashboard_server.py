@@ -2424,8 +2424,16 @@ def api_pbt_collect_status():
     except Exception:
         pass
     p = _COLLECT_PROC["proc"]
+    running = _COLLECT_PROC["kind"] if (p is not None and p.poll() is None) else None
+    if not running:                       # collect_all.bat 처럼 대시보드 밖에서 돈 수집
+        try:
+            if _time.time() - os.path.getmtime(C.LOCK_PATH) < C.LOCK_STALE_SEC:
+                running = "external"
+        except OSError:
+            pass
     return jsonify({"ok": True, "kinds": kinds, "aux_to_kind": C.AUX_TO_KIND, "coverage": cov,
-                    "running": _COLLECT_PROC["kind"] if (p is not None and p.poll() is None) else None})
+                    "all": _collect_state(C, "all"), "plan_note": f"개인·공매도 = 가격 데이터 시작일부터, "
+                    f"신용 = {C.CREDIT_SINCE} 부터 · 빈 날만", "running": running})
 
 
 @app.route("/api/pbt/collect", methods=["POST"])
@@ -2437,22 +2445,31 @@ def api_pbt_collect():
     import collect_aux as C
     b = request.get_json(silent=True) or {}
     kind, start, end = str(b.get("kind", "")), str(b.get("start", "")), str(b.get("end", ""))
-    if kind not in C.KINDS:
+    if kind != "all" and kind not in C.KINDS:
         return jsonify({"ok": False, "msg": f"알 수 없는 수집 종류: {kind[:30]}"}), 400
-    if not (_DATE_RE.fullmatch(start) and _DATE_RE.fullmatch(end)) or start > end:
+    if kind != "all" and (not (_DATE_RE.fullmatch(start) and _DATE_RE.fullmatch(end)) or start > end):
         return jsonify({"ok": False, "msg": "날짜는 YYYYMMDD 8자리, 시작 ≤ 종료"}), 400
     p = _COLLECT_PROC["proc"]
     if p is not None and p.poll() is None:
         return jsonify({"ok": False, "msg": f"이미 수집 중({_COLLECT_PROC['kind']}) — 끝난 뒤 다시 시도",
                         "kind": _COLLECT_PROC["kind"]}), 409
-    cmd = [_VENV_PYTHON, str(BASE / "collect_aux.py"), "--kind", kind, "--start", start, "--end", end]
+    # collect_all.bat 로 돌고 있는 수집도 막는다 — 실행기가 5초마다 자물쇠 파일을 갱신
+    try:
+        if _time.time() - os.path.getmtime(C.LOCK_PATH) < C.LOCK_STALE_SEC:
+            return jsonify({"ok": False, "msg": "다른 수집(collect_all.bat 등)이 실행 중 — 끝난 뒤 다시 시도"}), 409
+    except OSError:
+        pass
+    cmd = [_VENV_PYTHON, str(BASE / "collect_aux.py"), "--kind", kind]
+    if kind != "all":
+        cmd += ["--start", start, "--end", end]
     try:
         (BASE / "logs").mkdir(exist_ok=True)
         logf = open(BASE / "logs" / "run_collect_aux.log", "w", encoding="utf-8", errors="replace")
         _COLLECT_PROC["proc"] = _sp.Popen(cmd, cwd=str(BASE), stdout=logf, stderr=_sp.STDOUT,
                                           creationflags=_NO_WIN)
         _COLLECT_PROC["kind"] = kind
-        return jsonify({"ok": True, "kind": kind, "msg": f"{C.KINDS[kind]['label']} 수집 시작"})
+        lab = "부족분 한 번에" if kind == "all" else C.KINDS[kind]["label"]
+        return jsonify({"ok": True, "kind": kind, "msg": f"{lab} 수집 시작"})
     except Exception as e:
         return jsonify({"ok": False, "msg": str(e)[:150]}), 500
 
@@ -3617,9 +3634,21 @@ function pbtColRender(){
       <td style="white-space:nowrap"><input type="date" id="pbtc-s-${k.kind}" style="${inp}">${k.range?` ~ <input type="date" id="pbtc-e-${k.kind}" style="${inp}">`:''}</td>
       <td><button class="runbtn" ${busy?'disabled style="opacity:.5"':''} onclick="pbtCollect('${k.kind}')">수집</button></td>
       <td style="font-size:12px;max-width:360px">${stTxt(k.state)}<div style="color:#64748b;font-size:11px">${_pbtEsc(k.eta)}</div></td></tr>`; }).join('');
+  // 부족분 한 번에 (collect_all.bat 과 같은 작업) — 단계별 완료/미완료
+  const A=C.all, ic={done:'✅',partial:'⚠',failed:'❌',skipped:'⏭',running:'⏳',pending:'·'};
+  const stepTxt=s=>{ const m=s.missing_n; let b='';
+    if(s.status==='done') b='빠진 날 0'; else if(m!=null&&s.status!=='pending'&&s.status!=='running') b=`${m}/${s.n_days}거래일 미완료${s.ranges?': '+s.ranges:''}`;
+    return `<div>${ic[s.status]||''} <b>${_pbtEsc(s.label)}</b> <span style="color:#64748b">${s.start&&s.kind!=='flow'?_pbtD(s.start)+'~'+_pbtD(s.end):''}</span> ${_pbtEsc(b)}${s.note?` <span style="color:#94a3b8">· ${_pbtEsc(s.note)}</span>`:''}</div>`; };
+  const allBox=`<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+    <button class="runbtn" style="background:#2563eb;color:#fff;${C.running?'opacity:.5':''}" ${C.running?'disabled':''} onclick="pbtCollect('all')">&#x1F4E5; 부족분 한 번에 수집</button>
+    <span style="font-size:12px;color:#94a3b8">${_pbtEsc(C.plan_note||'')} · 끝나면 텔레그램으로 완료/미완료 보고 · PC 에서 <code>collect_all.bat</code> 더블클릭도 같은 작업</span></div>`+
+    (A?`<div style="font-size:12px;line-height:1.7;padding:6px 10px;background:#111827;border-radius:6px;margin-bottom:8px">
+      <div style="color:#cbd5e1">${A.status==='running'?`⏳ 진행 중 — ${_pbtEsc(A.current||'')} ${A.elapsed_sec!=null?Math.round(A.elapsed_sec/60)+'분':''}`:A.status==='stale'?'<span style="color:#ef4444">중단됨</span>':_pbtEsc(A.summary||'')} <span style="color:#64748b">${_pbtEsc(A.started||'')}</span></div>
+      ${(A.steps||[]).map(stepTxt).join('')}
+      ${A.status==='running'&&(A.tail||[]).length?`<div style="color:#64748b">${_pbtEsc(A.tail.slice(-1)[0])}</div>`:''}</div>`:'');
   // 입력칸 값 유지(3초 폴링으로 다시 그려도 지우지 않음)
   const keep={}; document.querySelectorAll('#pbt-col input').forEach(i=>keep[i.id]=i.value);
-  setHtml('pbt-col', `<table style="width:100%;font-size:13px"><thead><tr><th>데이터</th><th>지금 있는 구간</th><th>수집할 기간</th><th></th><th>상태 · 소요</th></tr></thead><tbody>${rows}</tbody></table>
+  setHtml('pbt-col', allBox+`<table style="width:100%;font-size:13px"><thead><tr><th>데이터</th><th>지금 있는 구간</th><th>수집할 기간</th><th></th><th>상태 · 소요</th></tr></thead><tbody>${rows}</tbody></table>
     <div style="font-size:11px;color:#64748b;margin-top:6px">한 번에 한 종류만 수집합니다(KRX 차단·키움 키 충돌 방지). 끝나면 텔레그램으로 알리고, 데이터 구간을 다시 계산합니다 — 그다음 [데이터 점검]을 다시 누르세요. 이미 있는 날은 건너뜁니다.</div>`);
   Object.entries(keep).forEach(([id,v])=>{ const e=document.getElementById(id); if(e&&v) e.value=v; });
   setTxt('pbt-colsum', C.running?`— 수집 중: ${C.running}`:'');
@@ -3634,6 +3663,13 @@ async function pbtColFromWarn(aux,s,e){
   pbtCollect(kind);
 }
 async function pbtCollect(kind){
+  if(kind==='all'){
+    if(!confirm('부족한 데이터를 한 번에 수집할까요?\\n가격·외국인·기관 → 개인 순매수 → 공매도 → 신용잔고 순서, 빈 날만 받습니다.\\n신용은 수 시간 걸릴 수 있고, 장중(08:30~16:00)이면 신용만 건너뜁니다.\\n끝나면 텔레그램으로 완료/미완료를 보냅니다.')) return;
+    const r=await fetch('/api/pbt/collect',{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Action':'1'},body:JSON.stringify({kind:'all'})});
+    let d={}; try{ d=await r.json(); }catch(x){ d={ok:false,msg:'응답 해석 실패 ('+r.status+')'}; }
+    if(!d.ok) alert(d.msg||'수집 시작 실패');
+    return pbtColLoad();
+  }
   const k=((_pbtCol&&_pbtCol.kinds)||[]).find(x=>x.kind===kind); if(!k) return;
   // flow(가격·외국인·기관)는 기간을 안 쓰므로 비워도 오늘로 채운다
   const s=(document.getElementById('pbtc-s-'+kind)||{}).value||(kind==='flow'?new Date().toISOString().slice(0,10):''), ei=document.getElementById('pbtc-e-'+kind);
