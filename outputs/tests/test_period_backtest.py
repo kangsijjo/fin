@@ -66,6 +66,85 @@ def test_check_data_flags_every_shortage():
     assert not ok
 
 
+def test_check_data_uses_first_trading_day_and_emits_collect_hints():
+    """2026-10-18 오경보: 시작일 1/1(휴장) vs 데이터 첫날 1/4 → '부터입니다' 경고가 나면 안 된다."""
+    import period_backtest as P
+    import strategy_engine as E
+    smap = {s.name: s for s in E.ALL_STRATEGIES}
+    cal = _cal(400)
+    holiday = cal.pop(200)                       # 휴장일 하나를 달력에서 뺀다
+    cov = {"foreign": [cal[0], cal[-1]], "inst": [cal[0], cal[-1]],
+           "individual": [cal[200], cal[300]], "short": [cal[200], cal[-1]], "credit": None}
+    w, _, ok = P.check_data(holiday, cal[-1], ["supply_abc", "h52w_short_dec", "h52w_cred_dec"],
+                            cal, cov, False, smap)
+    msgs = " | ".join(x["msg"] for x in w)
+    assert ok and "부터입니다" not in msgs, msgs
+    hints = [x["collect"] for x in w if x.get("collect")]
+    assert {"aux": "individual", "start": cal[301], "end": cal[-1]} in hints     # 멈춤 구간
+    assert {"aux": "credit", "start": cal[200], "end": cal[-1]} in hints         # 아예 없음
+    # 진짜로 앞이 비면 그 구간을 정확히 제안
+    w, _, _ = P.check_data(cal[150], cal[-1], ["h52w_short_dec"], cal, cov, False, smap)
+    h = [x["collect"] for x in w if x.get("collect")]
+    assert h == [{"aux": "short", "start": cal[150], "end": cal[199]}]
+
+
+def test_collect_kinds_cover_every_aux_key_and_build_safe_commands():
+    import collect_aux as C
+    import period_backtest as P
+    assert set(C.AUX_TO_KIND) == set(P._AUX_LABEL), "점검이 요구하는 데이터마다 수집기가 있어야 한다"
+    cmd, _ = C.KINDS["individual"]["cmd"]("20180614", "20201230")
+    assert cmd[-3:] == ["--backfill", "20180614", "20201230"]
+    cmd, _ = C.KINDS["short"]["cmd"]("20180614", "20201230")
+    assert cmd[cmd.index("--start") + 1] == "20180614" and cmd[cmd.index("--end") + 1] == "20201230"
+    cmd, cwd = C.KINDS["credit"]["cmd"]("20210104", "20211230")
+    assert cmd[cmd.index("--since") + 1] == "2021-01-04" and cwd.endswith("Stock_AI_Project")
+
+
+def test_collect_invalidates_caches(tmp_path, monkeypatch):
+    import collect_aux as C
+    import period_backtest as P
+    from strategies import daily_loader as L
+    cov = tmp_path / "coverage.json"
+    cov.write_text(json.dumps({"data_max": "20261016", "items": {}}), encoding="utf-8")
+    sig = tmp_path / "_daily_cache.sig.json"
+    sig.write_text(json.dumps([3, 10, "x.csv", 1]), encoding="utf-8")
+    monkeypatch.setattr(P, "COVERAGE_JSON", str(cov))
+    monkeypatch.setattr(C, "LOADER_DIR", str(tmp_path))
+    C.invalidate_caches("individual")
+    assert json.loads(cov.read_text(encoding="utf-8"))["data_max"] == ""
+    assert L._read_sig(str(sig)) != (3, 10, "x.csv", 1)
+
+
+def test_archive_cleanup_keeps_latest_and_restores(tmp_path, monkeypatch):
+    import archive_cleanup as A
+    root = tmp_path / "fin"
+    res = root / "outputs" / "results"
+    res.mkdir(parents=True)
+    names = ["trades_AB_20260504-20261015.csv", "trades_AB_20260504-20261016.csv",
+             "trades_A_20260504-20261016.csv", "strategy_lab_trades_20261015.csv",
+             "strategy_lab_trades_20261016.csv", "exit_compare_20261016.csv"]
+    for n in names:
+        (res / n).write_text("x", encoding="utf-8")
+    picked = sorted(os.path.basename(p) for p in A.pick_snapshots(str(res)))
+    assert picked == ["strategy_lab_trades_20261015.csv", "trades_AB_20260504-20261015.csv"]
+    monkeypatch.setattr(A, "ROOT", str(root))
+    monkeypatch.setattr(A, "ARCHIVE_ROOT", str(root / "_archive"))
+    monkeypatch.setattr(A, "PICKERS", {"snapshots": lambda: A.pick_snapshots(str(res))})
+    moved, skipped, _, dest = A.archive(["snapshots"], stamp="20261018", now=9e12)
+    assert len(moved) == 2 and not skipped
+    assert not (res / "trades_AB_20260504-20261015.csv").exists()
+    assert (res / "trades_AB_20260504-20261016.csv").exists(), "최신은 남긴다"
+    A.restore(dest)
+    assert (res / "trades_AB_20260504-20261015.csv").exists()
+
+
+def test_run_recheck_collects_individual_daily():
+    raw = open(os.path.join(OUTPUTS, "run_recheck.bat"), "rb").read()
+    assert b"backfill_individual.py --backfill !IND_LO! !TODAY!" in raw
+    assert raw.count(b"\n") == raw.count(b"\r\n"), "bat 은 CRLF"
+    raw.decode("ascii")
+
+
 def test_equity_curve_matches_simulate_capital():
     import period_backtest as P
     from capital_simulator import simulate_capital
@@ -154,3 +233,45 @@ def test_pbt_run_spawns_once_and_check_parses(dash, monkeypatch):
     with dash.app.test_client() as c:
         d = c.post("/api/pbt/check", json=body, environ_base=LOCAL, headers=ACTION).get_json()
     assert d["ok"] and d["n_days"] == 244
+
+
+def test_collect_endpoint_guards_and_single_job(dash, monkeypatch, tmp_path):
+    import collect_aux as C
+    calls = []
+
+    class FakeProc:
+        pid = 1
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(dash._sp, "Popen", lambda cmd, **kw: calls.append(cmd) or FakeProc())
+    monkeypatch.setattr(dash, "_COLLECT_PROC", {"proc": None, "kind": None})
+    body = {"kind": "individual", "start": "20180614", "end": "20201230"}
+    with dash.app.test_client() as c:
+        assert c.post("/api/pbt/collect", json=body, environ_base=LOCAL).status_code == 403          # CSRF
+        assert c.post("/api/pbt/collect", json=body, environ_base={"REMOTE_ADDR": "10.0.0.5"},
+                      headers=ACTION).status_code in (302, 403)                                     # 원격
+        assert c.post("/api/pbt/collect", json={**body, "kind": "rm -rf"}, environ_base=LOCAL,
+                      headers=ACTION).status_code == 400                                            # 화이트리스트
+        assert c.post("/api/pbt/collect", json={**body, "start": "20210101", "end": "20200101"},
+                      environ_base=LOCAL, headers=ACTION).status_code == 400                        # 역순
+        r = c.post("/api/pbt/collect", json=body, environ_base=LOCAL, headers=ACTION).get_json()
+        assert r["ok"] and calls[0][-6:] == ["--kind", "individual", "--start", "20180614", "--end", "20201230"]
+        assert c.post("/api/pbt/collect", json={**body, "kind": "short"}, environ_base=LOCAL,
+                      headers=ACTION).status_code == 409, "한 번에 한 종류만"
+
+
+def test_collect_status_marks_dead_runner_stale(dash, monkeypatch, tmp_path):
+    import collect_aux as C
+    monkeypatch.setattr(C, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(dash, "_COLLECT_PROC", {"proc": None, "kind": None})
+    p = tmp_path / "collect_short.json"
+    p.write_text(json.dumps({"kind": "short", "status": "running"}), encoding="utf-8")
+    old = __import__("time").time() - 600
+    os.utime(p, (old, old))
+    with dash.app.test_client() as c:
+        d = c.get("/api/pbt/collect_status", environ_base=LOCAL).get_json()
+    st = {k["kind"]: k["state"] for k in d["kinds"]}
+    assert st["short"]["status"] == "stale" and st["individual"] is None
+    assert d["aux_to_kind"]["individual"] == "individual"

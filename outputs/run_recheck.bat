@@ -61,6 +61,15 @@ REM   pykrx/KRX web path - independent of KIS/Kiwoom keys. Never changes EXITCOD
 !PYEXE! -u backfill_shorting_fundamental.py --market KOSDAQ --days 30 --until-yesterday >> "!LOGFILE!" 2>&1
 echo [shortfund] exit=!ERRORLEVEL! (data refresh only) >> "!LOGFILE!"
 
+REM [2026-10-18] Individual (retail) net buying -> stock.db supply_demand.individual_net_value
+REM   (input of the 6 supply_* strategies). It was backfilled once on 2026-09-08 and never
+REM   scheduled, so it silently stopped there. Window = last 45 calendar days; only dates with
+REM   no individual value at all are fetched, so a missed evening self-heals. KRX login (.env).
+REM   Never changes EXITCODE.
+for /f %%I in ('powershell -NoProfile -Command "(Get-Date).AddDays(-45).ToString('yyyyMMdd')"') do set "IND_LO=%%I"
+!PYEXE! -u backfill_individual.py --backfill !IND_LO! !TODAY! >> "!LOGFILE!" 2>&1
+echo [individual] exit=!ERRORLEVEL! (data refresh only) >> "!LOGFILE!"
+
 :report
 echo  Exit code: !EXITCODE! (time: %TIME%) >> "!LOGFILE!"
 echo Exit code: !EXITCODE!

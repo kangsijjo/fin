@@ -190,14 +190,20 @@ def check_data(start, end, names, cal, cov, luck=False, strat_map=None):
             lab = _AUX_LABEL[k]
             if not c:
                 add("warn", n, f"{lab} 데이터가 없습니다 — 신호가 나오지 않을 수 있습니다")
+                W[-1]["collect"] = {"aux": k, "start": win[0], "end": win[-1]}
                 continue
-            if start < c[0]:
-                add("warn", n, f"{lab} 데이터는 {c[0]} 부터입니다 — 그 이전 구간은 신호 없음")
+            # [2026-10-18] 기준은 '기간의 첫 거래일'(win[0]) — 종전 start(달력일) 비교는
+            # 1/1(휴장)처럼 거래일이 아닌 시작일에서 데이터가 첫 거래일부터 있어도 오경보.
+            if win[0] < c[0]:
+                gap = [d for d in win if d < c[0]]
+                add("warn", n, f"{lab} 데이터는 {c[0]} 부터입니다 — 그 이전 {len(gap)}거래일은 신호 없음")
+                W[-1]["collect"] = {"aux": k, "start": gap[0], "end": gap[-1]}
             if eff_end > c[1]:
-                lag = len([d for d in cal if c[1] < d <= eff_end])
-                if lag > 5:
-                    add("warn", n, f"{lab} 데이터가 {c[1]} 에서 멈춰 있습니다 — 이후 {lag}거래일은 신호 없음"
+                gap = [d for d in win if d > c[1]]
+                if len(gap) > 5:
+                    add("warn", n, f"{lab} 데이터가 {c[1]} 에서 멈춰 있습니다 — 이후 {len(gap)}거래일은 신호 없음"
                                    f"(수집 중단 의심)")
+                    W[-1]["collect"] = {"aux": k, "start": gap[0], "end": gap[-1]}
     if luck:
         if len(names) < 5:
             add("info", "", "운 검정은 전략 5개 이상일 때만 의미가 있어 생략합니다")

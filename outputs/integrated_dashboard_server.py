@@ -2388,6 +2388,75 @@ def api_pbt_status():
     return jsonify(d)
 
 
+# ── 9c. 부족한 데이터 수동 수집 (2026-10-18) ─────────────────────────────────────
+# 테스트기 점검에서 '데이터 부족'이 나오면 그 구간을 버튼으로 수집한다.
+# 실제 수집은 collect_aux.py(별도 프로세스)가 기존 수집기를 기간 인자로 부른다 — 명령은 그 표(KINDS)에서만 만든다.
+# 동시 1건(KRX 스로틀·키움 키 공유). 상태는 db/period_bt/collect_{kind}.json.
+_COLLECT_PROC = {"proc": None, "kind": None}
+_COLLECT_STALE_SEC = 90          # 실행기가 5초마다 상태를 쓴다 — 이보다 오래 안 바뀌면 중단된 것
+
+
+def _collect_state(C, kind):
+    path = Path(C.state_path(kind))
+    if not path.exists():
+        return None
+    try:
+        st = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"status": "running"}                    # 원자적 교체 직전
+    p = _COLLECT_PROC["proc"]
+    alive = p is not None and p.poll() is None and _COLLECT_PROC["kind"] == kind
+    if st.get("status") == "running" and not alive and _time.time() - path.stat().st_mtime > _COLLECT_STALE_SEC:
+        st["status"] = "stale"
+        st["error"] = f"실행기가 멈췄습니다(대시보드 재시작·PC 종료 등) — logs/collect_{kind}.log 확인 후 다시 수집"
+    return st
+
+
+@app.route("/api/pbt/collect_status")
+def api_pbt_collect_status():
+    import collect_aux as C
+    kinds = [{"kind": k, "label": v["label"], "src": v["src"], "eta": v["eta"], "range": v["range"],
+              "aux": v["aux"], "state": _collect_state(C, k)} for k, v in C.KINDS.items()]
+    cov = None
+    try:
+        import period_backtest as P
+        cov = json.load(open(P.COVERAGE_JSON, encoding="utf-8")).get("items")
+    except Exception:
+        pass
+    p = _COLLECT_PROC["proc"]
+    return jsonify({"ok": True, "kinds": kinds, "aux_to_kind": C.AUX_TO_KIND, "coverage": cov,
+                    "running": _COLLECT_PROC["kind"] if (p is not None and p.poll() is None) else None})
+
+
+@app.route("/api/pbt/collect", methods=["POST"])
+def api_pbt_collect():
+    if not _same_origin_action(request):
+        return jsonify({"ok": False, "msg": "대시보드 페이지에서만 실행할 수 있습니다(CSRF 차단)"}), 403
+    if not _is_local(request):
+        return jsonify({"ok": False, "msg": "로컬에서만 허용(원격 실행 불가)"}), 403
+    import collect_aux as C
+    b = request.get_json(silent=True) or {}
+    kind, start, end = str(b.get("kind", "")), str(b.get("start", "")), str(b.get("end", ""))
+    if kind not in C.KINDS:
+        return jsonify({"ok": False, "msg": f"알 수 없는 수집 종류: {kind[:30]}"}), 400
+    if not (_DATE_RE.fullmatch(start) and _DATE_RE.fullmatch(end)) or start > end:
+        return jsonify({"ok": False, "msg": "날짜는 YYYYMMDD 8자리, 시작 ≤ 종료"}), 400
+    p = _COLLECT_PROC["proc"]
+    if p is not None and p.poll() is None:
+        return jsonify({"ok": False, "msg": f"이미 수집 중({_COLLECT_PROC['kind']}) — 끝난 뒤 다시 시도",
+                        "kind": _COLLECT_PROC["kind"]}), 409
+    cmd = [_VENV_PYTHON, str(BASE / "collect_aux.py"), "--kind", kind, "--start", start, "--end", end]
+    try:
+        (BASE / "logs").mkdir(exist_ok=True)
+        logf = open(BASE / "logs" / "run_collect_aux.log", "w", encoding="utf-8", errors="replace")
+        _COLLECT_PROC["proc"] = _sp.Popen(cmd, cwd=str(BASE), stdout=logf, stderr=_sp.STDOUT,
+                                          creationflags=_NO_WIN)
+        _COLLECT_PROC["kind"] = kind
+        return jsonify({"ok": True, "kind": kind, "msg": f"{C.KINDS[kind]['label']} 수집 시작"})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)[:150]}), 500
+
+
 # ── 10. HTML ───────────────────────────────────────────────────────────────────
 
 HTML = """\
@@ -2773,6 +2842,10 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
       <button class="runbtn" style="background:#2563eb;color:#fff" onclick="pbtRun()">실행</button>
     </div>
     <div id="pbt-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:2px 10px;max-height:190px;overflow:auto;padding:8px;background:#0f172a;border:1px solid #1e293b;border-radius:8px;font-size:12px"></div>
+    <details id="pbt-colbox" style="margin-top:10px;background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:6px 10px" ontoggle="if(this.open) pbtColLoad()">
+      <summary style="cursor:pointer;font-size:13px;color:#cbd5e1">&#x1F4E5; 데이터 현황 · 수동 수집 <span id="pbt-colsum" style="color:#64748b;font-size:12px"></span></summary>
+      <div id="pbt-col" style="margin-top:8px;overflow-x:auto"></div>
+    </details>
     <div id="pbt-warn" style="margin-top:10px"></div>
     <div id="pbt-prog" style="margin-top:8px;font-size:12px;color:#94a3b8"></div>
     <div id="pbt-res" style="margin-top:8px;overflow-x:auto"></div>
@@ -3509,10 +3582,70 @@ async function _pbtPost(url){
 function _pbtWarnHtml(ws, head){
   if(!ws||!ws.length) return head?`<div style="padding:8px 12px;border-radius:8px;background:rgba(16,185,129,.08);border:1px solid #065f46;color:#6ee7b7;font-size:13px">✓ ${head} — 데이터 부족 없음</div>`:'';
   const col={error:'#ef4444',warn:'#fbbf24',info:'#94a3b8'}, ic={error:'⛔',warn:'⚠',info:'ℹ'};
-  const bad=ws.some(w=>w.level==='error');
+  const bad=ws.some(w=>w.level==='error'), seen=new Set();
   return `<div style="padding:8px 12px;border-radius:8px;background:${bad?'rgba(239,68,68,.08)':'rgba(251,191,36,.07)'};border:1px solid ${bad?'#7f1d1d':'#78350f'};font-size:13px;line-height:1.7">
     ${head?`<div style="font-weight:700;margin-bottom:2px">${head}</div>`:''}
-    ${ws.map(w=>`<div style="color:${col[w.level]||'#cbd5e1'}">${ic[w.level]||''} ${w.strategy?`<b>${_pbtEsc(w.strategy)}</b>: `:''}${_pbtEsc(w.msg)}</div>`).join('')}</div>`;
+    ${ws.map(w=>{
+      // 같은 부족 구간(여러 전략이 같은 데이터를 씀)은 버튼을 한 번만 — 2026-10-18 수동 수집
+      let btn=''; const c=w.collect;
+      if(c){ const key=c.aux+c.start+c.end; if(!seen.has(key)){ seen.add(key);
+        btn=` <button class="runbtn" style="padding:1px 8px;font-size:11px" onclick="pbtColFromWarn('${_pbtEsc(c.aux)}','${_pbtEsc(c.start)}','${_pbtEsc(c.end)}')">&#x1F4E5; 이 구간 수집</button>`; } }
+      return `<div style="color:${col[w.level]||'#cbd5e1'}">${ic[w.level]||''} ${w.strategy?`<b>${_pbtEsc(w.strategy)}</b>: `:''}${_pbtEsc(w.msg)}${btn}</div>`;}).join('')}</div>`;
+}
+// ── 부족한 데이터 수동 수집 (2026-10-18) ──
+let _pbtCol=null, _pbtColTimer=null;
+async function pbtColLoad(){
+  clearTimeout(_pbtColTimer);
+  try{ _pbtCol=await fetch('/api/pbt/collect_status').then(r=>r.json()); }
+  catch(e){ setHtml('pbt-col',`<span style="color:#ef4444">수집 현황 로드 실패: ${_pbtEsc(e.message)}</span>`); return; }
+  pbtColRender();
+  if(_pbtCol.running) _pbtColTimer=setTimeout(pbtColLoad,3000);
+}
+function pbtColRender(){
+  const C=_pbtCol||{}, cov=C.coverage||{}, inp='background:#111827;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:2px 4px';
+  const lab={foreign:'외국인',inst:'기관',individual:'개인',credit:'신용',short:'공매도'};
+  const stTxt=s=>{ if(!s) return '<span style="color:#64748b">-</span>';
+    const t=(s.tail||[]).slice(-1)[0]||'';
+    if(s.status==='running') return `<span style="color:#38bdf8">수집 중 ${s.elapsed_sec!=null?Math.round(s.elapsed_sec/60)+'분':''}</span> <span style="color:#64748b">${_pbtEsc(t)}</span>`;
+    if(s.status==='done') return `<span style="color:#10b981">✓ 완료 ${_pbtEsc(s.finished||'')}</span> <span style="color:#64748b">(${_pbtD(s.start)}~${_pbtD(s.end)})</span>`;
+    return `<span style="color:#ef4444">${s.status==='stale'?'중단됨':'실패'} ${_pbtEsc(s.error||('rc='+s.rc))}</span> <span style="color:#64748b">${_pbtEsc(t)}</span>`; };
+  const rows=(C.kinds||[]).map(k=>{
+    const now=k.aux.map(a=>{ const c=cov[a]; return `${lab[a]||a} ${c?_pbtD(c[0])+' ~ '+_pbtD(c[1]):'<span style="color:#ef4444">없음</span>'}`; }).join('<br>');
+    const busy=!!C.running;
+    return `<tr><td style="font-weight:600;white-space:nowrap">${_pbtEsc(k.label)}<div style="color:#64748b;font-weight:400;font-size:11px">${_pbtEsc(k.src)}</div></td>
+      <td style="white-space:nowrap;font-size:12px">${cov&&Object.keys(cov).length?now:'<span style="color:#64748b">[데이터 점검]을 한 번 누르면 계산됩니다</span>'}</td>
+      <td style="white-space:nowrap"><input type="date" id="pbtc-s-${k.kind}" style="${inp}">${k.range?` ~ <input type="date" id="pbtc-e-${k.kind}" style="${inp}">`:''}</td>
+      <td><button class="runbtn" ${busy?'disabled style="opacity:.5"':''} onclick="pbtCollect('${k.kind}')">수집</button></td>
+      <td style="font-size:12px;max-width:360px">${stTxt(k.state)}<div style="color:#64748b;font-size:11px">${_pbtEsc(k.eta)}</div></td></tr>`; }).join('');
+  // 입력칸 값 유지(3초 폴링으로 다시 그려도 지우지 않음)
+  const keep={}; document.querySelectorAll('#pbt-col input').forEach(i=>keep[i.id]=i.value);
+  setHtml('pbt-col', `<table style="width:100%;font-size:13px"><thead><tr><th>데이터</th><th>지금 있는 구간</th><th>수집할 기간</th><th></th><th>상태 · 소요</th></tr></thead><tbody>${rows}</tbody></table>
+    <div style="font-size:11px;color:#64748b;margin-top:6px">한 번에 한 종류만 수집합니다(KRX 차단·키움 키 충돌 방지). 끝나면 텔레그램으로 알리고, 데이터 구간을 다시 계산합니다 — 그다음 [데이터 점검]을 다시 누르세요. 이미 있는 날은 건너뜁니다.</div>`);
+  Object.entries(keep).forEach(([id,v])=>{ const e=document.getElementById(id); if(e&&v) e.value=v; });
+  setTxt('pbt-colsum', C.running?`— 수집 중: ${C.running}`:'');
+}
+async function pbtColFromWarn(aux,s,e){
+  const box=document.getElementById('pbt-colbox'); box.open=true;
+  if(!_pbtCol) await pbtColLoad();
+  const kind=(_pbtCol&&_pbtCol.aux_to_kind||{})[aux]; if(!kind) return;
+  const si=document.getElementById('pbtc-s-'+kind), ei=document.getElementById('pbtc-e-'+kind);
+  if(si) si.value=_pbtD(s); if(ei) ei.value=_pbtD(e);
+  box.scrollIntoView({behavior:'smooth',block:'center'});
+  pbtCollect(kind);
+}
+async function pbtCollect(kind){
+  const k=((_pbtCol&&_pbtCol.kinds)||[]).find(x=>x.kind===kind); if(!k) return;
+  // flow(가격·외국인·기관)는 기간을 안 쓰므로 비워도 오늘로 채운다
+  const s=(document.getElementById('pbtc-s-'+kind)||{}).value||(kind==='flow'?new Date().toISOString().slice(0,10):''), ei=document.getElementById('pbtc-e-'+kind);
+  const e=ei?(ei.value||''):s;
+  if(!s||(k.range&&!e)){ alert('수집할 기간을 입력하세요'); return; }
+  if(k.range&&s>e){ alert('시작일이 종료일보다 늦습니다'); return; }
+  if(!confirm(`${k.label} 수집을 시작할까요?\n기간: ${s}${k.range?' ~ '+e:' 이후'}\n${k.eta}`)) return;
+  const r=await fetch('/api/pbt/collect',{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Action':'1'},
+    body:JSON.stringify({kind, start:s.replace(/-/g,''), end:(e||s).replace(/-/g,'')})});
+  let d={}; try{ d=await r.json(); }catch(x){ d={ok:false,msg:'응답 해석 실패 ('+r.status+')'}; }
+  if(!d.ok) alert(d.msg||'수집 시작 실패');
+  pbtColLoad();
 }
 async function pbtCheck(){
   setHtml('pbt-warn','<span style="color:#38bdf8;font-size:13px">데이터 점검 중… (처음엔 10~20초)</span>');

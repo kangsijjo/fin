@@ -149,7 +149,16 @@ def run(lo=None, hi=None, limit=None):
                 print(f"[individual] {i}/{len(dates)} ({i/len(dates)*100:.0f}%) "
                       f"| 성공 {ok}일 | 경과 {el/60:.1f}분 | ETA {eta/60:.1f}분")
         print(f"[individual] 백필 종료 — 성공 {ok}/{len(dates)}일 ({(time.time()-t0)/60:.1f}분)")
-        return True
+    if ok:
+        # [2026-10-18] 일봉 로더 캐시 서명은 CSV 만 본다 → stock.db 의 개인값만 바뀌면 옛 캐시가
+        # 그대로 쓰인다. 서명을 무효화해 다음 로드(전략 랩·백테스트)에서 새 값으로 재생성.
+        try:
+            sys.path.insert(0, _HERE)
+            from strategies.daily_loader import invalidate_cache
+            invalidate_cache("individual", os.path.join(_HERE, "macro_data", "daily"))
+        except Exception as e:
+            print(f"[individual] 로더 캐시 무효화 실패(다음 일봉 파일 생성 시 자동 갱신): {e}")
+    return True
 
 
 def main():

@@ -54,6 +54,15 @@ def _write_sig(sig, sig_path=SIG_PATH):
         pass
 
 
+def invalidate_cache(reason="external", data_dir=None):
+    """캐시 서명을 '틀린 값'으로 덮어 다음 로드 때 재생성시킨다(삭제 아님). (2026-10-18)
+    서명은 macro_data/daily CSV 만 보므로, stock.db 쪽(개인 순매수 조인)만 바뀐 경우엔
+    이걸 불러야 새 값이 반영된다 — backfill_individual / collect_aux 가 호출."""
+    _sig = f"{data_dir or DATA_DIR}/_daily_cache.sig.json"
+    if os.path.exists(_sig):
+        _write_sig(("invalidated", str(reason)), _sig)
+
+
 def load_macro_daily(start_date=None, end_date=None, data_dir=None) -> pd.DataFrame:
     """
     Returns: DataFrame[code, date, open, high, low, close, volume,
