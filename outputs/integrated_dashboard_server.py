@@ -2249,6 +2249,145 @@ def api_run(task):
         return jsonify({"ok": False, "msg": str(e)})
 
 
+# ── 9b. 기간 백테스트 테스트기 (2026-10-18) ─────────────────────────────────────
+# period_backtest.py 를 **별도 프로세스**로 돌린다(일봉 0.8GB 를 서버에 올리지 않는다).
+# 진행·결과는 db/period_bt/{job}.json 에 실시간 기록 → 화면이 3초마다 /api/pbt/status 로 읽는다.
+# 상태를 바꾸는 POST(점검·실행)는 /api/run 과 같은 규칙: CSRF 커스텀 헤더 + 로컬 전용.
+_PBT_DIR = BASE / "db" / "period_bt"
+_PBT_PROC = {"proc": None, "job": None}
+_PBT_JOB_RE = re.compile(r"pbt_\d{8}_\d{6}")
+_DATE_RE = re.compile(r"\d{8}")
+
+
+def _pbt_names():
+    import strategy_engine as _E
+    return [s.name for s in _E.ALL_STRATEGIES]
+
+
+def _pbt_parse(req):
+    """요청 본문 검증 → (start, end, names, luck) 또는 (None, 오류문구)."""
+    b = req.get_json(silent=True) or {}
+    start, end = str(b.get("start", "")), str(b.get("end", ""))
+    if not (_DATE_RE.fullmatch(start) and _DATE_RE.fullmatch(end)):
+        return None, "날짜는 YYYYMMDD 8자리여야 합니다"
+    names = b.get("names") or []
+    if not isinstance(names, list) or not names:
+        return None, "전략을 하나 이상 고르세요"
+    valid = set(_pbt_names())
+    bad = [n for n in names if n not in valid]
+    if bad:
+        return None, f"알 수 없는 전략: {', '.join(map(str, bad[:5]))}"
+    return (start, end, names, bool(b.get("luck"))), None
+
+
+@app.route("/api/pbt/meta")
+def api_pbt_meta():
+    """전략 목록(워밍업·필요 데이터) + 프리셋 + 가격 데이터 범위 + 마지막 작업."""
+    import period_backtest as P
+    import strategy_engine as E
+    cal = P.trading_calendar()
+    live = getattr(E, "LIVE_MAP", {})
+    strategies = [{"name": s.name, "live": live.get(s.name, ""), "warmup": P.warmup_days(s),
+                   "needs": [P._AUX_LABEL[k] for k in P.aux_needs(s)]} for s in E.ALL_STRATEGIES]
+    top10 = []
+    try:
+        sf = get_strategy_full()
+        rows = [r for r in sf.get("rows", []) if r.get("real_cagr_pct") is not None]
+        top10 = [r["strategy"] for r in sorted(rows, key=lambda r: -float(r["real_cagr_pct"]))[:10]]
+    except Exception:
+        pass
+    cov = None
+    try:
+        cov = json.load(open(P.COVERAGE_JSON, encoding="utf-8"))
+    except Exception:
+        pass
+    jobs = sorted(_PBT_DIR.glob("pbt_*.json"), key=lambda p: p.stat().st_mtime) if _PBT_DIR.exists() else []
+    p = _PBT_PROC["proc"]
+    return jsonify({"strategies": strategies,
+                    "presets": {"live": [s["name"] for s in strategies if s["live"]],
+                                "top10": top10, "all": [s["name"] for s in strategies]},
+                    "data": [cal[0], cal[-1]] if cal else None, "coverage": cov,
+                    "last_job": jobs[-1].stem if jobs else None,
+                    "running": _PBT_PROC["job"] if (p is not None and p.poll() is None) else None})
+
+
+@app.route("/api/pbt/check", methods=["POST"])
+def api_pbt_check():
+    if not _same_origin_action(request):
+        return jsonify({"ok": False, "msg": "대시보드 페이지에서만 실행할 수 있습니다(CSRF 차단)"}), 403
+    if not _is_local(request):
+        return jsonify({"ok": False, "msg": "로컬에서만 허용"}), 403
+    parsed, err = _pbt_parse(request)
+    if err:
+        return jsonify({"ok": False, "msg": err}), 400
+    start, end, names, luck = parsed
+    cmd = [_VENV_PYTHON, str(BASE / "period_backtest.py"), "--check", "--start", start,
+           "--end", end, "--names", ",".join(names)] + (["--luck"] if luck else [])
+    try:
+        r = _sp.run(cmd, cwd=str(BASE), capture_output=True, timeout=180, creationflags=_NO_WIN)
+        out = r.stdout.decode("utf-8", errors="replace")
+        line = next((l for l in out.splitlines() if l.startswith("PBT_CHECK ")), None)
+        if not line:
+            err_txt = r.stderr.decode("utf-8", errors="replace").strip().splitlines()[-1:] or ["출력 없음"]
+            return jsonify({"ok": False, "msg": f"점검 실패: {err_txt[0][:150]}"}), 500
+        d = json.loads(line[len("PBT_CHECK "):])
+        d["msg"] = "점검 완료"
+        return jsonify(d)
+    except _sp.TimeoutExpired:
+        return jsonify({"ok": False, "msg": "점검 시간 초과(180초)"}), 504
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)[:150]}), 500
+
+
+@app.route("/api/pbt/run", methods=["POST"])
+def api_pbt_run():
+    if not _same_origin_action(request):
+        return jsonify({"ok": False, "msg": "대시보드 페이지에서만 실행할 수 있습니다(CSRF 차단)"}), 403
+    if not _is_local(request):
+        return jsonify({"ok": False, "msg": "로컬에서만 허용(원격 실행 불가)"}), 403
+    parsed, err = _pbt_parse(request)
+    if err:
+        return jsonify({"ok": False, "msg": err}), 400
+    start, end, names, luck = parsed
+    p = _PBT_PROC["proc"]
+    if p is not None and p.poll() is None:
+        return jsonify({"ok": False, "msg": f"이미 실행 중({_PBT_PROC['job']}) — 끝난 뒤 다시 시도",
+                        "job": _PBT_PROC["job"]}), 409
+    job = datetime.now().strftime("pbt_%Y%m%d_%H%M%S")
+    cmd = [_VENV_PYTHON, str(BASE / "period_backtest.py"), "--start", start, "--end", end,
+           "--names", ",".join(names), "--job", job] + (["--luck"] if luck else [])
+    try:
+        (BASE / "logs").mkdir(exist_ok=True)
+        logf = open(BASE / "logs" / "run_period_backtest.log", "w", encoding="utf-8", errors="replace")
+        _PBT_PROC["proc"] = _sp.Popen(cmd, cwd=str(BASE), stdout=logf, stderr=_sp.STDOUT,
+                                      creationflags=_NO_WIN)
+        _PBT_PROC["job"] = job
+        return jsonify({"ok": True, "job": job, "msg": f"시작됨 — {len(names)}전략"})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)[:150]}), 500
+
+
+@app.route("/api/pbt/status")
+def api_pbt_status():
+    job = request.args.get("job", "")
+    if not _PBT_JOB_RE.fullmatch(job):
+        return jsonify({"ok": False, "msg": "잘못된 작업 ID"}), 400
+    path = _PBT_DIR / f"{job}.json"
+    p = _PBT_PROC["proc"]
+    alive = p is not None and p.poll() is None and _PBT_PROC["job"] == job
+    if not path.exists():
+        return jsonify({"ok": True, "job": job, "status": "starting" if alive else "missing"})
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return jsonify({"ok": True, "job": job, "status": "running"})   # 쓰는 중(원자적 교체 직전)
+    if d.get("status") == "running" and not alive and _PBT_PROC["job"] == job and p is not None:
+        d["status"] = "error"
+        d["error"] = "실행 프로세스가 비정상 종료됨 — logs/run_period_backtest.log 확인"
+    d["ok"] = True
+    return jsonify(d)
+
+
 # ── 10. HTML ───────────────────────────────────────────────────────────────────
 
 HTML = """\
@@ -2613,6 +2752,32 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
 
 <!-- ===== 백테스트 ===== -->
 <div id="tab-backtest" class="tab-content">
+  <div class="section" id="pbt-sec">
+    <h2>기간 백테스트 테스트기 <span style="color:#8b949e;font-size:11px;font-weight:400">— 기간·전략을 골라 바로 계산 · 전략마다 10슬롯 단독 · 데이터 부족은 실행 전 점검(대시보드+텔레그램)</span></h2>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:10px">
+      <label style="font-size:13px;color:#cbd5e1">시작 <input type="date" id="pbt-start" style="background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"></label>
+      <label style="font-size:13px;color:#cbd5e1">종료 <input type="date" id="pbt-end" style="background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"></label>
+      <span style="font-size:12px;color:#64748b" id="pbt-range"></span>
+      <span style="flex:1"></span>
+      <label style="font-size:13px;color:#cbd5e1" title="전략 5개 이상·거래일 80일 이상일 때 SPA·PBO·DSR 수행(1~2분 추가)"><input type="checkbox" id="pbt-luck"> 운 검정(SPA·PBO)</label>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px">
+      <span style="font-size:12px;color:#94a3b8">전략:</span>
+      <button class="runbtn" onclick="pbtSel('live')">★ 라이브 6개</button>
+      <button class="runbtn" onclick="pbtSel('top10')">상위 10개</button>
+      <button class="runbtn" onclick="pbtSel('all')">전체</button>
+      <button class="runbtn" onclick="pbtSel('none')">선택 해제</button>
+      <span id="pbt-count" style="font-size:12px;color:#94a3b8"></span>
+      <span style="flex:1"></span>
+      <button class="runbtn" onclick="pbtCheck()">데이터 점검</button>
+      <button class="runbtn" style="background:#2563eb;color:#fff" onclick="pbtRun()">실행</button>
+    </div>
+    <div id="pbt-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:2px 10px;max-height:190px;overflow:auto;padding:8px;background:#0f172a;border:1px solid #1e293b;border-radius:8px;font-size:12px"></div>
+    <div id="pbt-warn" style="margin-top:10px"></div>
+    <div id="pbt-prog" style="margin-top:8px;font-size:12px;color:#94a3b8"></div>
+    <div id="pbt-res" style="margin-top:8px;overflow-x:auto"></div>
+    <div id="pbt-luckbox" style="margin-top:10px"></div>
+  </div>
   <div class="section">
     <h2>&#xBC31;&#xD14C;&#xC2A4;&#xD2B8; &#xC694;&#xC57D; &mdash; <span id="bt-src" style="color:#58a6ff;font-weight:400"></span></h2>
     <div class="stats-row" id="bt-stats">
@@ -2820,6 +2985,7 @@ function fmtB(n){const v=Number(n||0);if(v>=1e8)return (v/1e8).toFixed(1)+'억';
 function showTab(id){
   document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',['overview','cheonok','mock','strength','cutmon','backtest','aimodel','datalogs','intraday'][i]===id));
   document.querySelectorAll('.tab-content').forEach(t=>t.classList.toggle('active',t.id==='tab-'+id));
+  if(id==='backtest' && typeof pbtInit==='function') pbtInit();   // 기간 백테스트 테스트기(2026-10-18) — 처음 열 때 1회 로드
 }
 
 // ── fill helpers ──
@@ -3301,6 +3467,118 @@ function fillBacktest(bt, sc){
       <td class="r">${Number(r.avg_hold||0).toFixed(1)}d</td>
       <td class="r ${clr(da)}" style="font-weight:700">${da>=0?'+':''}${da.toFixed(2)}%p</td></tr>`;
   }).join(''):'<tr><td colspan="9" style="color:#9ca3af;text-align:center">strategy_engine.py 먼저 실행하세요</td></tr>');
+}
+
+// ── [2026-10-18] 기간 백테스트 테스트기 ─────────────────────────────────────────
+let _pbtMeta=null, _pbtTimer=null;
+const _pbtEsc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const _pbtD=s=>s?`${s.slice(0,4)}-${s.slice(4,6)}-${s.slice(6,8)}`:'';
+function _pbtCount(){ const n=document.querySelectorAll('#pbt-list input:checked').length; setTxt('pbt-count', `${n}개 선택`+(n>15?' · 많으면 수 분~수십 분':'')); }
+async function pbtInit(){
+  if(_pbtMeta) return;
+  try{ _pbtMeta=await fetch('/api/pbt/meta').then(r=>r.json()); }
+  catch(e){ setHtml('pbt-warn',`<span style="color:#ef4444">테스트기 로드 실패: ${_pbtEsc(e.message)}</span>`); return; }
+  const d=_pbtMeta.data;
+  if(d){
+    const e=_pbtD(d[1]); const s=String(Number(d[1].slice(0,4))-3)+d[1].slice(4);
+    document.getElementById('pbt-end').value=e; document.getElementById('pbt-start').value=_pbtD(s<d[0]?d[0]:s);
+    document.getElementById('pbt-start').min=_pbtD(d[0]); document.getElementById('pbt-end').max=e;
+    setTxt('pbt-range', `가격 데이터 ${_pbtD(d[0])} ~ ${e}`);
+  }
+  setHtml('pbt-list', (_pbtMeta.strategies||[]).map(s=>{
+    const tip=`과거 ${s.warmup}거래일 필요`+(s.needs.length?` · 필요 데이터: ${s.needs.join(', ')}`:'')+(s.live?` · 라이브: ${s.live}`:'');
+    return `<label title="${_pbtEsc(tip)}" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:${s.live?'#fbbf24':'#cbd5e1'}">
+      <input type="checkbox" value="${_pbtEsc(s.name)}" onchange="_pbtCount()"> ${s.live?'★ ':''}${_pbtEsc(s.name)}</label>`;}).join(''));
+  pbtSel('live');
+  const j=_pbtMeta.running||_pbtMeta.last_job; if(j) pbtPoll(j);
+}
+function pbtSel(p){
+  const set=new Set(p==='none'?[]:((_pbtMeta&&_pbtMeta.presets&&_pbtMeta.presets[p])||[]));
+  if(p==='top10'&&!set.size){ setHtml('pbt-warn','<span style="color:#fbbf24">상위 10개는 전체 전략 백테스트([다시 계산]) 결과가 있어야 정해집니다</span>'); }
+  document.querySelectorAll('#pbt-list input').forEach(i=>{ i.checked=set.has(i.value); }); _pbtCount();
+}
+function _pbtBody(){
+  return {start:document.getElementById('pbt-start').value.replace(/-/g,''), end:document.getElementById('pbt-end').value.replace(/-/g,''),
+          names:[...document.querySelectorAll('#pbt-list input:checked')].map(i=>i.value), luck:document.getElementById('pbt-luck').checked};
+}
+async function _pbtPost(url){
+  const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Action':'1'},body:JSON.stringify(_pbtBody())});
+  let d={}; try{ d=await r.json(); }catch(e){ d={ok:false,msg:'응답 해석 실패 ('+r.status+')'}; }
+  return d;
+}
+function _pbtWarnHtml(ws, head){
+  if(!ws||!ws.length) return head?`<div style="padding:8px 12px;border-radius:8px;background:rgba(16,185,129,.08);border:1px solid #065f46;color:#6ee7b7;font-size:13px">✓ ${head} — 데이터 부족 없음</div>`:'';
+  const col={error:'#ef4444',warn:'#fbbf24',info:'#94a3b8'}, ic={error:'⛔',warn:'⚠',info:'ℹ'};
+  const bad=ws.some(w=>w.level==='error');
+  return `<div style="padding:8px 12px;border-radius:8px;background:${bad?'rgba(239,68,68,.08)':'rgba(251,191,36,.07)'};border:1px solid ${bad?'#7f1d1d':'#78350f'};font-size:13px;line-height:1.7">
+    ${head?`<div style="font-weight:700;margin-bottom:2px">${head}</div>`:''}
+    ${ws.map(w=>`<div style="color:${col[w.level]||'#cbd5e1'}">${ic[w.level]||''} ${w.strategy?`<b>${_pbtEsc(w.strategy)}</b>: `:''}${_pbtEsc(w.msg)}</div>`).join('')}</div>`;
+}
+async function pbtCheck(){
+  setHtml('pbt-warn','<span style="color:#38bdf8;font-size:13px">데이터 점검 중… (처음엔 10~20초)</span>');
+  const d=await _pbtPost('/api/pbt/check');
+  if(d.ok===false&&!d.warnings){ setHtml('pbt-warn',`<span style="color:#ef4444">${_pbtEsc(d.msg||'점검 실패')}</span>`); return; }
+  setHtml('pbt-warn', _pbtWarnHtml(d.warnings, `데이터 점검 — 거래일 ${d.n_days}일`+(d.ok?'':' (실행 불가)')));
+}
+async function pbtRun(){
+  const b=_pbtBody(); if(!b.names.length){ setHtml('pbt-warn','<span style="color:#ef4444">전략을 하나 이상 고르세요</span>'); return; }
+  setHtml('pbt-prog','<span style="color:#38bdf8">실행 요청 중…</span>');
+  const d=await _pbtPost('/api/pbt/run');
+  if(!d.ok){ setHtml('pbt-prog',`<span style="color:#ef4444">${_pbtEsc(d.msg||'실행 실패')}</span>`); if(d.job) pbtPoll(d.job); return; }
+  setHtml('pbt-res',''); setHtml('pbt-luckbox',''); pbtPoll(d.job);
+}
+async function pbtPoll(job){
+  clearTimeout(_pbtTimer);
+  let d; try{ d=await fetch('/api/pbt/status?job='+encodeURIComponent(job)).then(r=>r.json()); }catch(e){ _pbtTimer=setTimeout(()=>pbtPoll(job),5000); return; }
+  pbtRender(d);
+  if(['running','starting'].includes(d.status)) _pbtTimer=setTimeout(()=>pbtPoll(job),3000);
+}
+function pbtRender(d){
+  const p=d.params||{}, pr=d.progress||[0,0];
+  const pct=pr[1]?Math.round(pr[0]/pr[1]*100):0;
+  const stat={running:'계산 중',starting:'시작 중',done:'완료',error:'실패',missing:'결과 없음'}[d.status]||d.status;
+  setHtml('pbt-prog', `<div style="display:flex;gap:10px;align-items:center">
+    <b style="color:${d.status==='done'?'#10b981':d.status==='error'?'#ef4444':'#38bdf8'}">${stat}</b>
+    <span>${p.start?_pbtD(p.start)+' ~ '+_pbtD(p.eff_end||p.end):''} · ${pr[0]}/${pr[1]}전략${d.current?' · '+_pbtEsc(d.current):''}${d.elapsed_sec!=null?' · '+d.elapsed_sec+'초':''}</span>
+    <div style="flex:1;max-width:260px;height:6px;background:#1e293b;border-radius:3px"><div style="width:${pct}%;height:6px;background:#2563eb;border-radius:3px"></div></div>
+    <span style="color:#64748b">${_pbtEsc(d.job||'')}</span></div>`+(d.error?`<div style="color:#ef4444;margin-top:4px">${_pbtEsc(d.error)}</div>`:''));
+  if(d.warnings&&d.warnings.length) setHtml('pbt-warn', _pbtWarnHtml(d.warnings,'데이터·표본 경고 (텔레그램에도 전송됨)'));
+  const rs=(d.results||[]).slice().sort((a,b)=>(b.cagr==null?-1e9:b.cagr)-(a.cagr==null?-1e9:a.cagr));
+  if(!rs.length&&!d.market){ setHtml('pbt-res',''); return; }
+  const years=[...new Set([...(d.market?Object.keys(d.market.yearly||{}):[]),...rs.flatMap(r=>Object.keys(r.yearly||{}))])].sort();
+  const f=(v,k)=>v==null||isNaN(v)?'-':(v>0?'+':'')+Number(v).toFixed(k==null?2:k)+'%';
+  const c=v=>v==null?'':clr(v);
+  const wmap={}; (d.warnings||[]).forEach(w=>{ if(w.strategy){ (wmap[w.strategy]=wmap[w.strategy]||[]).push(w.msg); } });
+  const row=(r,isM)=>`<tr${r.live?' style="background:rgba(251,191,36,0.06)"':''}${isM?' style="background:#111827;font-style:italic"':''}>
+    <td style="font-weight:500">${r.live?'<span style="color:#fbbf24">★ </span>':''}${_pbtEsc(r.strategy||r.name)}${wmap[r.strategy]?` <span title="${_pbtEsc(wmap[r.strategy].join(' / '))}" style="color:#fbbf24;cursor:help">⚠</span>`:''}${r.error?` <span style="color:#ef4444" title="${_pbtEsc(r.error)}">오류</span>`:''}</td>
+    <td class="r" style="color:#94a3b8">${isM?'-':(r.n_trades??'-')}${!isM&&r.n_open?`<span style="font-size:10px" title="기간 안에 신호가 났지만 종료일 뒤에 청산되는 매매 — 신호 평균·승률에서 제외, 자본곡선에선 실제로 보유 중인 것만 종료일 종가로 평가"> (미완료 ${r.n_open})</span>`:''}</td>
+    <td class="r">${isM||r.win==null?'-':r.win.toFixed(1)+'%'}</td>
+    <td class="r ${c(r.avg_net)}">${isM?'-':f(r.avg_net)}</td>
+    <td class="r ${c(r.slot_avg)}" style="font-weight:600">${isM?'-':f(r.slot_avg)}</td>
+    <td class="r ${c(r.total_ret)}">${f(r.total_ret,1)}</td>
+    <td class="r ${c(r.cagr)}" style="font-weight:800">${f(r.cagr,1)}</td>
+    <td class="r neg">${f(r.mdd,1)}</td>
+    <td class="r">${r.sharpe==null?'-':Number(r.sharpe).toFixed(2)}</td>
+    <td class="r ${c(r.vs_mkt)}">${isM?'기준':f(r.vs_mkt,1)+'p'}</td>
+    ${years.map(y=>`<td class="r ${c((r.yearly||{})[y])}">${f((r.yearly||{})[y],1)}</td>`).join('')}</tr>`;
+  setHtml('pbt-res', `<table><thead><tr><th>전략</th><th class="r">매매수</th><th class="r">승률</th><th class="r">신호 평균</th><th class="r">슬롯 실매매</th>
+    <th class="r">총수익</th><th class="r">CAGR</th><th class="r">MDD</th><th class="r">샤프</th><th class="r">시장 대비</th>${years.map(y=>`<th class="r">${y}</th>`).join('')}</tr></thead>
+    <tbody>${d.market?row(d.market,true):''}${rs.map(r=>row(r,false)).join('')}</tbody></table>
+    <div style="font-size:11px;color:#64748b;margin-top:6px">전략마다 10슬롯 단독 · 다음날 시가 진입·보유일 만기·손절/익절/강도필터 없음·비용 0.245% · 일별 평가(MTM) · 시장 = 코스닥 유니버스 동일가중 · 연도별은 기간 안 각 해의 자본 증감</div>`);
+  const L=d.luck;
+  if(L&&!L.error&&L.pbo!=null){
+    const pass=(L.spa_cash!=null&&L.spa_cash<0.05)||(L.dsr!=null&&L.dsr>=0.95);
+    setHtml('pbt-luckbox', `<div style="padding:10px 14px;border-radius:8px;background:#0f172a;border:1px solid #1e293b;font-size:13px;line-height:1.8">
+      <b>운 검정</b> <span style="color:#64748b">(${L.n}전략 · ${L.T}거래일)</span> —
+      <b style="color:${pass?'#10b981':'#fbbf24'}">${pass?'1등이 운이 아닐 근거 있음':'1등을 운과 구분할 수 없음'}</b><br>
+      SPA p값: 현금 대비 <b>${L.spa_cash??'-'}</b> · 시장 대비 <b>${L.spa_market??'-'}</b> (0.05 미만이면 '이기는 전략이 있다') ·
+      StepM 우월: ${(L.stepm_cash||[]).length?_pbtEsc(L.stepm_cash.join(', ')):'없음'}<br>
+      PBO <b>${L.pbo}</b> (앞 절반 1등이 뒤 절반 하위로 떨어지는 비율, 0.5=동전던지기) · 앞 1등의 뒤 샤프&lt;0 확률 ${L.is_best_oos_neg}<br>
+      DSR(${_pbtEsc(L.best)}, 연샤프 ${L.best_sharpe}) <b>${L.dsr}</b> — 고른 전략 수만큼 '운만으로' 나올 최대 연샤프 ${L.luck_max_sharpe} (0.95 이상이어야 유의)<br>
+      <span style="color:#64748b;font-size:12px">※ 다른 결과를 보고 골라낸 전략들이면 실제 시도 수는 더 많다 — 그만큼 DSR·SPA 는 낙관적이다(55전략 기준 결과는 메모 §52)</span>
+      ${L.spa_error?`<br><span style="color:#ef4444">${_pbtEsc(L.spa_error)}</span>`:''}</div>`);
+  } else if(L&&L.error){ setHtml('pbt-luckbox',`<span style="color:#ef4444">운 검정 실패: ${_pbtEsc(L.error)}</span>`); }
+  else setHtml('pbt-luckbox','');
 }
 
 // [2026-10-12] 전체 전략 과거 백테스트(strategy_engine --full) — CAGR 내림차순, ★ 라이브
