@@ -233,9 +233,9 @@ def verify_top(df_res, trades_by_name, top_n, oos_years, d_max):
 
 # 라이브 운용 중인 전략 ↔ 엔진 이름 (대시보드 ★ 표시용)
 LIVE_MAP = {
+    # 2026-10-18 키움 rsi_reversal·rsi_vol 제거 → star_high_500d_20(라이브명 high_500d_filt) (설명서 §56)
+    "star_high_500d_20":     "키움 high_500d_filt",
     "star_high_52w_20_filt": "키움 high_52w_filt",
-    "rsi_reversal":          "키움 rsi_reversal",
-    "rsi_vol":               "키움 rsi_vol",
     "h52w_for3d_mkt":        "KIS h52w_for3d_mkt",
     "for_high20_mkt":        "KIS for_high20_mkt",
     "gc_for3d":              "KIS gc_for3d",

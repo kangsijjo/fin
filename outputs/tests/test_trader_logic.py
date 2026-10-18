@@ -1986,7 +1986,8 @@ def test_cut_monitor_thresholds_are_walkforward_constants():
     import strength_cut_monitor as M
     assert M.CUR_TH == 5.7, "현행 비교 기준이 라이브 임계(5.7)와 다르다"
     for cuts in (M.CUTS_40, M.CUTS_50):
-        assert set(cuts) == set(M.HOLD), "전략 목록이 라이브 6전략과 불일치"
+        # [2026-10-18] 강도 면제 전략(high_500d_filt 등)은 컷이 필요 없다 — 비면제 전략은 전부 컷이 있어야 한다
+        assert set(M.HOLD) - M.EXEMPT <= set(cuts) <= set(M.HOLD), "비면제 전략의 컷 누락"
         for k, v in cuts.items():
             assert 0 < v < 10, f"{k} 임계 {v} 가 점수 범위(0~10) 밖"
     # 상위50% 컷은 상위40% 보다 낮아야 한다(더 많이 통과)
@@ -2259,8 +2260,77 @@ def test_kis_strength_gate_exempts_only_gc_for3d():
 
 def test_strength_exempt_in_sync_with_paper_mirror():
     import kis_trader as kx
+    import kiwoom_trader as kt
     import ai_paper_trader as ap
-    assert kx.STRENGTH_EXEMPT == ap.STRENGTH_EXEMPT == {"gc_for3d"}
+    import strength_cut_monitor as M
+    assert kx.STRENGTH_EXEMPT == {"gc_for3d"}
+    assert kt.STRENGTH_EXEMPT == {"high_500d_filt", "high_52w_filt"}          # 2026-10-18 §56
+    assert ap.STRENGTH_EXEMPT == M.EXEMPT == kx.STRENGTH_EXEMPT | kt.STRENGTH_EXEMPT
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 키움 안C' — rsi 2종 제거, high_500d_filt 6슬롯, 신고가 2종 강도 면제 (2026-10-18 사용자 결정, §56)
+# ─────────────────────────────────────────────────────────────────────────────
+def test_kiwoom_slots_switched_to_high_breakouts():
+    import kiwoom_trader as kt
+    assert kt.STRATEGY_MAX_SLOTS == {"high_500d_filt": 6, "high_52w_filt": 4}
+    assert sum(kt.STRATEGY_MAX_SLOTS.values()) == kt.MAX_CONCURRENT
+    assert kt.STRATEGY_PRIORITY[0] == "high_500d_filt", "500일은 52주의 부분집합 — 먼저 배정해야 한다"
+    assert set(kt.STRATEGY_PRIORITY) == set(kt.STRATEGY_MAX_SLOTS)
+    for s in ("high_500d_filt", "rsi_reversal", "rsi_vol"):
+        assert s in kt._HEAL_HOLDING, "레거시·신규 보유분 치유 보유일"
+    assert kt.PROFIT_TARGET.get("rsi_vol") == 0.20, "레거시 rsi_vol 보유분 익절 유지"
+    assert "high_500d_filt" not in kt.PROFIT_TARGET, "검증 안 된 익절은 넣지 않는다"
+
+
+def test_kiwoom_strength_gate_exempts_breakouts_only():
+    import kiwoom_trader as kt
+    assert kt._strength_gate("high_500d_filt", 2.0)[0] is True
+    assert kt._strength_gate("high_52w_filt", None)[0] is True, "면제는 무기록이어도 통과"
+    assert kt._strength_gate("rsi_reversal", 7.0)[0] is True
+    assert kt._strength_gate("rsi_reversal", 5.0)[0] is False
+    assert kt._strength_gate("rsi_reversal", None)[0] is False, "비면제는 fail-closed 유지"
+
+
+def test_kiwoom_buy_skips_unknown_strategy_instead_of_remapping():
+    """교체 직후 남은 rsi 신호가 high_52w_filt(면제)로 바뀌어 강도 검사 없이 사지면 안 된다."""
+    import inspect
+    import kiwoom_trader as kt
+    src = inspect.getsource(kt.cmd_buy)
+    assert 'strat = "high_52w_filt"' not in src
+    assert "운용 중이 아닌 전략" in src
+
+
+def test_live_signal_generates_only_kiwoom_live_strategies():
+    src = open(os.path.join(OUTPUTS, "live_signal.py"), encoding="utf-8").read()
+    import re
+    main = src[src.index("def main():"):]
+    called = set(re.findall(r"detect_([a-z0-9_]+)\(", main))
+    assert called == {"high_500d_filt", "high_52w_filt"}, called
+    m = re.search(r'LIVE_STRATEGIES = \(([^)]*)\)', src)
+    import kiwoom_trader as kt
+    assert set(re.findall(r'"([a-z0-9_]+)"', m.group(1))) == set(kt.STRATEGY_PRIORITY)
+    assert "_HIGH_500D = dict(_HIGH_52W, lookback=500)" in src
+
+
+def test_live_map_matches_kiwoom_and_engine():
+    import strategy_engine as E
+    names = {s.name for s in E.ALL_STRATEGIES}
+    assert set(E.LIVE_MAP) <= names
+    kw = {v.split()[1] for v in E.LIVE_MAP.values() if v.startswith("키움")}
+    import kiwoom_trader as kt
+    assert kw == set(kt.STRATEGY_PRIORITY)
+    eng = {s.name: s for s in E.ALL_STRATEGIES}["star_high_500d_20"]
+    assert (eng.lookback, eng.holding, eng.use_mkt, eng.use_vol, eng.vol_mult, eng.min_tv) == \
+        (500, 20, True, True, 1.5, 3_000_000_000), "라이브 감지 조건과 엔진 파라미터가 달라졌다"
+
+
+def test_dashboard_kiwoom_slots_match_trader():
+    import kiwoom_trader as kt
+    src = open(os.path.join(OUTPUTS, "integrated_dashboard_server.py"), encoding="utf-8").read()
+    assert '_KW_STRATEGY_SLOTS = {"high_500d_filt": 6, "high_52w_filt": 4}' in src
+    assert '_STRATEGY_MAX_SLOTS = {"high_500d_filt": 6, "high_52w_filt": 4}' in src
+    assert kt.STRATEGY_MAX_SLOTS == {"high_500d_filt": 6, "high_52w_filt": 4}
 
 
 def test_paper_strength_portfolio_buys_exempt_low_score():

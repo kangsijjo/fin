@@ -77,11 +77,10 @@ def state_path(kind):
 
 
 def _write_state(kind, st):
+    """상태 파일 기록 — 실패해도 수집을 멈추지 않는다(period_backtest.write_json_atomic 주석 참고)."""
     os.makedirs(STATE_DIR, exist_ok=True)
-    tmp = state_path(kind) + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(st, fh, ensure_ascii=False)
-    os.replace(tmp, state_path(kind))
+    from period_backtest import write_json_atomic
+    write_json_atomic(state_path(kind), st)
 
 
 def _tail(path, n=6):
@@ -278,9 +277,12 @@ def _exec(kind, cmd, cwd, st, state_key, log_mode="w"):
                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         while proc.poll() is None:
             time.sleep(5)
-            st.update(tail=_tail(log), elapsed_sec=int(time.time() - t0))
-            _write_state(state_key, st)
-            _touch_lock()
+            try:                     # 상태 갱신이 실패해도 수집기를 고아로 두고 빠져나가지 않는다
+                st.update(tail=_tail(log), elapsed_sec=int(time.time() - t0))
+                _write_state(state_key, st)
+                _touch_lock()
+            except Exception:
+                pass
     st["tail"] = _tail(log, 10)
     return proc.returncode
 

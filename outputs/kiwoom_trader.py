@@ -1,5 +1,5 @@
 """
-키움증권 모의투자 자동 집행기 — v3: 안C 포트폴리오 (4:4:2)
+키움증권 모의투자 자동 집행기 — v4: 안C' 포트폴리오 (신고가 6:4, 2026-10-18)
 
 의존: pip install kiwoom-rest-api
 인증: .env 의 KIWOOM_MOCK_APP_KEY / KIWOOM_MOCK_APP_SECRET (KIWOOM_ENV=mock)
@@ -10,14 +10,17 @@
   python kiwoom_trader.py sell     # per-signal holding_days 기준 만기 종목 매도
   python kiwoom_trader.py daily    # sell → buy → status 일괄 (스케줄러용)
 
-전략별 슬롯 구조 (총 10) — 안C 포트폴리오:
-  슬롯 1-4  →  high_52w_filt   (52주 신고가+거래량+시장강세, 20일 보유)  max=4
-  슬롯 5-8  →  rsi_reversal    (RSI<30 과매도 반전,                5일 보유)  max=4
-  슬롯 9-10 →  rsi_vol         (RSI<30 + 거래량 2배 급증,          7일 보유)  max=2
+전략별 슬롯 구조 (총 10) — 안C' 포트폴리오 (2026-10-18):
+  슬롯 1-6  →  high_500d_filt  (500일 신고가+거래량+시장강세, 20일 보유)  max=6  ← 우선
+  슬롯 7-10 →  high_52w_filt   (52주 신고가+거래량+시장강세,  20일 보유)  max=4
+  두 전략 모두 강도 필터 면제(STRENGTH_EXEMPT) — 백테스트와 같은 규칙. 후보 정렬만 강도순.
 
-  ※ 변경 이력: 2026-06-17 for_high20_mkt(CAGR 기여 낮음) 제거,
-               rsi_reversal +2슬롯, rsi_vol 신규 2슬롯
-     백테스트 CAGR: 현재 포트 -2.6% → 안C +11.6% (2019-2025, 총자본 기준)
+  ※ 변경 이력: 2026-06-17 for_high20_mkt(CAGR 기여 낮음) 제거, rsi_reversal +2슬롯, rsi_vol 신규 2슬롯
+     2026-10-18 rsi_reversal·rsi_vol 제거 → high_500d_filt 6슬롯(사용자 결정, 설명서 §56).
+       근거: 기간 백테스트 2021~25 순위 52·51위 → 2026 표본외 52·39위(두 기간 모두 최하위권).
+       star_high_500d_20 은 9위 → 2위. 500일 신고가는 52주 신고가의 부분집합이라 두 버킷이
+       같은 종목을 노리면 500일 쪽이 먼저 가져간다(같은 종목 중복 매수는 already/pos 로 차단).
+     기존 rsi 보유분은 '레거시'로 원장 보유일대로 만기 청산된다(슬롯 배정엔 미포함).
 
 운용 룰:
   - 매수: 신호 다음 영업일 09:01 시장가. 전략별 빈 슬롯 확인 후 우선순위 배정.
@@ -163,12 +166,15 @@ MAX_CONCURRENT = 10
 
 # 전략별 최대 슬롯 수 (합계 = MAX_CONCURRENT) — 안C 포트폴리오 (2026-06-17)
 STRATEGY_MAX_SLOTS = {
-    "high_52w_filt": 4,
-    "rsi_reversal":  4,
-    "rsi_vol":       2,
+    "high_500d_filt": 6,
+    "high_52w_filt":  4,
 }
-# 매수 우선순위 (앞 전략이 빈 슬롯 먼저 채움)
-STRATEGY_PRIORITY = ["high_52w_filt", "rsi_reversal", "rsi_vol"]
+# 매수 우선순위 (앞 전략이 빈 슬롯 먼저 채움) — 500일 신고가가 먼저(부분집합이라 뒤에 두면 못 가져감)
+STRATEGY_PRIORITY = ["high_500d_filt", "high_52w_filt"]
+# 강도 필터 면제(2026-10-18 사용자 결정) — 7월 이후 high_52w_filt 신호 98건 중 5.7 이상 0건(최고 5.68)
+# 이라 5.7 을 적용하면 신고가 전략은 사실상 매수 불가. 백테스트(강도 필터 없음) 규칙과 맞춘다.
+# kis_trader.STRENGTH_EXEMPT 와 함께 ai_paper_trader.STRENGTH_EXEMPT 의 합집합(테스트로 고정).
+STRENGTH_EXEMPT = {"high_500d_filt", "high_52w_filt"}
 ORDER_TYPE_BUY = "3"     # 시장가 (모의서버는 지정가/시장가만 지원)
 ORDER_TYPE_SELL = "3"    # 시장가 — 15:21 주문 시 마감 동시호가 참여 ≈ 종가 체결
 ORDER_TYPE_LIMIT = "0"   # 지정가 (익절 목표가 매도용)
@@ -180,7 +186,8 @@ ORDER_TYPE_LIMIT = "0"   # 지정가 (익절 목표가 매도용)
 # KRX 주문은 '당일 유효' + 가격제한폭(±30%) 내에서만 가능 → 한 번 걸어두기가 불가능.
 # → 매일 아침(cmd_daily) 보유종목에 당일 지정가를 재발주(자가치유). 만기일 15:21 은
 #   cmd_sell 이 미체결 지정가를 취소(kt10003) 후 시장가 청산(백스톱 유지).
-PROFIT_TARGET = {"rsi_vol": 0.20, "high_52w_filt": 0.50}
+PROFIT_TARGET = {"rsi_vol": 0.20, "high_52w_filt": 0.50}   # rsi_vol 은 레거시 보유분 청산용으로 유지
+# high_500d_filt 는 익절 미적용 — 검증 안 됨, 백테스트(star_high_500d_20)도 익절 없음
 MIN_ORDER_AMOUNT = 100_000   # 슬롯당 이보다 작으면 주문 생략
 
 # 재해성 손실 서킷브레이커(2026-07-10 사용자 결정) — 브로커 평가손익률(매입평균 기준)이
@@ -211,6 +218,17 @@ CIRCUIT_BREAKER_PCT = -40.0
 # forward 표본 축적도 느려짐. 강도 기록 없는 신호는 통과(fail-open) — 기록 실패로
 # 매매가 전면 중단되는 것을 막기 위함(이 경로로는 6 미만도 통과 가능).
 MIN_STRENGTH_SCORE = 5.7
+
+
+def _strength_gate(strat, sc):
+    """주문 직전 강도 게이트 → (통과여부, 사유). 면제 전략은 강도와 무관하게 통과(kis_trader 와 동일 규약)."""
+    if strat in STRENGTH_EXEMPT:
+        return True, (f"강도 면제({sc:.2f})" if sc is not None else "강도 면제(무기록)")
+    if sc is None:
+        return False, "강도 확인 불가(재계산 실패) → 차단"
+    if sc < MIN_STRENGTH_SCORE:
+        return False, f"강도 {sc:.2f} < {MIN_STRENGTH_SCORE}"
+    return True, f"강도 {sc:.2f} ≥ {MIN_STRENGTH_SCORE}"
 
 
 # ------------------------------------------------------------
@@ -809,9 +827,11 @@ def cmd_buy():
     strength = _strength_map(sigs)   # {(code,strategy): score_ic} — 강도 필터용
     if strength:
         n_weak = sum(1 for s in sigs
-                     if strength.get((str(s.get("code", "")).zfill(6),
-                                      str(s.get("strategy", ""))), 99) < MIN_STRENGTH_SCORE)
-        print(f"[buy] 강도 필터: score_ic < {MIN_STRENGTH_SCORE} 스킵 예정 {n_weak}건 / 기록 {len(strength)}건")
+                     if str(s.get("strategy", "")) not in STRENGTH_EXEMPT
+                     and strength.get((str(s.get("code", "")).zfill(6),
+                                       str(s.get("strategy", ""))), 99) < MIN_STRENGTH_SCORE)
+        print(f"[buy] 강도 필터: score_ic < {MIN_STRENGTH_SCORE} 스킵 예정 {n_weak}건 / 기록 {len(strength)}건"
+              f" (면제: {', '.join(sorted(STRENGTH_EXEMPT))})")
     else:
         print("[buy] 강도 기록 없음 — 재확인 단계에서 재계산 시도")
     # 매매 전 사전점검 ①: 강도 재확인(무기록이면 즉석 재계산, 그래도 없으면 차단)
@@ -820,9 +840,9 @@ def cmd_buy():
     # 매매 전 사전점검 ③: 일일 후보수 게이트(2026-08-27, 현재 모니터 전용).
     #   강도가 최종 확정된 이 시점에서만 '오늘 몇 건이 통과했나'를 정확히 셀 수 있다.
     _n_pass = sum(1 for _sg in sigs
-                  if strength.get((str(_sg.get("code", "")).zfill(6),
-                                   str(_sg.get("strategy", ""))), -1)
-                  >= MIN_STRENGTH_SCORE)
+                  if _strength_gate(str(_sg.get("strategy", "")),
+                                    strength.get((str(_sg.get("code", "")).zfill(6),
+                                                  str(_sg.get("strategy", "")))))[0])
     if not _gate_check(_n_pass, len(sigs)):
         print("[buy] 후보수 게이트로 오늘 신규매수 생략 — 종료")
         return
@@ -865,7 +885,10 @@ def cmd_buy():
     for sig in sigs:
         strat = str(sig.get("strategy", "high_52w_filt"))
         if strat not in sigs_by_strat:
-            strat = "high_52w_filt"
+            # [2026-10-18] 종전엔 모르는 전략을 high_52w_filt 로 바꿔 담았다 — 이제 high_52w_filt 는
+            # 강도 면제라, 교체 직후 남은 rsi 신호가 강도 검사 없이 매수될 수 있다 → 건너뛴다.
+            print(f"    [skip] {sig.get('code')} — 운용 중이 아닌 전략({strat}) 신호")
+            continue
         sigs_by_strat[strat].append(sig)
     for strat in STRATEGY_PRIORITY:
         sigs_by_strat[strat] = _order_candidates(sigs_by_strat[strat], strength, tv_map, strat)
@@ -924,11 +947,9 @@ def cmd_buy():
             # verify_strength 가 이미 무기록을 재계산했다 → 여기서도 None 이면 확인 불가로
             # 간주하고 차단한다(종전 fail-open 이 6 미만 체결의 잔여 경로였음).
             _sc = strength.get((code, strat))
-            if _sc is None:
-                print(f"    [skip] {code} {name} — 강도 확인 불가(재계산 실패) → 차단")
-                continue
-            if _sc < MIN_STRENGTH_SCORE:
-                print(f"    [skip] {code} {name} — 강도 {_sc:.2f} < {MIN_STRENGTH_SCORE}")
+            _ok, _why = _strength_gate(strat, _sc)
+            if not _ok:
+                print(f"    [skip] {code} {name} — {_why}")
                 continue
 
             # 잔여 빈 슬롯 수로 예산 균등 분배 (각 전략의 실제 배정 수 반영)
@@ -952,7 +973,7 @@ def cmd_buy():
             if _need > remaining_dep:
                 print(f"    [skip] {code} {name} — 잔고 부족(필요 {_need:,.0f} > 잔여 {remaining_dep:,.0f})")
                 continue
-            print(f"    [verify] {code} {name} — 강도 {_sc:.2f} ≥ {MIN_STRENGTH_SCORE} / "
+            print(f"    [verify] {code} {name} — {_why} / "
                   f"잔여 {remaining_dep:,.0f} ≥ 주문 {_need:,.0f} → 주문 실행")
 
             try:
@@ -1119,7 +1140,7 @@ def remove_kiwoom_position(code):
 
 
 # 자가치유 시 전략별 보유일 (안C 라이브 파라미터와 일치 — 20 고정이던 것을 수정 2026-07-10)
-_HEAL_HOLDING = {"high_52w_filt": 20, "rsi_reversal": 5, "rsi_vol": 7}
+_HEAL_HOLDING = {"high_52w_filt": 20, "high_500d_filt": 20, "rsi_reversal": 5, "rsi_vol": 7}
 
 
 def _signal_date_lookup(code, strategy, buy_date):

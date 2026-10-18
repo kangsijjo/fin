@@ -1,13 +1,14 @@
 """
-live_signal.py — v3: 안C 포트폴리오 신호 감지 (4:4:2)
+live_signal.py — v4: 안C' 포트폴리오 신호 감지 (신고가 6:4, 2026-10-18)
 
 매일 평일 장 마감 후 실행:
   python live_signal.py
 
-전략별 슬롯 구조 — 안C (2026-06-17, 백테스트 CAGR +11.6%):
-  슬롯 1-4  →  high_52w_filt   (52주 신고가 + 거래량 + 시장 강세, 20일 보유)
-  슬롯 5-8  →  rsi_reversal    (RSI(14) < 30 과매도 반전,          5일 보유)
-  슬롯 9-10 →  rsi_vol         (RSI(14) < 30 + 거래량 2배 급증,    7일 보유)
+전략별 슬롯 구조 — 안C' (2026-10-18 사용자 결정, 설명서 §56):
+  슬롯 1-6  →  high_500d_filt  (500일 신고가 + 거래량 + 시장 강세, 20일 보유) = 백테스트 star_high_500d_20
+  슬롯 7-10 →  high_52w_filt   (52주 신고가 + 거래량 + 시장 강세,  20일 보유) = 백테스트 star_high_52w_20_filt
+  (2026-10-18 rsi_reversal·rsi_vol 신호 생성 중단 — 두 기간 백테스트 모두 최하위권. 감지 함수는
+   intraday_preview·검증 스크립트 호환을 위해 남겨 둠)
 
 저장:
   paper_signals.csv : 누적 신호
@@ -77,6 +78,9 @@ ETF_PREFIXES = ("KODEX", "TIGER", "KBSTAR", "KOSEF", "ARIRANG", "HANARO",
 # 전략별 파라미터 (백테스트 최적값과 일치)
 _HIGH_52W = dict(lookback=252, holding=20, min_tv=3_000_000_000,
                  vol_mult=1.5, mkt_ma=60)
+_HIGH_500D = dict(_HIGH_52W, lookback=500)      # HighWithFiltersStrategy(500, 20) — star_high_500d_20
+# 키움 운용 전략(신호 생성 대상) — kiwoom_trader.STRATEGY_PRIORITY 와 같은 집합(테스트로 고정)
+LIVE_STRATEGIES = ("high_500d_filt", "high_52w_filt")
 _RSI_REV   = dict(rsi_period=14, rsi_th=30, holding=5,
                   min_tv=1_000_000_000)
 _RSI_VOL   = dict(rsi_period=14, rsi_th=30, vol_ma_days=20, vol_mult=2.0,
@@ -222,12 +226,22 @@ def append_signals(new_rows):
 
 # ─── 전략별 신호 감지 ──────────────────────────────────────────────────────────
 def detect_high_52w_filt(df, last_date, all_dates, name_cache, mkt_dict):
-    """Strategy 1 (슬롯 1-6): 52주 신고가 + 거래량 1.5x + 시장 강세 게이트.
+    """52주 신고가 + 거래량 1.5x + 시장 강세 게이트 (슬롯 7-10).
 
     HighWithFiltersStrategy(lookback_days=252, holding_days=20,
         use_market_filter=True, use_volume_filter=True, vol_mult=1.5) 와 동일 조건.
     """
-    p = _HIGH_52W
+    return _detect_high_filt(df, last_date, all_dates, name_cache, mkt_dict, _HIGH_52W, "high_52w_filt")
+
+
+def detect_high_500d_filt(df, last_date, all_dates, name_cache, mkt_dict):
+    """500일 신고가 + 거래량 1.5x + 시장 강세 게이트 (슬롯 1-6, 2026-10-18 신설).
+    HighWithFiltersStrategy(lookback_days=500, holding_days=20) = 백테스트 star_high_500d_20."""
+    return _detect_high_filt(df, last_date, all_dates, name_cache, mkt_dict, _HIGH_500D, "high_500d_filt")
+
+
+def _detect_high_filt(df, last_date, all_dates, name_cache, mkt_dict, p, strategy):
+    """N일 신고가 + 거래량 + 시장강세 공통 감지(창 길이만 다름)."""
     df = df.sort_values(["code", "date"]).copy()
 
     df["prev_high"] = df.groupby("code")["high"].transform(
@@ -260,7 +274,7 @@ def detect_high_52w_filt(df, last_date, all_dates, name_cache, mkt_dict):
             "name":              r["_name"],
             "entry_price_close": float(r["close"]),
             "target_exit_date":  tgt,
-            "strategy":          "high_52w_filt",
+            "strategy":          strategy,
             "holding_days":      p["holding"],
             "lookback_high":     float(r.get("prev_high", 0) or 0),
             "market_strong":     True,
@@ -356,11 +370,10 @@ def detect_rsi_reversal(df, last_date, all_dates, name_cache):
 
 # ─── 메인 ─────────────────────────────────────────────────────────────────────
 def main():
-    print("=== Paper Trading 신호 감지 v3 (안C: 4:4:2) ===")
+    print("=== Paper Trading 신호 감지 v4 (안C': 신고가 6:4) ===")
     print(f"실행 시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("  슬롯 1-4 : high_52w_filt  (52주 신고가, 20일 보유)")
-    print("  슬롯 5-8 : rsi_reversal   (RSI<30 과매도, 5일 보유)")
-    print("  슬롯 9-10: rsi_vol        (RSI<30 + 거래량 2배, 7일 보유)")
+    print("  슬롯 1-6 : high_500d_filt (500일 신고가, 20일 보유)")
+    print("  슬롯 7-10: high_52w_filt  (52주 신고가, 20일 보유)")
 
     # 1) 데이터 로드
     df = load_macro_daily()
@@ -379,11 +392,11 @@ def main():
     mkt_dict   = _compute_mkt_strong(df)
 
     # 4) 전략별 신호 감지
+    sig0 = detect_high_500d_filt(df.copy(), last_date, all_dates, name_cache, mkt_dict)
     sig1 = detect_high_52w_filt(df.copy(), last_date, all_dates, name_cache, mkt_dict)
-    sig2 = detect_rsi_reversal(df.copy(), last_date, all_dates, name_cache)
-    sig3 = detect_rsi_vol(df.copy(), last_date, all_dates, name_cache)
+    groups = [("high_500d_filt", sig0), ("high_52w_filt", sig1)]
 
-    all_signals = sig1 + sig2 + sig3
+    all_signals = sig0 + sig1
 
     # 5) 기존 신호와 대조 — (date, code, strategy) 기준 중복 제거
     existing = load_existing_signals()
@@ -396,9 +409,7 @@ def main():
     # 6) 전략별 요약 출력
     print(f"\n[{last_date}] 신호 감지 결과")
     print(f"{'─'*55}")
-    for strat, signals in [("high_52w_filt", sig1),
-                            ("rsi_reversal",  sig2),
-                            ("rsi_vol",       sig3)]:
+    for strat, signals in groups:
         new_cnt = sum(1 for s in new if s["strategy"] == strat)
         print(f"  {strat:<16}  총 {len(signals):>3}건  (새 신호 {new_cnt}건)")
     print(f"{'─'*55}")
@@ -409,9 +420,7 @@ def main():
         return
 
     # 7) 전략별 콘솔 테이블
-    for strat_name, strat_sigs in [("high_52w_filt", sig1),
-                                    ("rsi_reversal",  sig2),
-                                    ("rsi_vol",       sig3)]:
+    for strat_name, strat_sigs in groups:
         if not strat_sigs:
             continue
         print(f"\n[{strat_name}] {len(strat_sigs)}건")
@@ -423,10 +432,12 @@ def main():
         if len(strat_sigs) > 20:
             print(f"  ... and {len(strat_sigs)-20} more")
 
-    # 8) 다인수 팩터 분석 (high_52w_filt 신호 — 주력 전략)
-    if _SCORER_AVAILABLE and sig1:
+    # 8) 다인수 팩터 분석 (신고가 신호 — 500일 우선, 같은 종목 중복 제외)
+    _seen = set()
+    sig_rep = [s for s in sig0 + sig1 if not (s["code"] in _seen or _seen.add(s["code"]))]
+    if _SCORER_AVAILABLE and sig_rep:
         print(f"\n{'='*65}")
-        print("  팩터 점수 분석 (high_52w_filt — Method B: IC 가중)")
+        print("  팩터 점수 분석 (신고가 신호 — Method B: IC 가중)")
         print(f"{'='*65}")
         try:
             scorer = FactorScorer()
@@ -436,7 +447,7 @@ def main():
                 macro_feats = scorer.prepare_macro_features()
                 con_db = _open_stock_db()
                 db_feats = scorer.prepare_db_features(con_db, last_date_str) if con_db else {}
-                for s in sig1[:15]:
+                for s in sig_rep[:15]:
                     # strategy 전달 필수 — 빠지면 기본값(h500_40_MKT) 원-핫이 찍혀
                     # 리포트의 AI 근거가 다른 전략 기준으로 계산된다(2026-08-20).
                     feats  = scorer.build_feature_vec(
@@ -455,7 +466,7 @@ def main():
     if new:
         append_signals(new)
         print(f"\n[saved] paper_signals.csv 에 {len(new)} 건 추가")
-        for strat in ["high_52w_filt", "rsi_reversal", "rsi_vol"]:
+        for strat in LIVE_STRATEGIES:
             cnt = sum(1 for s in new if s["strategy"] == strat)
             if cnt:
                 print(f"  {strat}: {cnt}건")

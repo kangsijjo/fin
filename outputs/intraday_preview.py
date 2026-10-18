@@ -21,7 +21,7 @@ sys.path.insert(0, os.getcwd())
 import pandas as pd
 
 from strategies.daily_loader import load_macro_daily
-from live_signal import (detect_high_52w_filt, detect_rsi_reversal, detect_rsi_vol,
+from live_signal import (detect_high_52w_filt, detect_high_500d_filt,
                          load_name_cache, _compute_mkt_strong)
 
 OUT = "db/kiwoom/intraday_preview.json"
@@ -83,12 +83,12 @@ def main():
     name_cache = load_name_cache()
     mkt_dict = _compute_mkt_strong(df)
 
+    # [2026-10-18] 키움 운용 전략 교체(rsi 2종 → high_500d_filt) — live_signal 과 같은 집합
+    sig0 = detect_high_500d_filt(df.copy(), last_date, all_dates, name_cache, mkt_dict)
     sig1 = detect_high_52w_filt(df.copy(), last_date, all_dates, name_cache, mkt_dict)
-    sig2 = detect_rsi_reversal(df.copy(), last_date, all_dates, name_cache)
-    sig3 = detect_rsi_vol(df.copy(), last_date, all_dates, name_cache)
 
     items = []
-    for strat, sigs in [("high_52w_filt", sig1), ("rsi_reversal", sig2), ("rsi_vol", sig3)]:
+    for strat, sigs in [("high_500d_filt", sig0), ("high_52w_filt", sig1)]:
         for s in sigs:
             items.append({
                 "code": str(s.get("code", "")).zfill(6),
@@ -98,10 +98,10 @@ def main():
             })
     result["as_of"] = today
     result["items"] = items
-    result["counts"] = {"high_52w_filt": len(sig1), "rsi_reversal": len(sig2), "rsi_vol": len(sig3)}
+    result["counts"] = {"high_500d_filt": len(sig0), "high_52w_filt": len(sig1)}
     _write(result)
     print(f"[preview] 잠정 후보 {len(items)}건 "
-          f"(52주 {len(sig1)} / RSI반전 {len(sig2)} / RSI+거래량 {len(sig3)}) → {OUT}")
+          f"(500일 {len(sig0)} / 52주 {len(sig1)}) → {OUT}")
 
 
 def _write(result):

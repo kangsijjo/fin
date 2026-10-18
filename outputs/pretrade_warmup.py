@@ -51,11 +51,18 @@ def warm_kiwoom():
     else:
         strength = kt._strength_map(sigs)
         strength, missing = kt.verify_strength(sigs, strength)
-        ok = [v for k, v in strength.items() if v >= kt.MIN_STRENGTH_SCORE]
+        # [2026-10-18] 키움 신고가 2종(kt.STRENGTH_EXEMPT)은 임계와 무관하게 매수 후보 — KIS 와 같은 집계
+        exempt = getattr(kt, "STRENGTH_EXEMPT", set())
+        n_ex = sum(1 for s in sigs if str(s.get("strategy", "")) in exempt)
+        ok = [v for k, v in strength.items()
+              if v >= kt.MIN_STRENGTH_SCORE and (not isinstance(k, tuple) or k[-1] not in exempt)]
         print(f"[warmup][키움] 신호 {len(sigs)}건 / 강도확보 {len(strength)}건 / "
-              f"임계 {kt.MIN_STRENGTH_SCORE} 통과 {len(ok)}건 / 미확보 {len(missing)}건")
-        if missing:
-            problems.append(f"키움 강도 미확보 {len(missing)}건(해당 후보 매수 차단 예정)")
+              f"임계 {kt.MIN_STRENGTH_SCORE} 통과 {len(ok)}건 + 면제({', '.join(sorted(exempt)) or '-'}) {n_ex}건"
+              f" / 미확보 {len(missing)}건")
+        blocked_missing = [m for m in missing
+                           if not (isinstance(m, tuple) and m[-1] in exempt)]
+        if blocked_missing:
+            problems.append(f"키움 강도 미확보 {len(blocked_missing)}건(해당 후보 매수 차단 예정)")
 
     # 토큰/연결 예열 — 실패 시 장 전에 알림(09시 첫 실패보다 10분 빠르다)
     try:

@@ -62,7 +62,7 @@ def main():
         sys.exit(1)
 
     print(f"=== Paper Trading 추적 ===")
-    print(f"운용 전략: 안C 포트폴리오 (high_52w_filt×4 / rsi_reversal×4 / rsi_vol×2)")
+    print(f"운용 전략: 안C' 포트폴리오 (high_500d_filt×6 / high_52w_filt×4, 2026-10-18~)")
     print(f"자본: {INITIAL_CAPITAL:,}원 / max_concurrent={MAX_CONCURRENT}")
 
     # 1) 신호 로드
@@ -204,7 +204,7 @@ def main():
         if "strategy" in closed.columns:
             print(f"\n  {'전략':<18}  {'건수':>4}  {'승률':>6}  {'avg_net':>8}  {'avg_win':>8}  {'avg_loss':>9}")
             print(f"  {'─'*60}")
-            for strat in ["high_52w_filt", "rsi_reversal", "rsi_vol"]:
+            for strat in ["high_500d_filt", "high_52w_filt", "rsi_reversal", "rsi_vol"]:   # rsi 는 10-18 이전 이력
                 g = closed[closed["strategy"] == strat]
                 if len(g) == 0:
                     continue

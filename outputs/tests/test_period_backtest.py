@@ -188,7 +188,8 @@ def test_pbt_meta_lists_strategies_and_presets(dash):
     with dash.app.test_client() as c:
         d = c.get("/api/pbt/meta", environ_base=LOCAL).get_json()
     assert len(d["strategies"]) == len(d["presets"]["all"]) >= 50
-    assert len(d["presets"]["live"]) == 6
+    import strategy_engine as E
+    assert set(d["presets"]["live"]) == set(E.LIVE_MAP)        # 2026-10-18 키움 교체 후 5개(키움 2 + KIS 3)
 
 
 def test_pbt_post_requires_action_header_and_valid_input(dash):
@@ -395,3 +396,70 @@ def test_collect_all_endpoint_and_bat(dash, monkeypatch, tmp_path):
     raw = open(os.path.join(OUTPUTS, "collect_all.bat"), "rb").read()
     raw.decode("ascii")
     assert b"collect_aux.py --kind all" in raw and raw.count(b"\n") == raw.count(b"\r\n")
+
+
+def test_state_write_survives_windows_replace_lock(tmp_path, monkeypatch):
+    """2026-10-18 실사고: 대시보드가 읽는 순간 os.replace 가 WinError 5 → 수집 실행기 사망."""
+    import period_backtest as P
+    real = os.replace
+    calls = {"n": 0}
+
+    def flaky(a, b):
+        calls["n"] += 1
+        if calls["n"] <= 3:
+            raise PermissionError(5, "액세스가 거부되었습니다")
+        return real(a, b)
+
+    monkeypatch.setattr(P.os, "replace", flaky)
+    target = tmp_path / "s.json"
+    assert P.write_json_atomic(str(target), {"a": 1}, wait=0) is True
+    assert json.loads(target.read_text(encoding="utf-8")) == {"a": 1} and calls["n"] == 4
+    monkeypatch.setattr(P.os, "replace", lambda a, b: (_ for _ in ()).throw(PermissionError(5, "x")))
+    assert P.write_json_atomic(str(target), {"a": 2}, tries=2, wait=0) is True     # 제자리 쓰기로 마무리
+    assert json.loads(target.read_text(encoding="utf-8")) == {"a": 2}
+
+
+# ── 전략 설명 팝업 + 지표 툴팁 (2026-10-18) ──
+def test_every_strategy_has_plain_explanation():
+    import strategy_engine as E
+    import strategy_explain as X
+    for s in E.ALL_STRATEGIES:
+        d = X.explain(s)
+        assert d and d["title"] and d["idea"] and d["buy"] and d["sell"], s.name
+    m = {s.name: s for s in E.ALL_STRATEGIES}
+    d = X.explain(m["star_high_500d_20"])
+    assert any("500거래일" in b for b in d["buy"]) and any("20거래일째" in x for x in d["sell"])
+    assert any("미래" in c or "늦게 공개" in c for c in X.explain(m["h52w_cred_dec"])["caution"])
+    assert X.explain(m["macd_zx"])["caution"], "0선 조건이 무효라는 사실을 숨기지 않는다"
+    assert not X.explain(m["macd_all"])["caution"]
+
+
+def test_macd_zero_cross_flag_is_currently_a_noop():
+    """설명 팝업의 주의 문구가 사실인지 고정 — 코드를 고치면 이 테스트와 문구를 같이 바꿀 것."""
+    import numpy as np
+    import pandas as pd
+    from strategies.macd_cross import MacdCrossStrategy
+    import strategy_engine as E
+    rng = np.random.default_rng(1)
+    dates = [d.strftime("%Y%m%d") for d in pd.bdate_range("20230102", periods=300)]
+    rows = []
+    for code in ("000001", "000002", "000003"):
+        px = 10000 * np.cumprod(1 + rng.normal(0, 0.02, len(dates)))
+        rows += [{"code": code, "date": d, "open": p, "high": p * 1.01, "low": p * 0.99, "close": p,
+                  "volume": 1e6, "trading_value": 5e9, "change_pct": 0.0} for d, p in zip(dates, px)]
+    df = pd.DataFrame(rows)
+    a = MacdCrossStrategy(require_zero_cross=True, holding_days=5).backtest(df.copy(), E.DEFAULT_COSTS)
+    b = MacdCrossStrategy(require_zero_cross=False, holding_days=5).backtest(df.copy(), E.DEFAULT_COSTS)
+    assert [(t.code, t.entry_date) for t in a] == [(t.code, t.entry_date) for t in b]
+
+
+def test_dashboard_has_strategy_popup_and_metric_tips(dash):
+    with dash.app.test_client() as c:
+        d = c.get("/api/pbt/meta", environ_base=LOCAL).get_json()
+    assert all(s["desc"] and s["desc"]["buy"] for s in d["strategies"])
+    assert d["common_rules"]
+    src = open(os.path.join(OUTPUTS, "integrated_dashboard_server.py"), encoding="utf-8").read()
+    for k in ("cagr:", "mdd:", "sharpe:", "slot:", "vs:"):
+        assert k in src[src.index("const _PBT_TIPS={"):src.index("function _pbtTipInit")], k
+    assert "function pbtExplain(name)" in src and "onclick=\"pbtExplain(" in src
+    assert "th('cagr','CAGR')" in src and "th('mdd','MDD')" in src and "th('sharpe','샤프')" in src

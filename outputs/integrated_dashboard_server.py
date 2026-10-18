@@ -433,8 +433,8 @@ def get_health():
 
 
 # ── 슬롯 구성 (kiwoom_trader.py 와 동기화) ─────────────────────────────────────
-_STRATEGY_MAX_SLOTS = {"high_52w_filt": 4, "rsi_reversal": 4, "rsi_vol": 2}
-_STRATEGY_PRIORITY  = ["high_52w_filt", "rsi_reversal", "rsi_vol"]
+_STRATEGY_MAX_SLOTS = {"high_500d_filt": 6, "high_52w_filt": 4}      # 2026-10-18 rsi 2종 → 500일 신고가
+_STRATEGY_PRIORITY  = ["high_500d_filt", "high_52w_filt"]
 
 
 def _ledger_slot_counts(ledger_csv, slot_keys):
@@ -1063,22 +1063,20 @@ _KIS_EXIT = {
     "gc_for3d":       "진입 15영업일째 종가 또는 -26% 손절",
 }
 # 키움 안C (손절 없음 = 시간청산)
-_KW_STRATEGY_SLOTS = {"high_52w_filt": 4, "rsi_reversal": 4, "rsi_vol": 2}
+# 2026-10-18 rsi_reversal·rsi_vol 제거 → high_500d_filt 6슬롯, 신고가 2종 강도 필터 면제(설명서 §56)
+_KW_STRATEGY_SLOTS = {"high_500d_filt": 6, "high_52w_filt": 4}
 _KW_STRATEGY_LABEL = {
-    "high_52w_filt": "52주 신고가+거래량",
-    "rsi_reversal":  "RSI 과매도 반전",
-    "rsi_vol":       "RSI 과매도+거래량급증",
+    "high_500d_filt": "500일 신고가+거래량",
+    "high_52w_filt":  "52주 신고가+거래량",
 }
-_KW_STRATEGY_HOLD = {"high_52w_filt": 20, "rsi_reversal": 5, "rsi_vol": 7}
+_KW_STRATEGY_HOLD = {"high_500d_filt": 20, "high_52w_filt": 20}
 _KW_ENTRY = {
-    "high_52w_filt": "종가 > 직전 252영업일 신고가(52주 돌파) + 시장강세 게이트(전종목 평균등락 60일MA>0) + 당일 거래대금 ≥ 30일평균 ×1.5 + 거래대금 ≥ 30억 + 강도(score_ic) ≥ 5.7 (2026-08-09 재조정)",
-    "rsi_reversal":  "RSI(14) < 30 (과매도) + 거래대금 ≥ 10억 + 강도(score_ic) ≥ 5.7 (2026-08-09 재조정)",
-    "rsi_vol":       "RSI(14) < 30 + 당일 거래대금 > 20일평균 ×2.0(거래량 급증) + 거래대금 ≥ 10억 + 강도(score_ic) ≥ 5.7 (2026-08-09 재조정)",
+    "high_500d_filt": "종가 > 직전 500영업일 최고가(약 2년 신고가) + 시장강세 게이트(전종목 평균등락 60일MA>0) + 당일 거래대금 ≥ 30일평균 ×1.5 + 거래대금 ≥ 30억 · 강도 필터 면제(강도순 정렬만) · 우선 배정",
+    "high_52w_filt":  "종가 > 직전 252영업일 신고가(52주 돌파) + 시장강세 게이트(전종목 평균등락 60일MA>0) + 당일 거래대금 ≥ 30일평균 ×1.5 + 거래대금 ≥ 30억 · 강도 필터 면제(2026-10-18, 강도순 정렬만)",
 }
 _KW_EXIT = {
-    "high_52w_filt": "익절 +50% 장중 지정가(매일 아침 발주) 또는 진입 20영업일째 종가 (손절 없음)",
-    "rsi_reversal":  "진입 5영업일째 종가 (손절 없음)",
-    "rsi_vol":       "익절 +20% 장중 지정가(매일 아침 발주) 또는 진입 7영업일째 종가 (손절 없음)",
+    "high_500d_filt": "진입 20영업일째 종가 (손절·익절 없음)",
+    "high_52w_filt":  "익절 +50% 장중 지정가(매일 아침 발주) 또는 진입 20영업일째 종가 (손절 없음)",
 }
 
 
@@ -2287,8 +2285,10 @@ def api_pbt_meta():
     import strategy_engine as E
     cal = P.trading_calendar()
     live = getattr(E, "LIVE_MAP", {})
+    import strategy_explain as X
     strategies = [{"name": s.name, "live": live.get(s.name, ""), "warmup": P.warmup_days(s),
-                   "needs": [P._AUX_LABEL[k] for k in P.aux_needs(s)]} for s in E.ALL_STRATEGIES]
+                   "needs": [P._AUX_LABEL[k] for k in P.aux_needs(s)],
+                   "desc": X.explain(s)} for s in E.ALL_STRATEGIES]
     top10 = []
     try:
         sf = get_strategy_full()
@@ -2307,6 +2307,7 @@ def api_pbt_meta():
                     "presets": {"live": [s["name"] for s in strategies if s["live"]],
                                 "top10": top10, "all": [s["name"] for s in strategies]},
                     "data": [cal[0], cal[-1]] if cal else None, "coverage": cov,
+                    "common_rules": X.COMMON_RULES,
                     "last_job": jobs[-1].stem if jobs else None,
                     "running": _PBT_PROC["job"] if (p is not None and p.poll() is None) else None})
 
@@ -2849,7 +2850,7 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
     </div>
     <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px">
       <span style="font-size:12px;color:#94a3b8">전략:</span>
-      <button class="runbtn" onclick="pbtSel('live')">★ 라이브 6개</button>
+      <button class="runbtn" id="pbt-live-btn" onclick="pbtSel('live')">★ 라이브</button>
       <button class="runbtn" onclick="pbtSel('top10')">상위 10개</button>
       <button class="runbtn" onclick="pbtSel('all')">전체</button>
       <button class="runbtn" onclick="pbtSel('none')">선택 해제</button>
@@ -3560,11 +3561,74 @@ function fillBacktest(bt, sc){
 }
 
 // ── [2026-10-18] 기간 백테스트 테스트기 ─────────────────────────────────────────
-let _pbtMeta=null, _pbtTimer=null;
+let _pbtMeta=null, _pbtTimer=null, _pbtLastRes=null;
+// ── 지표 설명(마우스를 올리면 뜸) — '|' 는 줄바꿈 (2026-10-18) ──
+const _PBT_TIPS={
+  strategy:'전략 이름을 누르면 어떤 조건으로 사고파는지 쉬운 말로 설명이 뜹니다|★ = 지금 모의매매에서 쓰는 전략',
+  n:'기간 안에 신호가 난 매매 건수(10칸이 다 차서 실제로 못 산 신호도 포함)|(미완료 N) = 종료일 뒤에 팔리는 매매',
+  win:'끝난 매매 중 이익으로 끝난 비율|높아도 손실 한 번이 크면 전체는 마이너스일 수 있음',
+  avg:'신호 전부를 샀다고 칠 때 한 건 평균 수익률(비용 포함)|10칸 제약 없이 본 ’신호 자체의 실력’',
+  slot:'10칸에 실제로 담긴 매매만의 평균 수익률|자본곡선은 이 값을 따른다 — 신호 평균과 차이가 크면 ’고르는 순서’가 결과를 좌우한 것',
+  tot:'기간 처음 대비 끝의 자산 증감률|예: 1,000만 원 → 1,300만 원이면 +30%',
+  cagr:'CAGR = 연평균 수익률|기간 전체 수익을 ’매년 같은 비율로 불었다면 한 해 몇 %?’로 바꾼 값|예: 3년에 +33% → 연 약 +10%|기간 길이가 달라도 서로 비교할 수 있어 표를 이 값 순으로 정렬|은행 이자(연 3% 안팎)보다 낮으면 굳이 위험을 질 이유가 약함',
+  mdd:'MDD = 최대 낙폭|기간 중 가장 높았던 잔고에서 가장 많이 떨어졌던 비율|예: 1,000만 원까지 갔다가 600만 원까지 떨어졌으면 −40%|’최악일 때 얼마나 아팠나’ — 0에 가까울수록 좋음|−50%면 원금 회복에 +100%가 필요',
+  sharpe:'샤프 = 수익의 ’질’(흔들림 대비 수익)|하루하루 수익의 평균 ÷ 하루하루 흔들림(표준편차)을 1년 기준으로 환산(무위험수익 0 가정)|같은 수익이면 덜 출렁인 쪽이 높다|0 이하: 위험만 지고 못 벌었음 · 0.5 전후: 보통 · 1 이상: 좋음|운으로도 높게 나올 수 있어 아래 ’운 검정’과 함께 볼 것',
+  vs:'이 전략 CAGR − 시장 CAGR(%p)|시장 = 코스닥 유니버스 전 종목을 똑같이 나눠 산 경우|+면 그냥 시장 전체를 산 것보다 나았다는 뜻',
+  year:'그 해 1년 동안의 자산 증감률|해마다 부호가 바뀌면 특정 해의 운에 기댄 전략일 가능성'
+};
+function _pbtTipInit(){
+  if(document.getElementById('pbt-tipbox')) return;
+  const box=document.createElement('div'); box.id='pbt-tipbox';
+  box.style.cssText='position:fixed;z-index:9999;display:none;max-width:340px;padding:8px 11px;background:#0b1220;border:1px solid #334155;border-radius:8px;color:#e2e8f0;font-size:12px;line-height:1.6;box-shadow:0 6px 18px rgba(0,0,0,.45);pointer-events:none';
+  document.body.appendChild(box);
+  document.addEventListener('mouseover',e=>{ const t=e.target.closest&&e.target.closest('.pbt-tip'); if(!t) return;
+    const lines=String(t.getAttribute('data-tip')||'').split('|');
+    box.innerHTML=lines.map((l,i)=>i===0?`<b>${_pbtEsc(l)}</b>`:`<div style="color:#cbd5e1">${_pbtEsc(l)}</div>`).join('');
+    box.style.display='block'; const r=t.getBoundingClientRect();
+    let x=Math.min(r.left, window.innerWidth-360), y=r.bottom+6; if(y+box.offsetHeight>window.innerHeight) y=r.top-box.offsetHeight-6;
+    box.style.left=Math.max(6,x)+'px'; box.style.top=Math.max(6,y)+'px'; });
+  document.addEventListener('mouseout',e=>{ const t=e.target.closest&&e.target.closest('.pbt-tip'); if(t) box.style.display='none'; });
+}
+// ── 전략 설명 팝업(전략 이름 / ⓘ 클릭) ──
+function pbtExplain(name){
+  const s=((_pbtMeta&&_pbtMeta.strategies)||[]).find(x=>x.name===name); if(!s) return;
+  const d=s.desc||{}, li=a=>(a||[]).map(x=>`<li>${_pbtEsc(x)}</li>`).join('');
+  const r=((_pbtLastRes&&_pbtLastRes.results)||[]).find(x=>x.strategy===name);
+  const P=(_pbtLastRes&&_pbtLastRes.params)||{};
+  const f=(v,k)=>v==null||isNaN(v)?'-':(v>0?'+':'')+Number(v).toFixed(k==null?1:k)+'%';
+  const res=r&&r.cagr!=null?`<div style="margin-top:10px;padding:8px 10px;background:#0f172a;border-radius:6px;font-size:12px">
+      <b>이번 백테스트</b> <span style="color:#64748b">${_pbtD(P.start)} ~ ${_pbtD(P.eff_end||P.end)}</span><br>
+      매매 ${r.n_trades}건 · 승률 ${r.win==null?'-':r.win+'%'} · 신호 평균 ${f(r.avg_net,2)} · 슬롯 실매매 ${f(r.slot_avg,2)}<br>
+      총수익 ${f(r.total_ret)} · <span class="pbt-tip" data-tip="${_pbtEsc(_PBT_TIPS.cagr)}">CAGR</span> <b>${f(r.cagr)}</b> ·
+      <span class="pbt-tip" data-tip="${_pbtEsc(_PBT_TIPS.mdd)}">MDD</span> ${f(r.mdd)} ·
+      <span class="pbt-tip" data-tip="${_pbtEsc(_PBT_TIPS.sharpe)}">샤프</span> ${r.sharpe==null?'-':Number(r.sharpe).toFixed(2)}<br>
+      연도별: ${Object.entries(r.yearly||{}).map(([y,v])=>`${y} <span class="${clr(v)}">${f(v)}</span>`).join(' · ')}</div>`:'';
+  let m=document.getElementById('pbt-modal');
+  if(!m){ m=document.createElement('div'); m.id='pbt-modal';
+    m.style.cssText='position:fixed;inset:0;z-index:9000;background:rgba(2,6,23,.65);display:flex;align-items:center;justify-content:center';
+    m.addEventListener('click',e=>{ if(e.target===m) m.style.display='none'; });
+    document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&m) m.style.display='none'; });
+    document.body.appendChild(m); }
+  m.innerHTML=`<div style="width:min(620px,92vw);max-height:86vh;overflow:auto;background:#111827;border:1px solid #334155;border-radius:12px;padding:18px 20px;color:#e2e8f0;font-size:13px;line-height:1.7">
+    <div style="display:flex;justify-content:space-between;align-items:start;gap:10px">
+      <div><div style="font-size:16px;font-weight:700">${s.live?'<span style="color:#fbbf24">★ </span>':''}${_pbtEsc(d.title||name)}</div>
+      <div style="color:#64748b;font-size:12px">${_pbtEsc(name)}${s.live?' · 모의매매 운용 중: '+_pbtEsc(s.live):''}</div></div>
+      <button class="runbtn" onclick="document.getElementById('pbt-modal').style.display='none'">닫기 ✕</button></div>
+    ${d.idea?`<div style="margin-top:10px;padding:8px 10px;background:rgba(37,99,235,.12);border-left:3px solid #2563eb;border-radius:4px">💡 ${_pbtEsc(d.idea)}</div>`:''}
+    <div style="margin-top:10px"><b style="color:#10b981">살 때 — 아래를 모두 만족하는 날</b><ul style="margin:4px 0 0 18px">${li(d.buy)}</ul></div>
+    <div style="margin-top:6px"><b style="color:#f87171">팔 때</b><ul style="margin:4px 0 0 18px">${li(d.sell)}</ul></div>
+    <div style="margin-top:6px"><b style="color:#93c5fd">필요한 데이터</b> <span style="color:#cbd5e1">${_pbtEsc((d.data||[]).join(' · '))}</span>
+      <span style="color:#64748b"> · 시작 전 과거 ${s.warmup}거래일 필요</span></div>
+    ${(d.caution||[]).length?`<div style="margin-top:8px;padding:8px 10px;background:rgba(251,191,36,.08);border:1px solid #78350f;border-radius:6px;color:#fcd34d"><b>주의</b><ul style="margin:4px 0 0 18px">${li(d.caution)}</ul></div>`:''}
+    ${res}
+    <div style="margin-top:10px;color:#64748b;font-size:11px"><b>백테스트 공통 규칙</b> — ${_pbtEsc((_pbtMeta.common_rules||[]).join(' · '))}</div></div>`;
+  m.style.display='flex';
+}
 const _pbtEsc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const _pbtD=s=>s?`${s.slice(0,4)}-${s.slice(4,6)}-${s.slice(6,8)}`:'';
 function _pbtCount(){ const n=document.querySelectorAll('#pbt-list input:checked').length; setTxt('pbt-count', `${n}개 선택`+(n>15?' · 많으면 수 분~수십 분':'')); }
 async function pbtInit(){
+  _pbtTipInit();
   if(_pbtMeta) return;
   try{ _pbtMeta=await fetch('/api/pbt/meta').then(r=>r.json()); }
   catch(e){ setHtml('pbt-warn',`<span style="color:#ef4444">테스트기 로드 실패: ${_pbtEsc(e.message)}</span>`); return; }
@@ -3578,7 +3642,9 @@ async function pbtInit(){
   setHtml('pbt-list', (_pbtMeta.strategies||[]).map(s=>{
     const tip=`과거 ${s.warmup}거래일 필요`+(s.needs.length?` · 필요 데이터: ${s.needs.join(', ')}`:'')+(s.live?` · 라이브: ${s.live}`:'');
     return `<label title="${_pbtEsc(tip)}" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:${s.live?'#fbbf24':'#cbd5e1'}">
-      <input type="checkbox" value="${_pbtEsc(s.name)}" onchange="_pbtCount()"> ${s.live?'★ ':''}${_pbtEsc(s.name)}</label>`;}).join(''));
+      <input type="checkbox" value="${_pbtEsc(s.name)}" onchange="_pbtCount()"> ${s.live?'★ ':''}${_pbtEsc(s.name)}
+      <span onclick="event.preventDefault();event.stopPropagation();pbtExplain('${_pbtEsc(s.name)}')" style="color:#60a5fa;cursor:pointer" title="전략 설명">ⓘ</span></label>`;}).join(''));
+  setTxt('pbt-live-btn', `★ 라이브 ${((_pbtMeta.presets||{}).live||[]).length}개`);
   pbtSel('live');
   const j=_pbtMeta.running||_pbtMeta.last_job; if(j) pbtPoll(j);
 }
@@ -3718,8 +3784,10 @@ function pbtRender(d){
   const f=(v,k)=>v==null||isNaN(v)?'-':(v>0?'+':'')+Number(v).toFixed(k==null?2:k)+'%';
   const c=v=>v==null?'':clr(v);
   const wmap={}; (d.warnings||[]).forEach(w=>{ if(w.strategy){ (wmap[w.strategy]=wmap[w.strategy]||[]).push(w.msg); } });
-  const row=(r,isM)=>`<tr${r.live?' style="background:rgba(251,191,36,0.06)"':''}${isM?' style="background:#111827;font-style:italic"':''}>
-    <td style="font-weight:500">${r.live?'<span style="color:#fbbf24">★ </span>':''}${_pbtEsc(r.strategy||r.name)}${wmap[r.strategy]?` <span title="${_pbtEsc(wmap[r.strategy].join(' / '))}" style="color:#fbbf24;cursor:help">⚠</span>`:''}${r.error?` <span style="color:#ef4444" title="${_pbtEsc(r.error)}">오류</span>`:''}</td>
+  // ★ 는 '지금' 운용 중인 전략 기준(작업 파일의 live 는 실행 당시 값이라 교체 후엔 틀릴 수 있다)
+  const _live=n=>{ const x=((_pbtMeta&&_pbtMeta.strategies)||[]).find(z=>z.name===n); return x?x.live:''; };
+  const row=(r,isM)=>`<tr${!isM&&_live(r.strategy)?' style="background:rgba(251,191,36,0.06)"':''}${isM?' style="background:#111827;font-style:italic"':''}>
+    <td style="font-weight:500">${!isM&&_live(r.strategy)?'<span style="color:#fbbf24">★ </span>':''}${isM?_pbtEsc(r.name):`<a href="javascript:void(0)" onclick="pbtExplain('${_pbtEsc(r.strategy)}')" style="color:#93c5fd;text-decoration:underline dotted" title="눌러서 전략 설명 보기">${_pbtEsc(r.strategy)}</a>`}${wmap[r.strategy]?` <span title="${_pbtEsc(wmap[r.strategy].join(' / '))}" style="color:#fbbf24;cursor:help">⚠</span>`:''}${r.error?` <span style="color:#ef4444" title="${_pbtEsc(r.error)}">오류</span>`:''}</td>
     <td class="r" style="color:#94a3b8">${isM?'-':(r.n_trades??'-')}${!isM&&r.n_open?`<span style="font-size:10px" title="기간 안에 신호가 났지만 종료일 뒤에 청산되는 매매 — 신호 평균·승률에서 제외, 자본곡선에선 실제로 보유 중인 것만 종료일 종가로 평가"> (미완료 ${r.n_open})</span>`:''}</td>
     <td class="r">${isM||r.win==null?'-':r.win.toFixed(1)+'%'}</td>
     <td class="r ${c(r.avg_net)}">${isM?'-':f(r.avg_net)}</td>
@@ -3730,8 +3798,10 @@ function pbtRender(d){
     <td class="r">${r.sharpe==null?'-':Number(r.sharpe).toFixed(2)}</td>
     <td class="r ${c(r.vs_mkt)}">${isM?'기준':f(r.vs_mkt,1)+'p'}</td>
     ${years.map(y=>`<td class="r ${c((r.yearly||{})[y])}">${f((r.yearly||{})[y],1)}</td>`).join('')}</tr>`;
-  setHtml('pbt-res', `<table><thead><tr><th>전략</th><th class="r">매매수</th><th class="r">승률</th><th class="r">신호 평균</th><th class="r">슬롯 실매매</th>
-    <th class="r">총수익</th><th class="r">CAGR</th><th class="r">MDD</th><th class="r">샤프</th><th class="r">시장 대비</th>${years.map(y=>`<th class="r">${y}</th>`).join('')}</tr></thead>
+  const th=(k,lab)=>`<th class="r"><span class="pbt-tip" data-tip="${_pbtEsc(_PBT_TIPS[k])}">${lab}</span></th>`;
+  _pbtLastRes=d;
+  setHtml('pbt-res', `<table><thead><tr><th><span class="pbt-tip" data-tip="${_pbtEsc(_PBT_TIPS.strategy)}">전략</span></th>${th('n','매매수')}${th('win','승률')}${th('avg','신호 평균')}${th('slot','슬롯 실매매')}
+    ${th('tot','총수익')}${th('cagr','CAGR')}${th('mdd','MDD')}${th('sharpe','샤프')}${th('vs','시장 대비')}${years.map(y=>`<th class="r"><span class="pbt-tip" data-tip="${_pbtEsc(_PBT_TIPS.year)}">${y}</span></th>`).join('')}</tr></thead>
     <tbody>${d.market?row(d.market,true):''}${rs.map(r=>row(r,false)).join('')}</tbody></table>
     <div style="font-size:11px;color:#64748b;margin-top:6px">전략마다 10슬롯 단독 · 다음날 시가 진입·보유일 만기·손절/익절/강도필터 없음·비용 0.245% · 일별 평가(MTM) · 시장 = 코스닥 유니버스 동일가중 · 연도별은 기간 안 각 해의 자본 증감</div>`);
   const L=d.luck;
@@ -4034,7 +4104,7 @@ function fillMarketGrid(d){
   el.innerHTML=html;
 }
 
-const _STRAT_KR={high_52w_filt:'52주신고가',rsi_reversal:'RSI반전',rsi_vol:'RSI+거래량'};
+const _STRAT_KR={high_500d_filt:'500일신고가',high_52w_filt:'52주신고가',rsi_reversal:'RSI반전',rsi_vol:'RSI+거래량'};
 function fillPreview(d){
   const tb=document.getElementById('prev-rows'); if(!tb) return;
   const ts=document.getElementById('prev-ts');

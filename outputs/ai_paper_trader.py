@@ -36,9 +36,10 @@ CAPITAL0 = 10_000_000
 SLOTS    = 10
 COST_PCT = 0.33              # 왕복
 OUT_JSON = "./db/ai_paper_result.json"
-# [2026-10-15] 라이브 강도 필터 면제 전략 — kis_trader.STRENGTH_EXEMPT 와 동기(테스트로 고정).
-# strength 포트는 '라이브 룰 쌍둥이'라 면제도 똑같이 재현한다(정렬은 강도순, 임계 미적용).
-STRENGTH_EXEMPT = {"gc_for3d"}
+# [2026-10-15] 라이브 강도 필터 면제 전략 — kis_trader.STRENGTH_EXEMPT ∪ kiwoom_trader.STRENGTH_EXEMPT
+# 와 동기(테스트로 고정). strength 포트는 '라이브 룰 쌍둥이'라 면제도 똑같이 재현한다(정렬은 강도순, 임계 미적용).
+# [2026-10-18] 키움 신고가 2종(high_500d_filt·high_52w_filt) 면제 추가(설명서 §56).
+STRENGTH_EXEMPT = {"gc_for3d", "high_500d_filt", "high_52w_filt"}
 STRENGTH_LOG = "./db/signal_strength_log.csv"
 
 

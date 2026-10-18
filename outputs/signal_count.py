@@ -41,5 +41,5 @@ def daily(path, label):
 
 
 print(f"[신호 일자별 집계]  기준: {SINCE} 이후")
-daily("paper_signals.csv", "키움 (안C: high_52w_filt/rsi_reversal/rsi_vol)")
+daily("paper_signals.csv", "키움 (안C': high_500d_filt/high_52w_filt, 10-18 이전 rsi 포함)")
 daily("kis_paper_signals.csv", "KIS (안D: h52w_for3d_mkt/for_high20_mkt/gc_for3d)")

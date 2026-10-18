@@ -321,13 +321,36 @@ def _job_path(job):
     return os.path.join(OUT_DIR, f"{job}.json")
 
 
+def write_json_atomic(path, obj, tries=20, wait=0.25):
+    """상태 JSON 원자적 기록 — **실패해도 예외를 던지지 않는다**(→ 성공 여부 bool).
+
+    [2026-10-18 실사고] 윈도우에선 대시보드가 상태 파일을 읽는 그 순간 os.replace 가
+    PermissionError(WinError 5) 로 실패한다. 그 예외가 수집 실행기를 죽여 신용 단계가 '실패'로
+    보고됐고, 자식 수집기는 고아로 계속 돌았다. → 짧게 재시도하고, 끝내 안 되면 제자리 쓰기
+    (읽는 쪽은 JSON 파싱 실패를 '쓰는 중'으로 처리한다). 상태 기록이 본작업을 막으면 안 된다."""
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False)
+    except OSError:
+        return False
+    for _ in range(tries):
+        try:
+            os.replace(tmp, path)
+            return True
+        except OSError:
+            time.sleep(wait)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False)
+        return True
+    except OSError:
+        return False
+
+
 def _write(job, state):
     os.makedirs(OUT_DIR, exist_ok=True)
-    p = _job_path(job)
-    tmp = p + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False)
-    os.replace(tmp, p)
+    write_json_atomic(_job_path(job), state)
 
 
 def _cleanup():
