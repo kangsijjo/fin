@@ -2318,6 +2318,53 @@ def api_pbt_meta():
                     "running": _PBT_PROC["job"] if (p is not None and p.poll() is None) else None})
 
 
+_STRAT_INFO_CACHE = {}
+
+
+def build_strategy_info():
+    """전 탭 마우스오버 설명용 {이름: 설명} — 엔진 55전략 + 라이브 이름 별칭 + 옛 이름 + 모의매매 규칙. (2026-10-19)
+    라이브 규칙(슬롯·손절·익절·강도)은 이 파일의 _KW_*/_KIS_* 표(슬롯 드롭다운과 같은 출처)에서 붙인다."""
+    if _STRAT_INFO_CACHE:
+        return _STRAT_INFO_CACHE
+    import strategy_engine as E
+    import strategy_explain as X
+    info = {}
+    for s in list(E.ALL_STRATEGIES) + list(X.legacy_strategies().values()):
+        d = X.explain(s)
+        if d:
+            info[s.name] = dict(d, engine=s.name)
+    for live_name, eng in X.LIVE_ALIAS.items():
+        if eng in info:
+            info[live_name] = dict(info[eng], engine=eng)
+    for acct, slots, label, entry, exit_, stop in (
+            ("키움", _KW_STRATEGY_SLOTS, _KW_STRATEGY_LABEL, _KW_ENTRY, _KW_EXIT, {}),
+            ("KIS", _KIS_STRATEGY_SLOTS, _KIS_STRATEGY_LABEL, _KIS_ENTRY, _KIS_EXIT, _KIS_STRATEGY_STOP)):
+        for n, k in slots.items():
+            if n not in info:
+                continue
+            info[n] = dict(info[n], live={"account": acct, "slots": k, "label": label.get(n, n),
+                                          "entry": entry.get(n, ""), "exit": exit_.get(n, ""),
+                                          "stop": stop.get(n)})
+    for n, note in X.RETIRED.items():
+        if n in info:
+            info[n] = dict(info[n], retired=note)
+    info["probe_fill"] = {"title": "장전 탐침 체결분(전략 아님)", "idea": "08:5X 동시호가 주문이 받아지는지 시험한 주문이 실제로 체결된 것",
+                          "buy": [], "sell": ["원장에 즉시 만기로 등록 — 다음 매도 시각에 정리"], "data": [], "caution": []}
+    _STRAT_INFO_CACHE.update(info)
+    return _STRAT_INFO_CACHE
+
+
+@app.route("/api/strategy_info")
+def api_strategy_info():
+    try:
+        info = build_strategy_info()
+        # 한글 표기(슬롯 라벨 등) → 전략 이름: 영문 이름이 안 보이는 칸에서도 설명이 뜨게
+        al = {v: k for k, v in list(_KW_STRATEGY_LABEL.items()) + list(_KIS_STRATEGY_LABEL.items()) if k in info}
+        return jsonify({"ok": True, "info": info, "aliases": al})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": f"{type(e).__name__}: {str(e)[:150]}", "info": {}})
+
+
 @app.route("/api/pbt/check", methods=["POST"])
 def api_pbt_check():
     if not _same_origin_action(request):
@@ -2580,6 +2627,17 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
 ::-webkit-scrollbar-track{background:#0f172a}
 ::-webkit-scrollbar-thumb{background:#334155;border-radius:4px}
 ::-webkit-scrollbar-thumb:hover{background:#475569}
+
+/* 2026-10-19 섹션 접기/펴기 + 전략 마우스오버 설명 */
+.section > .sec-head{cursor:pointer;user-select:none}
+.section > .sec-head .sec-caret{display:inline-block;width:16px;color:#64748b;font-size:12px;transition:transform .15s}
+.section.sec-collapsed > .sec-head .sec-caret{transform:rotate(-90deg)}
+.section.sec-collapsed > :not(.sec-head){display:none !important}
+.section.sec-collapsed{padding-top:12px;padding-bottom:12px}
+.section.sec-collapsed > .sec-head{margin-bottom:0}
+.sec-bar{display:flex;justify-content:flex-end;gap:6px;margin:-6px 0 8px}
+.sec-bar button{background:#1f2937;color:#cbd5e1;border:1px solid #334155;border-radius:6px;padding:2px 10px;font-size:12px;cursor:pointer}
+.strat-hot{text-decoration:underline dotted #60a5fa;text-underline-offset:3px;cursor:help}
 </style>
 </head>
 <body>
@@ -4268,6 +4326,86 @@ function initTableSort(){
   });
 }
 
+// ══ 2026-10-19 ① 섹션 접기/펴기(모든 탭) ② 전략 이름 마우스오버 설명(모든 탭) ══
+// 저장 키 = 탭 + (섹션 id 또는 탭 안 순번) — 제목 글자는 데이터 로딩 후 바뀌는 칸이 있어 키로 안 쓴다
+function _secKey(sec){ const tab=sec.closest('.tab-content');
+  return 'sec:'+(tab?tab.id:'top')+':'+(sec.id||('i'+(sec.dataset.secIdx||'')));}
+function _secSet(sec,col){ sec.classList.toggle('sec-collapsed',col); try{ localStorage.setItem(_secKey(sec),col?'1':'0'); }catch(e){} }
+function _secInit(){
+  document.querySelectorAll('.tab-content').forEach(tab=>tab.querySelectorAll('.section').forEach((sec,i)=>{ sec.dataset.secIdx=i; }));
+  document.querySelectorAll('.section').forEach(sec=>{
+    if(sec.dataset.secInit) return; sec.dataset.secInit='1';
+    const head=sec.firstElementChild; if(!head||!/^H[1-4]$/.test(head.tagName)) return;   // 제목(h2)이 맨 위인 섹션만
+    head.classList.add('sec-head');
+    const c=document.createElement('span'); c.className='sec-caret'; c.textContent='▾'; head.insertBefore(c,head.firstChild);
+    head.title='눌러서 접기/펴기';
+    head.addEventListener('click',e=>{ if(e.target.closest('button,input,select,a,textarea,label,option')) return;
+      _secSet(sec,!sec.classList.contains('sec-collapsed')); });
+    let saved=null; try{ saved=localStorage.getItem(_secKey(sec)); }catch(e){}
+    if(saved==='1') sec.classList.add('sec-collapsed');
+  });
+  document.querySelectorAll('.tab-content').forEach(tab=>{
+    if(tab.querySelector(':scope > .sec-bar')||!tab.querySelector('.section > .sec-head')) return;
+    const bar=document.createElement('div'); bar.className='sec-bar';
+    bar.innerHTML='<button type="button" data-a="1">▸ 모두 접기</button><button type="button" data-a="0">▾ 모두 펼치기</button>';
+    bar.addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b) return;
+      tab.querySelectorAll('.section').forEach(sec=>{ if(sec.querySelector(':scope > .sec-head')) _secSet(sec,b.dataset.a==='1'); }); });
+    tab.insertBefore(bar,tab.firstChild);
+  });
+}
+let _STRAT={}, _STRAT_AL={};
+const _STRAT_SKIP='input,select,textarea,option,#strat-tipbox,#pbt-tipbox,.pbt-tip';
+function _stratFind(el){
+  // 짧은 글자 요소에서 알려진 전략 이름(영문 토큰)을 찾는다 — 표 칸·라벨·배지 어디든
+  for(let k=0, x=el; k<2 && x && x!==document.body; k++, x=x.parentElement){
+    if(x.closest&&x.closest(_STRAT_SKIP)) return null;
+    const t=(x.textContent||'').trim(); if(!t||t.length>90) continue;
+    const t2=t.replace(/^★\s*/,'');
+    if(_STRAT_AL[t2]) return [x,_STRAT_AL[t2]];
+    if(typeof _STRAT_KR==='object'){ for(const [k,v] of Object.entries(_STRAT_KR)){ if(v===t2&&_STRAT[k]) return [x,k]; } }
+    const toks=t.match(/[A-Za-z][A-Za-z0-9_]{3,}/g)||[];
+    for(const tk of toks){ if(_STRAT[tk]) return [x,tk]; }
+  }
+  return null;
+}
+function _stratTipInit(){
+  fetch('/api/strategy_info').then(r=>r.json()).then(d=>{ _STRAT=(d&&d.info)||{}; _STRAT_AL=(d&&d.aliases)||{}; }).catch(()=>{});
+  const box=document.createElement('div'); box.id='strat-tipbox';
+  box.style.cssText='position:fixed;z-index:9998;display:none;max-width:420px;padding:10px 12px;background:#0b1220;border:1px solid #334155;border-radius:8px;color:#e2e8f0;font-size:12px;line-height:1.6;box-shadow:0 8px 22px rgba(0,0,0,.5);pointer-events:none';
+  document.body.appendChild(box);
+  let cur=null;
+  const esc=v=>String(v==null?'':v).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const li=a=>(a||[]).map(x=>'<li>'+esc(x)+'</li>').join('');
+  document.addEventListener('mouseover',e=>{
+    if(!Object.keys(_STRAT).length) return;
+    const hit=_stratFind(e.target); if(!hit){ return; }
+    const [el,name]=hit; if(cur===el&&box.style.display==='block') return;
+    cur=el; el.classList.add('strat-hot');
+    const d=_STRAT[name]||{}, L=d.live;
+    box.innerHTML=`<div style="font-weight:700;font-size:13px">${esc(d.title||name)}</div>
+      <div style="color:#64748b">${esc(name)}${d.engine&&d.engine!==name?' · 백테스트 이름 '+esc(d.engine):''}</div>
+      ${d.retired?`<div style="color:#fbbf24;margin-top:4px">⏹ ${esc(d.retired)}</div>`:''}
+      ${d.idea?`<div style="margin-top:6px;color:#cbd5e1">💡 ${esc(d.idea)}</div>`:''}
+      ${L?`<div style="margin-top:6px;padding:5px 8px;background:rgba(251,191,36,.08);border-left:3px solid #fbbf24;border-radius:4px">
+        <b>★ 지금 모의매매(${esc(L.account)}) · ${L.slots}슬롯</b><br><span style="color:#cbd5e1">사는 조건: ${esc(L.entry)}</span><br>
+        <span style="color:#cbd5e1">파는 조건: ${esc(L.exit)}</span></div>`:
+        `${(d.buy||[]).length?`<div style="margin-top:6px"><b style="color:#10b981">살 때</b><ul style="margin:2px 0 0 16px">${li(d.buy)}</ul></div>`:''}
+         ${(d.sell||[]).length?`<div><b style="color:#f87171">팔 때</b><ul style="margin:2px 0 0 16px">${li(d.sell)}</ul></div>`:''}`}
+      ${(d.caution||[]).length?`<div style="margin-top:4px;color:#fcd34d">⚠ ${esc(d.caution[0])}</div>`:''}`;
+    box.style.display='block';
+    const r=el.getBoundingClientRect();
+    let x=Math.min(r.left, window.innerWidth-440), y=r.bottom+6;
+    if(y+box.offsetHeight>window.innerHeight-6) y=Math.max(6, r.top-box.offsetHeight-6);
+    box.style.left=Math.max(6,x)+'px'; box.style.top=y+'px';
+  });
+  document.addEventListener('mouseout',e=>{
+    if(!cur) return;
+    if(e.relatedTarget && cur.contains(e.relatedTarget)) return;
+    if(!cur.contains(e.target)&&e.target!==cur) return;
+    cur.classList.remove('strat-hot'); cur=null; box.style.display='none';
+  });
+}
+window.addEventListener('load',()=>{ try{ _secInit(); }catch(e){} try{ _stratTipInit(); }catch(e){} });
 window.addEventListener('load',()=>{
   load();
   initTableSort();

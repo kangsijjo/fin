@@ -59,9 +59,10 @@ def explain(s):
                        idea="오랫동안 못 넘던 가격을, 거래가 몰리며 넘어선 종목을 따라 탄다(추세 추종). "
                             "기간이 길수록(500일) 더 드문 돌파만 고른다.")
     if c == "FiftyTwoWeekHighStrategy":
-        return _common(s, [f"오늘 종가가 직전 {_days(v['lookback'])} 최고가를 넘었다"], [_hold(H)],
-                       title="52주 신고가(다른 조건 없음)",
-                       idea="1년 중 가장 높은 가격을 넘으면 산다 — 거래량·시장 조건이 없는 가장 단순한 신고가 전략.")
+        L = v["lookback"]
+        return _common(s, [f"오늘 종가가 직전 {_days(L)} 최고가를 넘었다"], [_hold(H)],
+                       title=f"{'52주' if L == 252 else str(L) + '일'} 신고가(다른 조건 없음)",
+                       idea="그 기간 중 가장 높은 가격을 넘으면 산다 — 거래량·시장 조건이 없는 가장 단순한 신고가 전략.")
     if c == "FiveDayBreakoutStrategy":
         return _common(s, [f"오늘 종가가 직전 {v['lookback']}일 최고가를 넘었다",
                            f"거래량이 최근 {v['lookback']}일 평균의 {v['vol_mult']:g}배 이상"], [_hold(H)],
@@ -220,3 +221,25 @@ def explain(s):
 COMMON_RULES = ["신호가 난 다음날 아침 시가에 산다", "전략마다 10칸(슬롯)에 돈을 나눠 담는다 — 빈 칸이 없으면 신호를 건너뛴다",
                 "같은 날 후보가 여러 개면 전략 점수가 높은 순", "수수료·세금·슬리피지 0.245% 반영",
                 "손절·익절·강도 필터는 위에 적힌 것만 — 실제 모의매매 규칙과 다를 수 있다"]
+
+
+# 대시보드 다른 탭에 나오는 '라이브 이름·옛 이름' → 설명 (2026-10-19, 전 탭 마우스오버 설명용)
+def legacy_strategies():
+    """trades_history·옛 신호 파일에 남은 이름들(엔진 목록엔 없음) → 같은 규칙의 전략 객체."""
+    from strategies.high_with_filters import HighWithFiltersStrategy
+    from strategies.high_52w import FiftyTwoWeekHighStrategy
+    return {
+        "h500_40_MKT": HighWithFiltersStrategy(lookback_days=500, holding_days=40, use_market_filter=True,
+                                               use_volume_filter=False, name="h500_40_MKT"),
+        "h252_40": FiftyTwoWeekHighStrategy(lookback_days=252, holding_days=40, name="h252_40"),
+        "h500_20": FiftyTwoWeekHighStrategy(lookback_days=500, holding_days=20, name="h500_20"),
+    }
+
+
+# 라이브(모의매매) 이름 → 백테스트 엔진 이름
+LIVE_ALIAS = {"high_52w_filt": "star_high_52w_20_filt", "high_500d_filt": "star_high_500d_20"}
+RETIRED = {"rsi_reversal": "2026-10-18 키움 운용 종료(두 기간 백테스트 모두 최하위권, 설명서 §56)",
+           "rsi_vol": "2026-10-18 키움 운용 종료(두 기간 백테스트 모두 최하위권, 설명서 §56)",
+           "h500_40_MKT": "옛 학습용 전략(운용 안 함 — 강도·AI 학습 데이터에만 남음)",
+           "h252_40": "옛 학습용 전략(운용 안 함 — 강도·AI 학습 데이터에만 남음)",
+           "h500_20": "옛 학습용 전략(운용 안 함 — 강도·AI 학습 데이터에만 남음)"}

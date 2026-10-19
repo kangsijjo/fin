@@ -598,3 +598,31 @@ def test_pbt_api_passes_strength(dash, monkeypatch):
         assert cmd[cmd.index("--strength") + 1] == "4,5.7"
     src = open(os.path.join(OUTPUTS, "integrated_dashboard_server.py"), encoding="utf-8").read()
     assert 'id="pbt-strength"' in src and "strength:(document.getElementById('pbt-strength')" in src
+
+
+# ── 전 탭: 전략 마우스오버 설명 + 섹션 접기/펴기 (2026-10-19) ──
+def test_strategy_info_covers_engine_live_and_legacy_names(dash):
+    import strategy_engine as E
+    import kiwoom_trader as KW
+    import kis_trader as KI
+    with dash.app.test_client() as c:
+        d = c.get("/api/strategy_info", environ_base=LOCAL).get_json()
+    info = d["info"]
+    assert d["ok"] and {s.name for s in E.ALL_STRATEGIES} <= set(info)
+    for n in list(KW.STRATEGY_MAX_SLOTS) + list(KI.STRATEGY_MAX_SLOTS):
+        assert info[n].get("live") and info[n]["live"]["slots"] == {**KW.STRATEGY_MAX_SLOTS, **KI.STRATEGY_MAX_SLOTS}[n], n
+    assert info["high_500d_filt"]["engine"] == "star_high_500d_20"
+    for n in ("rsi_reversal", "rsi_vol", "h500_40_MKT", "h252_40", "h500_20"):
+        assert info[n].get("retired"), n
+    assert info["h500_20"]["title"].startswith("500일")
+    assert d["aliases"]["500일 신고가+거래량"] == "high_500d_filt"
+
+
+def test_dashboard_has_global_hover_and_collapsible_sections():
+    src = open(os.path.join(OUTPUTS, "integrated_dashboard_server.py"), encoding="utf-8").read()
+    assert "function _secInit()" in src and "function _stratTipInit()" in src
+    assert "_secInit(); }catch(e){} try{ _stratTipInit();" in src
+    assert ".section.sec-collapsed > :not(.sec-head){display:none !important}" in src
+    assert "모두 접기" in src and "모두 펼치기" in src
+    # 버튼·입력칸을 누르면 접히지 않아야 한다
+    assert "e.target.closest('button,input,select,a,textarea,label,option')" in src
