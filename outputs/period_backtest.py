@@ -48,7 +48,7 @@ CAPITAL0 = 1e7
 MIN_WINDOW = 20          # 이보다 짧으면 실행 거부(거래일)
 SMALL_WINDOW = 60        # 이보다 짧으면 경고
 MIN_TRADES = 30          # 전략별 완료 매매가 이보다 적으면 '표본 부족' 경고
-KEEP_JOBS = 30
+KEEP_JOBS = 200        # 대시보드 '지난 계산 기록'에 보이는 건수(넘치면 archive 로 이동, 삭제 안 함)
 
 # 보조 데이터 요구사항(전략 클래스 → 데이터 키)
 _AUX_LABEL = {"foreign": "외국인 수급", "inst": "기관 수급", "individual": "개인 순매수",
@@ -404,10 +404,17 @@ def _write(job, state):
 
 
 def _cleanup():
+    """[2026-10-19] 지난 계산 기록을 대시보드에서 다시 보게 되어 '삭제' → '보관 폴더로 이동'으로 바꿈.
+    최근 KEEP_JOBS 건은 db/period_bt 에, 그 이전은 db/period_bt/archive 로(기록 목록엔 안 보이지만 지워지지 않음)."""
     jobs = sorted(glob.glob(os.path.join(OUT_DIR, "pbt_*.json")), key=os.path.getmtime)
-    for p in jobs[:-KEEP_JOBS]:
+    old = jobs[:-KEEP_JOBS] if len(jobs) > KEEP_JOBS else []
+    if not old:
+        return
+    arc = os.path.join(OUT_DIR, "archive")
+    os.makedirs(arc, exist_ok=True)
+    for p in old:
         try:
-            os.remove(p)
+            os.replace(p, os.path.join(arc, os.path.basename(p)))
         except Exception:
             pass
 

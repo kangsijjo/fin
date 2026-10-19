@@ -2424,6 +2424,39 @@ def api_pbt_run():
         return jsonify({"ok": False, "msg": str(e)[:150]}), 500
 
 
+@app.route("/api/pbt/jobs")
+def api_pbt_jobs():
+    """지난 기간 백테스트 기록(최신순) — 요약만. 전체 결과는 /api/pbt/status?job= 로 연다. (2026-10-19)"""
+    out = []
+    files = sorted(_PBT_DIR.glob("pbt_*.json"), key=lambda p: p.stat().st_mtime, reverse=True) if _PBT_DIR.exists() else []
+    for p in files:
+        if not _PBT_JOB_RE.fullmatch(p.stem):
+            continue
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue                                   # 쓰는 중이거나 깨진 파일
+        prm = d.get("params") or {}
+        rs = [r for r in d.get("results") or [] if r.get("cagr") is not None]
+        base = [r for r in rs if r.get("strength_min") is None] or rs
+        top = sorted(base, key=lambda r: -float(r["cagr"]))[:5]
+        lk = d.get("luck") or {}
+        out.append({
+            "job": p.stem, "status": d.get("status"), "started": d.get("started"),
+            "finished": d.get("finished"), "elapsed_sec": d.get("elapsed_sec"),
+            "start": prm.get("start"), "end": prm.get("eff_end") or prm.get("end"),
+            "names": prm.get("names") or [], "strength": prm.get("strength") or [], "luck": bool(prm.get("luck")),
+            "market_cagr": (d.get("market") or {}).get("cagr"),
+            "n_results": len(d.get("results") or []), "n_warn": len(d.get("warnings") or []),
+            "error": d.get("error"),
+            "top": [{"strategy": r["strategy"], "cagr": r.get("cagr"), "mdd": r.get("mdd"),
+                     "sharpe": r.get("sharpe"), "n_trades": r.get("n_trades"), "total_ret": r.get("total_ret")}
+                    for r in top],
+            "luck_sum": {k: lk.get(k) for k in ("spa_cash", "pbo", "dsr", "best")} if "pbo" in lk else None,
+        })
+    return jsonify({"ok": True, "jobs": out})
+
+
 @app.route("/api/pbt/status")
 def api_pbt_status():
     job = request.args.get("job", "")
@@ -2932,6 +2965,10 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
     <details id="pbt-colbox" style="margin-top:10px;background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:6px 10px" ontoggle="if(this.open) pbtColLoad()">
       <summary style="cursor:pointer;font-size:13px;color:#cbd5e1">&#x1F4E5; 데이터 현황 · 수동 수집 <span id="pbt-colsum" style="color:#64748b;font-size:12px"></span></summary>
       <div id="pbt-col" style="margin-top:8px;overflow-x:auto"></div>
+    </details>
+    <details id="pbt-histbox" style="margin-top:8px;background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:6px 10px" ontoggle="if(this.open) pbtHistLoad()">
+      <summary style="cursor:pointer;font-size:13px;color:#cbd5e1">&#x1F4C2; 지난 계산 기록 <span id="pbt-histsum" style="color:#64748b;font-size:12px"></span></summary>
+      <div id="pbt-hist" style="margin-top:8px"></div>
     </details>
     <div id="pbt-warn" style="margin-top:10px"></div>
     <div id="pbt-prog" style="margin-top:8px;font-size:12px;color:#94a3b8"></div>
@@ -3716,6 +3753,7 @@ async function pbtInit(){
   setTxt('pbt-live-btn', `★ 라이브 ${((_pbtMeta.presets||{}).live||[]).length}개`);
   pbtSel('live');
   const j=_pbtMeta.running||_pbtMeta.last_job; if(j) pbtPoll(j);
+  pbtHistLoad(true);      // 지난 기록 건수만 먼저(목록은 펼칠 때)
 }
 function pbtSel(p){
   const set=new Set(p==='none'?[]:((_pbtMeta&&_pbtMeta.presets&&_pbtMeta.presets[p])||[]));
@@ -3744,6 +3782,58 @@ function _pbtWarnHtml(ws, head){
       if(c){ const key=c.aux+c.start+c.end; if(!seen.has(key)){ seen.add(key);
         btn=` <button class="runbtn" style="padding:1px 8px;font-size:11px" onclick="pbtColFromWarn('${_pbtEsc(c.aux)}','${_pbtEsc(c.start)}','${_pbtEsc(c.end)}')">&#x1F4E5; 이 구간 수집</button>`; } }
       return `<div style="color:${col[w.level]||'#cbd5e1'}">${ic[w.level]||''} ${w.strategy?`<b>${_pbtEsc(w.strategy)}</b>: `:''}${_pbtEsc(w.msg)}${btn}</div>`;}).join('')}</div>`;
+}
+// ── 지난 계산 기록 (2026-10-19) — 기록마다 접었다 펴는 요약 + [표로 보기] [이 조건 불러오기] ──
+let _pbtHist=[];
+async function pbtHistLoad(silent){
+  try{ const d=await fetch('/api/pbt/jobs').then(r=>r.json()); _pbtHist=(d&&d.jobs)||[]; }
+  catch(e){ if(!silent) setHtml('pbt-hist',`<span style="color:#ef4444">기록 로드 실패: ${_pbtEsc(e.message)}</span>`); return; }
+  setTxt('pbt-histsum', _pbtHist.length?`— ${_pbtHist.length}건 (최근 200건 보관)`:'— 아직 없음');
+  if(silent) return;
+  const f=(v,k)=>v==null||isNaN(v)?'-':(v>0?'+':'')+Number(v).toFixed(k==null?1:k)+'%';
+  const st={done:'완료',running:'계산 중',error:'실패'};
+  setHtml('pbt-hist', _pbtHist.length?_pbtHist.map(j=>{
+    const t=j.top&&j.top[0];
+    const head=`<b style="color:#e2e8f0">${_pbtEsc((j.started||'').slice(0,16))}</b>
+      <span style="color:#94a3b8"> · ${_pbtD(j.start)} ~ ${_pbtD(j.end)} · ${j.names.length}전략${j.strength.length?' · 강도 '+j.strength.join('/'):''}${j.luck?' · 운검정':''}</span>
+      <span style="color:${j.status==='done'?'#10b981':j.status==='error'?'#ef4444':'#38bdf8'}"> · ${st[j.status]||_pbtEsc(j.status)}</span>
+      ${t?`<span style="color:#cbd5e1"> · 1위 ${_pbtEsc(t.strategy)} <span class="${clr(t.cagr)}">${f(t.cagr)}</span></span>`:''}`;
+    const rows=(j.top||[]).map((r,k)=>`<tr><td>${k+1}</td><td>${_pbtEsc(r.strategy)}</td><td class="r">${r.n_trades??'-'}</td>
+      <td class="r ${clr(r.total_ret)}">${f(r.total_ret)}</td><td class="r ${clr(r.cagr)}" style="font-weight:700">${f(r.cagr)}</td>
+      <td class="r neg">${f(r.mdd)}</td><td class="r">${r.sharpe==null?'-':Number(r.sharpe).toFixed(2)}</td></tr>`).join('');
+    const L=j.luck_sum;
+    return `<details class="pbt-hjob" style="border-top:1px solid #1e293b;padding:5px 0">
+      <summary style="cursor:pointer;font-size:12px;line-height:1.7">${head}</summary>
+      <div style="padding:6px 0 4px 14px;font-size:12px">
+        ${j.error?`<div style="color:#ef4444">${_pbtEsc(j.error)}</div>`:''}
+        ${rows?`<table style="font-size:12px;width:auto"><thead><tr><th>#</th><th>전략 (기본 줄 상위 5)</th><th class="r">매매수</th><th class="r">총수익</th>
+          <th class="r"><span class="pbt-tip" data-tip="${_pbtEsc(_PBT_TIPS.cagr)}">CAGR</span></th><th class="r"><span class="pbt-tip" data-tip="${_pbtEsc(_PBT_TIPS.mdd)}">MDD</span></th>
+          <th class="r"><span class="pbt-tip" data-tip="${_pbtEsc(_PBT_TIPS.sharpe)}">샤프</span></th></tr></thead><tbody>${rows}</tbody></table>`:'<span style="color:#64748b">결과 없음</span>'}
+        <div style="color:#94a3b8;margin-top:4px">시장 CAGR ${f(j.market_cagr)} · 결과 ${j.n_results}줄 · 경고 ${j.n_warn}건${j.elapsed_sec!=null?' · '+j.elapsed_sec+'초':''}${L?` · 운 검정: SPA(현금) p=${L.spa_cash??'-'} · PBO ${L.pbo??'-'} · DSR ${L.dsr??'-'}`:''}</div>
+        <div style="color:#64748b;margin-top:2px">전략: ${_pbtEsc(j.names.slice(0,12).join(', '))}${j.names.length>12?` 외 ${j.names.length-12}개`:''}</div>
+        <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+          <button class="runbtn" onclick="pbtHistOpen('${_pbtEsc(j.job)}')">📊 전체 결과 표로 보기</button>
+          <button class="runbtn" onclick="pbtHistReuse('${_pbtEsc(j.job)}')">↺ 이 조건 불러오기</button>
+          <span style="color:#475569;align-self:center">${_pbtEsc(j.job)}</span></div>
+      </div></details>`; }).join('') : '<span style="color:#64748b;font-size:12px">아직 계산한 기록이 없습니다</span>');
+}
+function pbtHistOpen(job){
+  clearTimeout(_pbtTimer); pbtPoll(job);
+  const el=document.getElementById('pbt-prog'); if(el) el.scrollIntoView({behavior:'smooth',block:'start'});
+}
+function pbtHistReuse(job){
+  const j=_pbtHist.find(x=>x.job===job); if(!j) return;
+  const s=document.getElementById('pbt-start'), e=document.getElementById('pbt-end');
+  if(s&&j.start) s.value=_pbtD(j.start);
+  if(e&&j.end) e.value=_pbtD(j.end);
+  const want=new Set(j.names), have=new Set();
+  document.querySelectorAll('#pbt-list input').forEach(i=>{ i.checked=want.has(i.value); if(i.checked) have.add(i.value); });
+  const miss=j.names.filter(n=>!have.has(n)).length;
+  const st=document.getElementById('pbt-strength'); if(st) st.value=(j.strength||[]).join(', ');
+  const lk=document.getElementById('pbt-luck'); if(lk) lk.checked=!!j.luck;
+  _pbtCount();
+  setHtml('pbt-warn', `<span style="color:#38bdf8;font-size:13px">↺ ${_pbtEsc(job)} 의 조건을 불러왔습니다${miss?` (지금은 없는 전략 ${miss}개 제외)`:''} — [데이터 점검]·[실행]으로 다시 계산</span>`);
+  const sec=document.getElementById('pbt-sec'); if(sec) sec.scrollIntoView({behavior:'smooth',block:'start'});
 }
 // ── 부족한 데이터 수동 수집 (2026-10-18) ──
 let _pbtCol=null, _pbtColTimer=null;
@@ -3837,6 +3927,7 @@ async function pbtPoll(job){
   let d; try{ d=await fetch('/api/pbt/status?job='+encodeURIComponent(job)).then(r=>r.json()); }catch(e){ _pbtTimer=setTimeout(()=>pbtPoll(job),5000); return; }
   pbtRender(d);
   if(['running','starting'].includes(d.status)) _pbtTimer=setTimeout(()=>pbtPoll(job),3000);
+  else if(d.status==='done'||d.status==='error'){ const hb=document.getElementById('pbt-histbox'); pbtHistLoad(!(hb&&hb.open)); }
 }
 function pbtRender(d){
   const p=d.params||{}, pr=d.progress||[0,0];

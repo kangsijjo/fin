@@ -626,3 +626,48 @@ def test_dashboard_has_global_hover_and_collapsible_sections():
     assert "모두 접기" in src and "모두 펼치기" in src
     # 버튼·입력칸을 누르면 접히지 않아야 한다
     assert "e.target.closest('button,input,select,a,textarea,label,option')" in src
+
+
+# ── 지난 계산 기록 (2026-10-19) ──
+def test_pbt_jobs_lists_history_newest_first(dash, monkeypatch, tmp_path):
+    import time as _t
+    monkeypatch.setattr(dash, "_PBT_DIR", tmp_path)
+    old = {"job": "pbt_20261001_090000", "status": "done", "started": "2026-10-01 09:00:00",
+           "params": {"start": "20240101", "end": "20241231", "eff_end": "20241230", "names": ["a", "b"],
+                      "luck": True, "strength": [5.7]},
+           "market": {"cagr": 1.0}, "warnings": [{}],
+           "results": [{"strategy": "a", "cagr": 3.0}, {"strategy": "b", "cagr": 9.0},
+                       {"strategy": "b ≥5.7", "cagr": 50.0, "strength_min": 5.7, "base": "b"}],
+           "luck": {"pbo": 0.2, "spa_cash": 0.5, "dsr": 0.1, "best": "b"}}
+    (tmp_path / "pbt_20261001_090000.json").write_text(json.dumps(old), encoding="utf-8")
+    _t.sleep(0.01)
+    (tmp_path / "pbt_20261002_090000.json").write_text(json.dumps({"status": "error", "error": "x"}), encoding="utf-8")
+    (tmp_path / "pbt_bad.json").write_text("{", encoding="utf-8")            # 이름 규칙 밖 → 무시
+    with dash.app.test_client() as c:
+        d = c.get("/api/pbt/jobs", environ_base=LOCAL).get_json()
+    js = d["jobs"]
+    assert [j["job"] for j in js] == ["pbt_20261002_090000", "pbt_20261001_090000"]
+    j = js[1]
+    assert j["end"] == "20241230" and j["strength"] == [5.7] and j["luck"] and j["n_warn"] == 1
+    assert [t["strategy"] for t in j["top"]] == ["b", "a"], "상위는 기본 줄(강도 줄 제외) CAGR 순"
+    assert j["luck_sum"]["pbo"] == 0.2 and js[0]["error"] == "x"
+
+
+def test_old_jobs_are_archived_not_deleted(monkeypatch, tmp_path):
+    import period_backtest as P
+    monkeypatch.setattr(P, "OUT_DIR", str(tmp_path))
+    monkeypatch.setattr(P, "KEEP_JOBS", 2)
+    import time as _t
+    for i in range(4):
+        (tmp_path / f"pbt_2026100{i}_000000.json").write_text("{}")
+        _t.sleep(0.01)
+    P._cleanup()
+    assert sorted(p.name for p in tmp_path.glob("pbt_*.json")) == ["pbt_20261002_000000.json", "pbt_20261003_000000.json"]
+    assert sorted(p.name for p in (tmp_path / "archive").glob("*.json")) == ["pbt_20261000_000000.json", "pbt_20261001_000000.json"]
+
+
+def test_dashboard_has_history_dropdown():
+    src = open(os.path.join(OUTPUTS, "integrated_dashboard_server.py"), encoding="utf-8").read()
+    assert 'id="pbt-histbox"' in src and "function pbtHistLoad(" in src
+    assert "function pbtHistOpen(" in src and "function pbtHistReuse(" in src
+    assert "pbtHistLoad(true);" in src
