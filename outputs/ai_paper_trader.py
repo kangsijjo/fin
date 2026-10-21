@@ -39,7 +39,9 @@ OUT_JSON = "./db/ai_paper_result.json"
 # [2026-10-15] 라이브 강도 필터 면제 전략 — kis_trader.STRENGTH_EXEMPT ∪ kiwoom_trader.STRENGTH_EXEMPT
 # 와 동기(테스트로 고정). strength 포트는 '라이브 룰 쌍둥이'라 면제도 똑같이 재현한다(정렬은 강도순, 임계 미적용).
 # [2026-10-18] 키움 신고가 2종(high_500d_filt·high_52w_filt) 면제 추가(설명서 §56).
-STRENGTH_EXEMPT = {"gc_for3d", "high_500d_filt", "high_52w_filt"}
+# [2026-10-21] live_config 단일 출처(대시보드 '모의매매 전략 설정') — 기본은 {"gc_for3d", "high_500d_filt", "high_52w_filt"}
+import live_config as _LC
+STRENGTH_EXEMPT = _LC.all_exempt()
 STRENGTH_LOG = "./db/signal_strength_log.csv"
 
 
@@ -253,7 +255,8 @@ def main():
         "portfolios": {
             "ai":       simulate(sig, cal_all, cal, closes, "ai_prob"),
             # min_score 는 kiwoom_trader.MIN_STRENGTH_SCORE 와 동기 유지(라이브 룰 쌍둥이)
-            "strength": simulate(sig, cal_all, cal, closes, "score_ic", min_score=5.7),
+            "strength": simulate(sig, cal_all, cal, closes, "score_ic",
+                                 min_score=_LC.account("kiwoom")["min_strength"]),
         },
     }
     os.makedirs("./db", exist_ok=True)

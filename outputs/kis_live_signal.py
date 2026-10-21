@@ -344,18 +344,22 @@ def main():
     name_cache = load_name_cache()
     existing = load_existing_signals()
 
-    # 전략별 신호 수집
-    all_new = []
-    for detect_fn, label in [
-        (detect_h52w_for3d_mkt, "h52w_for3d_mkt"),
-        (detect_for_high20_mkt, "for_high20_mkt"),
-        (detect_gc_for3d,       "gc_for3d"),
-    ]:
+    # 전략별 신호 수집 — [2026-10-21] 전략 구성은 live_config(대시보드에서 고름). 손으로 짠 감지기가
+    # 있는 3전략은 그것, 나머지는 engine_signals(백테스트 엔진 코드 그대로)로 만든다.
+    import engine_signals as ES
+    known = {"h52w_for3d_mkt": detect_h52w_for3d_mkt, "for_high20_mkt": detect_for_high20_mkt,
+             "gc_for3d": detect_gc_for3d}
+    groups, skipped = ES.run_configured("kis", df, last_date, all_dates, name_cache, known,
+                                        is_excluded, _offset_date, log=print)
+    if skipped:
         try:
-            rows = detect_fn(df.copy(), last_date, all_dates, name_cache)
-        except Exception as e:
-            print(f"[kis_signal][ERROR] {label} 감지 실패: {e}")
-            rows = []
+            import notifier
+            notifier.safe_send("⚠ [KIS 신호] 오늘 신호를 만들지 못한 전략: "
+                               + " / ".join(f"{n} — {w}" for n, w in skipped))
+        except Exception:
+            pass
+    all_new = []
+    for label, rows in groups:
 
         # 중복 제거
         new = [r for r in rows

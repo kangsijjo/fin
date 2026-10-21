@@ -161,6 +161,20 @@ def parse_strength(text):
     return vals
 
 
+def parse_exits(stop, take):
+    """손절(-50~-1)·익절(1~300) 검증 → (stop, take). 빈 값은 None. 잘못되면 ValueError."""
+    def f(v):
+        if v is None or str(v).strip() == "":
+            return None
+        return float(v)
+    st, tk = f(stop), f(take)
+    if st is not None and not -50 <= st <= -1:
+        raise ValueError("손절은 -1 ~ -50(%)")
+    if tk is not None and not 1 <= tk <= 300:
+        raise ValueError("익절은 1 ~ 300(%)")
+    return st, tk
+
+
 STRENGTH_PAD = 280      # 강도 피처(RSI·ATR 지수평활) 안정화용 기간 앞 여유 거래일
 
 
@@ -448,6 +462,67 @@ def _result_row(n, live_label, warm, tw, eff_end, win, df, market_cagr):
     return row, eq.pct_change().fillna(0) * 100, len(done)
 
 
+EXIT_MODES = {"close": "종가 판정 → 다음날 시가 청산", "intraday": "장중 도달 → 그 가격 청산(갭이면 시가)"}
+
+
+def build_panel(df, codes=None):
+    """{code: (dates, open, high, low, close)} — 손절·익절 재청산용."""
+    d = df if codes is None else df[df["code"].astype(str).isin(codes)]
+    d = d.sort_values(["code", "date"])
+    out = {}
+    for c, g in d.groupby("code"):
+        out[str(c)] = (g["date"].astype(str).to_numpy(), g["open"].to_numpy(float), g["high"].to_numpy(float),
+                       g["low"].to_numpy(float), g["close"].to_numpy(float))
+    return out
+
+
+def apply_exits(trades, panel, stop=None, take=None, mode="close"):
+    """[2026-10-21] 손절(stop, 음수 %)·익절(take, 양수 %)로 매매를 다시 청산한다. 만기(엔진 exit_date)는 그대로 상한.
+    mode="close": 그날 **종가**가 선을 넘으면 **다음날 시가**에 판다(KIS 모의매매 손절과 같은 방식, 체결가 보수적).
+    mode="intraday": 그날 저가/고가가 선에 닿으면 **그 가격**에 판다 — 시가부터 넘어 열렸으면 시가(갭 반영).
+    같은 날 둘 다 닿으면 손절을 먼저(보수적). 비용은 엔진이 그 매매에 쓴 비용(gross−net)을 그대로 쓴다."""
+    from types import SimpleNamespace
+    if stop is None and take is None:
+        return list(trades)
+    out = []
+    for t in trades:
+        p = panel.get(str(t.code))
+        ep = float(t.entry_price or 0)
+        if p is None or ep <= 0:
+            out.append(t)
+            continue
+        ds, op, hi, lo, cl = p
+        i0 = np.searchsorted(ds, str(t.entry_date))
+        i1 = np.searchsorted(ds, str(t.exit_date))
+        if i0 >= len(ds) or ds[i0] != str(t.entry_date) or i1 >= len(ds) or i1 < i0:
+            out.append(t)
+            continue
+        sp = ep * (1 + stop / 100) if stop is not None else None
+        tp = ep * (1 + take / 100) if take is not None else None
+        px = xd = why = None
+        for j in range(i0, i1 + 1):
+            if mode == "intraday":
+                if sp is not None and lo[j] <= sp:
+                    px, xd, why = min(sp, op[j]), ds[j], "stop"
+                elif tp is not None and hi[j] >= tp:
+                    px, xd, why = max(tp, op[j]), ds[j], "take"
+            elif j < i1:                               # 종가 판정 → 다음날 시가(만기일 종가 판정은 만기 청산과 같음)
+                if sp is not None and cl[j] <= sp:
+                    px, xd, why = op[j + 1], ds[j + 1], "stop"
+                elif tp is not None and cl[j] >= tp:
+                    px, xd, why = op[j + 1], ds[j + 1], "take"
+            if px is not None:
+                break
+        if px is None or not px > 0:
+            out.append(t)
+            continue
+        cost = float(getattr(t, "gross_pct", t.net_pct) or 0) - float(t.net_pct)
+        g = (px / ep - 1) * 100
+        out.append(SimpleNamespace(entry_date=t.entry_date, exit_date=xd, code=t.code, entry_price=ep,
+                                   gross_pct=g, net_pct=g - cost, score=getattr(t, "score", 0), exit_why=why))
+    return out
+
+
 def _with_score(t, sc):
     """매매 복사본 — 슬롯 배정 순서를 강도로 바꾼다(원본은 그대로)."""
     from types import SimpleNamespace
@@ -456,11 +531,12 @@ def _with_score(t, sc):
                            gross_pct=getattr(t, "gross_pct", t.net_pct), score=float(sc))
 
 
-def run_job(job, start, end, names, luck, strength=None):
+def run_job(job, start, end, names, luck, strength=None, stop=None, take=None, exit_mode="close"):
     t0 = time.time()
     strength = list(strength or [])
     state = {"job": job, "status": "running", "params": {"start": start, "end": end, "names": names,
-             "luck": luck, "strength": strength}, "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+             "luck": luck, "strength": strength, "stop": stop, "take": take,
+             "exit_mode": exit_mode if (stop is not None or take is not None) else None}, "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
              "progress": [0, len(names)], "current": "", "warnings": [], "results": [],
              "market": None, "luck": None}
     _write(job, state)
@@ -511,6 +587,8 @@ def run_job(job, start, end, names, luck, strength=None):
             trs = s.backtest(df.copy(), E.DEFAULT_COSTS) or []
             gc.collect()
             tw = [t for t in trs if win[0] <= str(t.entry_date) <= eff_end]
+            if stop is not None or take is not None:      # [2026-10-21] 손절·익절 재청산(모든 줄에 같은 규칙)
+                tw = apply_exits(tw, build_panel(df, {str(t.code) for t in tw}), stop, take, exit_mode)
             del trs
             row, R[n], n_done = _result_row(n, live.get(n, ""), warmup_days(s), tw, eff_end, win, df,
                                             state["market"]["cagr"])
@@ -605,6 +683,9 @@ def main():
     ap.add_argument("--luck", action="store_true")
     ap.add_argument("--check", action="store_true", help="데이터 점검만 하고 JSON 출력")
     ap.add_argument("--strength", default="", help="강도 비교 임계(쉼표 구분, 예: 4,5,5.7)")
+    ap.add_argument("--stop", type=float, default=None, help="손절 %(음수, 예 -10)")
+    ap.add_argument("--take", type=float, default=None, help="익절 %(양수, 예 20)")
+    ap.add_argument("--exit-mode", default="close", choices=sorted(EXIT_MODES))
     a = ap.parse_args()
     names = [n.strip() for n in a.names.split(",") if n.strip()]
     if a.check:
@@ -613,12 +694,18 @@ def main():
         smap, _ = strategies_by_name()
         try:
             sv = parse_strength(a.strength)
+            st_, tk_ = parse_exits(a.stop, a.take)
         except ValueError as e:
             print("PBT_CHECK " + json.dumps({"ok": False, "warnings": [{"level": "error", "strategy": "",
                                                                           "msg": str(e)}]}, ensure_ascii=False))
             return
         warns, eff_end, ok = check_data(a.start, a.end, names, cal, cov, a.luck, smap, sv,
                                         history_years() if sv else None)
+        if st_ is not None or tk_ is not None:
+            warns.append({"level": "info", "strategy": "",
+                          "msg": "청산 규칙: " + " · ".join(x for x in (f"손절 {st_:g}%" if st_ is not None else "",
+                                                                   f"익절 +{tk_:g}%" if tk_ is not None else "") if x)
+                                 + f" — {EXIT_MODES[a.exit_mode]} (모든 줄에 같은 규칙, 만기는 그대로 상한)"})
         win = [d for d in cal if a.start <= d <= eff_end]
         print("PBT_CHECK " + json.dumps({"ok": ok, "warnings": warns, "eff_end": eff_end,
                                          "n_days": len(win), "data": [cal[0], cal[-1]] if cal else None,
@@ -626,7 +713,8 @@ def main():
         return
     job = a.job or datetime.now().strftime("pbt_%Y%m%d_%H%M%S")
     try:
-        run_job(job, a.start, a.end, names, a.luck, parse_strength(a.strength))
+        stop, take = parse_exits(a.stop, a.take)
+        run_job(job, a.start, a.end, names, a.luck, parse_strength(a.strength), stop, take, a.exit_mode)
     except Exception as e:
         try:
             st = json.load(open(_job_path(job), encoding="utf-8"))

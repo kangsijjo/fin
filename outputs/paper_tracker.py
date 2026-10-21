@@ -62,7 +62,9 @@ def main():
         sys.exit(1)
 
     print(f"=== Paper Trading 추적 ===")
-    print(f"운용 전략: 안C' 포트폴리오 (high_500d_filt×6 / high_52w_filt×4, 2026-10-18~)")
+    import live_config as _LC
+    _A = _LC.account("kiwoom")
+    print("운용 전략(설정): " + " / ".join(f"{k}×{_A['slots'][k]}" for k in _A["priority"]))
     print(f"자본: {INITIAL_CAPITAL:,}원 / max_concurrent={MAX_CONCURRENT}")
 
     # 1) 신호 로드
@@ -204,7 +206,7 @@ def main():
         if "strategy" in closed.columns:
             print(f"\n  {'전략':<18}  {'건수':>4}  {'승률':>6}  {'avg_net':>8}  {'avg_win':>8}  {'avg_loss':>9}")
             print(f"  {'─'*60}")
-            for strat in ["high_500d_filt", "high_52w_filt", "rsi_reversal", "rsi_vol"]:   # rsi 는 10-18 이전 이력
+            for strat in sorted(closed["strategy"].dropna().astype(str).unique()):   # 지금·옛 전략 전부
                 g = closed[closed["strategy"] == strat]
                 if len(g) == 0:
                     continue

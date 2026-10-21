@@ -165,16 +165,17 @@ HOLDING_DAYS_DEFAULT = 40   # 구버전 CSV 호환 fallback
 MAX_CONCURRENT = 10
 
 # 전략별 최대 슬롯 수 (합계 = MAX_CONCURRENT) — 안C 포트폴리오 (2026-06-17)
-STRATEGY_MAX_SLOTS = {
-    "high_500d_filt": 6,
-    "high_52w_filt":  4,
-}
-# 매수 우선순위 (앞 전략이 빈 슬롯 먼저 채움) — 500일 신고가가 먼저(부분집합이라 뒤에 두면 못 가져감)
-STRATEGY_PRIORITY = ["high_500d_filt", "high_52w_filt"]
+# [2026-10-21] 전략 구성은 live_config(대시보드 '모의매매 전략 설정')가 단일 출처 — 파일이 없거나 깨지면
+# 현행값(기본값: high_500d_filt 6 / high_52w_filt 4, 둘 다 강도 면제, high_52w_filt 익절 +50%)과 같다.
+import live_config as _LC
+_ACC = _LC.account("kiwoom")
+STRATEGY_MAX_SLOTS = dict(_ACC["slots"])
+# 매수 우선순위 (앞 전략이 빈 슬롯 먼저 채움) — 설정 화면의 위→아래 순서
+STRATEGY_PRIORITY = list(_ACC["priority"])
 # 강도 필터 면제(2026-10-18 사용자 결정) — 7월 이후 high_52w_filt 신호 98건 중 5.7 이상 0건(최고 5.68)
 # 이라 5.7 을 적용하면 신고가 전략은 사실상 매수 불가. 백테스트(강도 필터 없음) 규칙과 맞춘다.
 # kis_trader.STRENGTH_EXEMPT 와 함께 ai_paper_trader.STRENGTH_EXEMPT 의 합집합(테스트로 고정).
-STRENGTH_EXEMPT = {"high_500d_filt", "high_52w_filt"}
+STRENGTH_EXEMPT = set(_ACC["exempt"])
 ORDER_TYPE_BUY = "3"     # 시장가 (모의서버는 지정가/시장가만 지원)
 ORDER_TYPE_SELL = "3"    # 시장가 — 15:21 주문 시 마감 동시호가 참여 ≈ 종가 체결
 ORDER_TYPE_LIMIT = "0"   # 지정가 (익절 목표가 매도용)
@@ -186,7 +187,10 @@ ORDER_TYPE_LIMIT = "0"   # 지정가 (익절 목표가 매도용)
 # KRX 주문은 '당일 유효' + 가격제한폭(±30%) 내에서만 가능 → 한 번 걸어두기가 불가능.
 # → 매일 아침(cmd_daily) 보유종목에 당일 지정가를 재발주(자가치유). 만기일 15:21 은
 #   cmd_sell 이 미체결 지정가를 취소(kt10003) 후 시장가 청산(백스톱 유지).
-PROFIT_TARGET = {"rsi_vol": 0.20, "high_52w_filt": 0.50}   # rsi_vol 은 레거시 보유분 청산용으로 유지
+PROFIT_TARGET = dict(_ACC["take"])   # 기본 {"rsi_vol": 0.20(옛 보유분용), "high_52w_filt": 0.50}
+# [2026-10-21] 전략별 손절 — 15:21 매도 실행 때 평가손익률(브로커 매입평균 기준)이 이 값 이하면 마감 동시호가 매도.
+# (서킷브레이커와 같은 판정 방식. KIS 는 '전일 종가 판정 → 다음날 시가'로 판정 시점이 다르다 — 설명서 §60)
+STRATEGY_STOP = dict(_ACC["stop"])
 # high_500d_filt 는 익절 미적용 — 검증 안 됨, 백테스트(star_high_500d_20)도 익절 없음
 MIN_ORDER_AMOUNT = 100_000   # 슬롯당 이보다 작으면 주문 생략
 
@@ -217,7 +221,7 @@ CIRCUIT_BREAKER_PCT = -40.0
 # (7월 키움 신호 595건 중 28건)라 매수 빈도가 크게 줄고, 8월 초 예정 강도 재점검용
 # forward 표본 축적도 느려짐. 강도 기록 없는 신호는 통과(fail-open) — 기록 실패로
 # 매매가 전면 중단되는 것을 막기 위함(이 경로로는 6 미만도 통과 가능).
-MIN_STRENGTH_SCORE = 5.7
+MIN_STRENGTH_SCORE = _ACC["min_strength"]     # 기본 5.7
 
 
 def _strength_gate(strat, sc):
@@ -1140,7 +1144,7 @@ def remove_kiwoom_position(code):
 
 
 # 자가치유 시 전략별 보유일 (안C 라이브 파라미터와 일치 — 20 고정이던 것을 수정 2026-07-10)
-_HEAL_HOLDING = {"high_52w_filt": 20, "high_500d_filt": 20, "rsi_reversal": 5, "rsi_vol": 7}
+_HEAL_HOLDING = dict(_ACC["holding"])   # 기본 {"high_52w_filt": 20, "high_500d_filt": 20, "rsi_reversal": 5, "rsi_vol": 7}
 
 
 def _signal_date_lookup(code, strategy, buy_date):
@@ -1528,6 +1532,22 @@ def _circuit_breaker_codes(pos):
     return out
 
 
+def _strategy_stop_codes(pos, strategy_map):
+    """[2026-10-21] 전략별 손절(STRATEGY_STOP) 도달 보유종목 → {code: loss_pct}. 손익률 산식은 서킷브레이커와 동일."""
+    out = {}
+    for code, p in pos.items():
+        code = str(code).zfill(6)
+        stop = STRATEGY_STOP.get(strategy_map.get(code, ""))
+        if stop is None:
+            continue
+        cur = float(p.get("price", 0) or 0)
+        avg = float(p.get("avg_price", 0) or 0)
+        loss = (cur / avg - 1) * 100 if cur > 0 and avg > 0 else _to_float(p.get("pnl_pct", 0), 0.0)
+        if loss <= stop * 100:
+            out[code] = round(loss, 2)
+    return out
+
+
 def _today_close_map():
     """당일 종가 맵 (시간외단일가 주문 가격 지정용). 당일 없으면 빈 dict."""
     path = f"./macro_data/daily/{datetime.today():%Y%m%d}.csv"
@@ -1551,6 +1571,13 @@ def cmd_sell():
     _reconcile_tp_fills(pos)   # 오늘 익절 지정가 체결분 기록/알림 (만기 없어도 매 오후 수행)
     due = codes_due_for_exit()
     cb = _circuit_breaker_codes(pos)   # 재해성 손실(-40%) 서킷브레이커(2026-07-10)
+    _smap0 = get_signal_strategy_map()
+    for _c, _v in load_kiwoom_positions().items():
+        if _v.get("strategy"):
+            _smap0[_c] = _v["strategy"]
+    sl = {c: v for c, v in _strategy_stop_codes(pos, _smap0).items() if c not in cb}   # [2026-10-21] 전략별 손절
+    for c, v in sl.items():
+        cb.setdefault(c, v)        # 같은 청산 경로(시장가)를 쓴다 — 사유 문구만 구분
     if not due and not cb:
         print("[sell] 청산 대상 없음 — 종료")
         try:
@@ -1582,8 +1609,8 @@ def cmd_sell():
     if cb:
         try:
             import notifier
-            notifier.safe_send("🚨 [키움 서킷브레이커] "
-                               + ", ".join(f"{c} {pos[c]['name']}({v:+.1f}%)"
+            notifier.safe_send("🚨 [키움 서킷브레이커/손절] "
+                               + ", ".join(f"{c} {pos[c]['name']}({v:+.1f}%{', 전략손절' if c in sl else ''})"
                                            for c, v in cb.items() if c in pos)
                                + f" ≤ {CIRCUIT_BREAKER_PCT:.0f}% — 시장가 청산")
         except Exception:
@@ -1596,7 +1623,8 @@ def cmd_sell():
         strat = strategy_map.get(str(code).zfill(6), "")
         _cp = close_map.get(code, 0)
         ref_px = int(_cp) if (_cp and _cp == _cp) else 0   # NaN(자기비교 False) 크래시 방어
-        reason = f"circuit_breaker({cb[code]:+.1f}%)" if code in cb else ""
+        reason = (f"stop({cb[code]:+.1f}% ≤ {STRATEGY_STOP.get(strat, 0) * 100:.0f}%)" if code in sl
+                  else f"circuit_breaker({cb[code]:+.1f}%)" if code in cb else "")
         # 미체결 익절 지정가가 물량을 잠그고 있으면 먼저 취소(잔량 전부) 후 시장가 청산
         if code in tp_open:
             try:

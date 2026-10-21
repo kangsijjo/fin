@@ -47,7 +47,10 @@ DAILY = "./macro_data/daily"
 # ── 규칙 정의 ────────────────────────────────────────────────────────────────
 # 전략별 임계는 trades_history_v3 의 **2026년 이전** 매매로만 산출했다(워크포워드).
 # 재산출: python strength_per_strategy_cut.py  (fixed_cuts(40) / fixed_cuts(50))
-CUR_TH = 5.7
+# [2026-10-21] 라이브 구성은 live_config 단일 출처 — 계좌별 강도 기준이 달라질 수 있다
+import live_config as _LC
+_KW, _KI = _LC.account("kiwoom"), _LC.account("kis")
+CUR_TH = {"kiwoom": _KW["min_strength"], "kis": _KI["min_strength"]}
 CUTS_40 = {"high_52w_filt": 3.14, "rsi_reversal": 6.65, "rsi_vol": 5.99,
            "h52w_for3d_mkt": 3.53, "for_high20_mkt": 3.75, "gc_for3d": 4.47}
 CUTS_50 = {"high_52w_filt": 2.94, "rsi_reversal": 6.40, "rsi_vol": 5.69,
@@ -56,15 +59,12 @@ RULES = {"현행5.7": None, "상위40%": CUTS_40, "상위50%": CUTS_50}
 
 # 라이브 구성 (kiwoom_trader / kis_trader 상수와 일치해야 한다)
 # [2026-10-18] 키움 rsi 2종 → high_500d_filt 6슬롯(설명서 §56). 강도 면제 전략은 임계와 무관하게 매수.
-CAPS = {"kiwoom": {"high_500d_filt": 6, "high_52w_filt": 4},
-        "kis":    {"h52w_for3d_mkt": 4, "for_high20_mkt": 4, "gc_for3d": 2}}
-PRIORITY = {"kiwoom": ["high_500d_filt", "high_52w_filt"],
-            "kis":    ["h52w_for3d_mkt", "for_high20_mkt", "gc_for3d"]}
-HOLD = {"high_500d_filt": 20, "high_52w_filt": 20, "rsi_reversal": 5, "rsi_vol": 7,
-        "h52w_for3d_mkt": 20, "for_high20_mkt": 20, "gc_for3d": 15}
-STOP = {"h52w_for3d_mkt": -0.15, "for_high20_mkt": -0.10, "gc_for3d": -0.26}
-TAKE = {"high_52w_filt": 0.50, "rsi_vol": 0.20}
-EXEMPT = {"gc_for3d", "high_500d_filt", "high_52w_filt"}   # = kis ∪ kiwoom STRENGTH_EXEMPT (테스트로 고정)
+CAPS = {"kiwoom": dict(_KW["slots"]), "kis": dict(_KI["slots"])}
+PRIORITY = {"kiwoom": list(_KW["priority"]), "kis": list(_KI["priority"])}
+HOLD = {**_KW["holding"], **_KI["holding"]}
+STOP = {**_KW["stop"], **_KI["stop"]}
+TAKE = {**_KW["take"], **_KI["take"]}
+EXEMPT = _KW["exempt"] | _KI["exempt"]          # = kis ∪ kiwoom STRENGTH_EXEMPT
 COST = 0.245            # 수수료+세금+슬리피지 (DEFAULT_COSTS.total_pct)
 
 
@@ -147,7 +147,7 @@ def simulate(sig, panel, tdates, cuts, rule):
             for strat in PRIORITY[acct]:
                 cand = d2[d2["strategy"] == strat].sort_values("sc", ascending=False)
                 for r in cand.itertuples():
-                    th = CUR_TH if cuts is None else cuts.get(strat)
+                    th = CUR_TH[acct] if cuts is None else cuts.get(strat)
                     if strat not in EXEMPT and (th is None or r.sc < th):
                         continue
                     if r.code in held:

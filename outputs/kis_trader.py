@@ -83,22 +83,20 @@ HOLDING_DAYS_DEFAULT = 20
 MAX_CONCURRENT   = 10
 MIN_ORDER_AMOUNT = 100_000
 
-STRATEGY_MAX_SLOTS = {
-    "h52w_for3d_mkt": 4,
-    "for_high20_mkt": 4,
-    "gc_for3d":       2,
-}
-STRATEGY_PRIORITY = ["h52w_for3d_mkt", "for_high20_mkt", "gc_for3d"]
+# [2026-10-21] 전략 구성은 live_config(대시보드 '모의매매 전략 설정')가 단일 출처 — 파일이 없거나 깨지면
+# 아래 주석의 현행값(기본값)과 같다. 슬롯·순서·손절·익절·강도·면제·보유일 모두 여기서 받는다.
+import live_config as _LC
+_ACC = _LC.account("kis")
+STRATEGY_MAX_SLOTS = dict(_ACC["slots"])      # 기본: h52w_for3d_mkt 4 / for_high20_mkt 4 / gc_for3d 2
+STRATEGY_PRIORITY = list(_ACC["priority"])
 
 # 전략별 stop-loss (백테스트 최적, delta 양수)
 # h52w_for3d_mkt: stop-15  delta +0.14%
 # for_high20_mkt: stop-10  delta +0.22%
 # gc_for3d:       stop-26  delta +0.07%
-STRATEGY_STOP = {
-    "h52w_for3d_mkt": -0.15,
-    "for_high20_mkt": -0.10,
-    "gc_for3d":       -0.26,
-}
+STRATEGY_STOP = dict(_ACC["stop"])           # 기본: -0.15 / -0.10 / -0.26 (+ 운용에서 빠진 전략의 보유분 규칙)
+# [2026-10-21] 익절 — 손절과 같은 방식(전일 종가 판정 → 다음날 09:01 시가 매도). 기본은 없음.
+STRATEGY_TAKE = dict(_ACC["take"])
 
 # 강도 필터(2026-07-21 신설, 사용자 결정) — score_ic(0~10)가 이 값 미만이면 매수 스킵.
 # 종전 KIS 는 강도로 '정렬만' 하고 차단은 안 해(표본 축적 우선) 6 미만도 전량 매수 후보였음
@@ -110,7 +108,7 @@ STRATEGY_STOP = {
 # ※ 계좌별 임계가 다르므로 계좌 간 성과 비교 시 이 차이를 감안할 것.
 # 강도 무기록 신호는 매수 전 '강도 재확인'에서 즉석 재계산 후에도 불가하면 차단(fail-closed,
 # 2026-07-21) — 종전 fail-open 이 6 미만 체결의 잔여 경로였음.
-MIN_STRENGTH_SCORE = 5.7
+MIN_STRENGTH_SCORE = _ACC["min_strength"]     # 기본 5.7
 
 # [2026-10-15 사용자 결정] 강도 필터 면제 전략 — 신호 전량 매수 후보(정렬은 강도순 유지, 무기록이면 tv순).
 # 근거(§48): gc_for3d 는 강도가 높을수록 오히려 나빴다(워크포워드 900건: 필터없음 +0.36% /
@@ -118,7 +116,7 @@ MIN_STRENGTH_SCORE = 5.7
 # 5.7 은 이 전략 분포 밖이라 06-30 이후 신호 28건 중 매수 0건이었다.
 # ⚠ 고지된 단점: 필터를 없애도 2슬롯 계좌 6년 −73%(라이브 청산규칙), 최근 2년 건당 +0.88%.
 # ai_paper_trader.STRENGTH_EXEMPT 와 동기(테스트로 고정).
-STRENGTH_EXEMPT = {"gc_for3d"}
+STRENGTH_EXEMPT = set(_ACC["exempt"])          # 기본 {"gc_for3d"}
 
 
 def _strength_gate(strat, sc):
@@ -702,7 +700,7 @@ def _write_positions(pos_dict):
 # 배경: KIS 는 heal 이 없어 원장 유실(파일 손상·수동 조작) 시 전 종목 stop-loss 가
 # 조용히 무력화됐음(로드 실패 → {} → 경고 한 줄). 브로커 보유인데 원장에 없는 종목을
 # 주문로그(kis_orders_*.csv)와 신호CSV 역추적으로 재등록한다.
-_KIS_HEAL_HOLDING = {"h52w_for3d_mkt": 20, "for_high20_mkt": 20, "gc_for3d": 15}
+_KIS_HEAL_HOLDING = dict(_ACC["holding"])     # 기본 {"h52w_for3d_mkt": 20, "for_high20_mkt": 20, "gc_for3d": 15}
 
 
 def _kis_held_buy_map():
@@ -979,12 +977,15 @@ def codes_due_for_exit(close_map, reasons=("expire", "stop")):
             continue
         # stop — 원장 전략/진입가 기준. cur_close 는 NaN 가능(CSV 빈 셀) → 'not >0' 로 차단
         stop_pct = STRATEGY_STOP.get(str(info.get("strategy", "")))
+        take_pct = STRATEGY_TAKE.get(str(info.get("strategy", "")))     # [2026-10-21] 익절(같은 판정 시점)
         entry_px = float(info.get("entry_px", 0) or 0)
         cur_close = close_map.get(code, 0)
-        if stop_pct is None or entry_px <= 0 or not (cur_close > 0):
+        if (stop_pct is None and take_pct is None) or entry_px <= 0 or not (cur_close > 0):
             continue
-        if cur_close <= entry_px * (1 + stop_pct):
+        if stop_pct is not None and cur_close <= entry_px * (1 + stop_pct):
             due[code] = "stop"
+        elif take_pct is not None and cur_close >= entry_px * (1 + take_pct):
+            due[code] = "take"
 
     if undecidable:
         try:
@@ -1348,7 +1349,10 @@ def cmd_buy():
     for sig in sigs:
         strat = str(sig.get("strategy", "h52w_for3d_mkt"))
         if strat not in sigs_by_strat:
-            strat = "h52w_for3d_mkt"
+            # [2026-10-21] 종전엔 모르는 전략을 h52w_for3d_mkt 로 바꿔 담았다 — 전략을 바꾼 직후 남은 옛 신호가
+            # 다른 전략 이름으로 사지면 안 된다(키움과 같은 처리).
+            print(f"    [skip] {sig.get('code')} — 운용 중이 아닌 전략({strat}) 신호")
+            continue
         sigs_by_strat[strat].append(sig)
     for strat in STRATEGY_PRIORITY:
         sigs_by_strat[strat] = _order_candidates(sigs_by_strat[strat], strength, tv_map, strat)

@@ -79,8 +79,9 @@ ETF_PREFIXES = ("KODEX", "TIGER", "KBSTAR", "KOSEF", "ARIRANG", "HANARO",
 _HIGH_52W = dict(lookback=252, holding=20, min_tv=3_000_000_000,
                  vol_mult=1.5, mkt_ma=60)
 _HIGH_500D = dict(_HIGH_52W, lookback=500)      # HighWithFiltersStrategy(500, 20) — star_high_500d_20
-# 키움 운용 전략(신호 생성 대상) — kiwoom_trader.STRATEGY_PRIORITY 와 같은 집합(테스트로 고정)
-LIVE_STRATEGIES = ("high_500d_filt", "high_52w_filt")
+# [2026-10-21] 키움 운용 전략은 live_config(대시보드에서 고름)가 정한다 — 이 모듈은 손으로 짠
+# 검증된 감지기만 제공하고, 감지기가 없는 전략은 engine_signals 가 백테스트 엔진 코드로 만든다.
+KNOWN_DETECTORS = ("high_500d_filt", "high_52w_filt", "rsi_reversal", "rsi_vol")
 _RSI_REV   = dict(rsi_period=14, rsi_th=30, holding=5,
                   min_tv=1_000_000_000)
 _RSI_VOL   = dict(rsi_period=14, rsi_th=30, vol_ma_days=20, vol_mult=2.0,
@@ -370,10 +371,15 @@ def detect_rsi_reversal(df, last_date, all_dates, name_cache):
 
 # ─── 메인 ─────────────────────────────────────────────────────────────────────
 def main():
-    print("=== Paper Trading 신호 감지 v4 (안C': 신고가 6:4) ===")
+    import live_config as LC
+    import engine_signals as ES
+    acc = LC.account("kiwoom")
+    print("=== Paper Trading 신호 감지 v5 (키움 — 설정: db/live_config.json) ===")
     print(f"실행 시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("  슬롯 1-6 : high_500d_filt (500일 신고가, 20일 보유)")
-    print("  슬롯 7-10: high_52w_filt  (52주 신고가, 20일 보유)")
+    for ln in acc["priority"]:
+        print(f"  {ln:<22} {acc['slots'][ln]}슬롯 · {acc['holding'][ln]}일 보유"
+              f"{' · 강도 면제' if ln in acc['exempt'] else ''}"
+              f"{' · 감지기' if ln in KNOWN_DETECTORS else ' · 엔진 신호'}")
 
     # 1) 데이터 로드
     df = load_macro_daily()
@@ -391,12 +397,22 @@ def main():
     name_cache = load_name_cache()
     mkt_dict   = _compute_mkt_strong(df)
 
-    # 4) 전략별 신호 감지
-    sig0 = detect_high_500d_filt(df.copy(), last_date, all_dates, name_cache, mkt_dict)
-    sig1 = detect_high_52w_filt(df.copy(), last_date, all_dates, name_cache, mkt_dict)
-    groups = [("high_500d_filt", sig0), ("high_52w_filt", sig1)]
-
-    all_signals = sig0 + sig1
+    # 4) 전략별 신호 감지 — 설정 순서대로. 감지기가 있으면 그것, 없으면 엔진 신호(engine_signals)
+    known = {"high_500d_filt": lambda d, ld, ad, nc: detect_high_500d_filt(d, ld, ad, nc, mkt_dict),
+             "high_52w_filt": lambda d, ld, ad, nc: detect_high_52w_filt(d, ld, ad, nc, mkt_dict),
+             "rsi_reversal": detect_rsi_reversal, "rsi_vol": detect_rsi_vol}
+    df["date"] = df["date"].astype(str)
+    df["code"] = df["code"].astype(str).str.zfill(6)
+    groups, skipped = ES.run_configured("kiwoom", df, str(last_date), [str(x) for x in all_dates], name_cache,
+                                        known, is_excluded, _offset_date)
+    if skipped:
+        try:
+            import notifier
+            notifier.safe_send("⚠ [키움 신호] 오늘 신호를 만들지 못한 전략: "
+                               + " / ".join(f"{n} — {w}" for n, w in skipped))
+        except Exception:
+            pass
+    all_signals = [r for _, rows in groups for r in rows]
 
     # 5) 기존 신호와 대조 — (date, code, strategy) 기준 중복 제거
     existing = load_existing_signals()
@@ -432,9 +448,9 @@ def main():
         if len(strat_sigs) > 20:
             print(f"  ... and {len(strat_sigs)-20} more")
 
-    # 8) 다인수 팩터 분석 (신고가 신호 — 500일 우선, 같은 종목 중복 제외)
+    # 8) 다인수 팩터 분석 (설정 순서 우선, 같은 종목 중복 제외)
     _seen = set()
-    sig_rep = [s for s in sig0 + sig1 if not (s["code"] in _seen or _seen.add(s["code"]))]
+    sig_rep = [s for s in all_signals if not (s["code"] in _seen or _seen.add(s["code"]))]
     if _SCORER_AVAILABLE and sig_rep:
         print(f"\n{'='*65}")
         print("  팩터 점수 분석 (신고가 신호 — Method B: IC 가중)")
@@ -466,7 +482,7 @@ def main():
     if new:
         append_signals(new)
         print(f"\n[saved] paper_signals.csv 에 {len(new)} 건 추가")
-        for strat in LIVE_STRATEGIES:
+        for strat in acc["priority"]:
             cnt = sum(1 for s in new if s["strategy"] == strat)
             if cnt:
                 print(f"  {strat}: {cnt}건")

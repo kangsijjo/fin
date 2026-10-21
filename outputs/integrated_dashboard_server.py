@@ -433,8 +433,11 @@ def get_health():
 
 
 # ── 슬롯 구성 (kiwoom_trader.py 와 동기화) ─────────────────────────────────────
-_STRATEGY_MAX_SLOTS = {"high_500d_filt": 6, "high_52w_filt": 4}      # 2026-10-18 rsi 2종 → 500일 신고가
-_STRATEGY_PRIORITY  = ["high_500d_filt", "high_52w_filt"]
+# [2026-10-21] live_config 단일 출처 — _slot_status 가 호출될 때마다 다시 읽는다
+def _kw_slot_conf():
+    import live_config as LC
+    A = LC.account("kiwoom")
+    return dict(A["slots"]), list(A["priority"])
 
 
 def _ledger_slot_counts(ledger_csv, slot_keys):
@@ -461,10 +464,11 @@ def _slot_status(paper_df=None):
     """전략별 슬롯 사용 현황 — 키움 진입가 원장(실보유) 기준(2026-07-12 전환).
 
     paper_df 인자는 하위호환용으로 무시(과거 신호CSV 기준 카운트는 오표시였음)."""
-    used = _ledger_slot_counts(KIWOOM_DIR / "kiwoom_positions.csv", _STRATEGY_MAX_SLOTS)
+    _maxs, _prio = _kw_slot_conf()
+    used = _ledger_slot_counts(KIWOOM_DIR / "kiwoom_positions.csv", _maxs)
     slots = []
-    for strat in _STRATEGY_PRIORITY:
-        mx = _STRATEGY_MAX_SLOTS[strat]
+    for strat in _prio:
+        mx = _maxs[strat]
         cu = used.get(strat, 0)
         slots.append({
             "strategy": strat,
@@ -1043,41 +1047,49 @@ def get_kiwoom_mock(date_from="", date_to=""):
 
 # ── 4b. KIS mock account (안D 포트폴리오) ─────────────────────────────────────
 # ── 모의투자 슬롯 정의(전략별 슬롯수 + 진입/청산 조건) — 슬롯 클릭 드롭다운용 ──
-# KIS 안D (손절 있음)
-_KIS_STRATEGY_SLOTS = {"h52w_for3d_mkt": 4, "for_high20_mkt": 4, "gc_for3d": 2}
-_KIS_STRATEGY_STOP  = {"h52w_for3d_mkt": -15, "for_high20_mkt": -10, "gc_for3d": -26}
-_KIS_STRATEGY_LABEL = {
-    "h52w_for3d_mkt": "52주신고가+외국인",
-    "for_high20_mkt": "20일신고가+외국인",
-    "gc_for3d":       "골든크로스+외국인",
+# [2026-10-21] 구성은 live_config(대시보드 '모의매매 전략 설정') 단일 출처 → 요청마다 다시 읽는다(설정을 바꾸면
+# 대시보드 재시작 없이 바로 반영). 아래는 '진입 조건 문구'의 바탕(강도 부분은 설정에서 붙인다).
+_LIVE_BASE_LABEL = {
+    "h52w_for3d_mkt": "52주신고가+외국인", "for_high20_mkt": "20일신고가+외국인", "gc_for3d": "골든크로스+외국인",
+    "high_500d_filt": "500일 신고가+거래량", "high_52w_filt": "52주 신고가+거래량",
+    "rsi_reversal": "RSI 과매도 반전", "rsi_vol": "RSI 과매도+거래량급증",
 }
-_KIS_STRATEGY_HOLD = {"h52w_for3d_mkt": 20, "for_high20_mkt": 20, "gc_for3d": 15}
-_KIS_ENTRY = {
-    "h52w_for3d_mkt": "52주 신고가 돌파 + 외국인 3일 연속 순매수 + 시장강세 게이트(전종목 평균등락 60일MA>0) + 거래대금 ≥ 30억 + 강도(score_ic) ≥ 5.7",
-    "for_high20_mkt": "20일 신고가(종가 ≥ 직전20일 최고) + 외국인 3일 연속 순매수 + 시장강세 게이트 + 거래대금 ≥ 30억 + 강도(score_ic) ≥ 5.7",
-    "gc_for3d":       "골든크로스(MA20이 MA60 상향돌파) + 외국인 3일 연속 순매수 + 거래대금 ≥ 30억 (시장게이트 없음) · 강도 필터 면제(2026-10-15, 강도순 정렬만)",
+_LIVE_BASE_ENTRY = {
+    "h52w_for3d_mkt": "52주 신고가 돌파 + 외국인 3일 연속 순매수 + 시장강세 게이트(전종목 평균등락 60일MA>0) + 거래대금 ≥ 30억",
+    "for_high20_mkt": "20일 신고가(종가 ≥ 직전20일 최고) + 외국인 3일 연속 순매수 + 시장강세 게이트 + 거래대금 ≥ 30억",
+    "gc_for3d": "골든크로스(MA20이 MA60 상향돌파) + 외국인 3일 연속 순매수 + 거래대금 ≥ 30억 (시장게이트 없음)",
+    "high_500d_filt": "종가 > 직전 500영업일 최고가(약 2년 신고가) + 시장강세 게이트(전종목 평균등락 60일MA>0) + 당일 거래대금 ≥ 30일평균 ×1.5 + 거래대금 ≥ 30억",
+    "high_52w_filt": "종가 > 직전 252영업일 신고가(52주 돌파) + 시장강세 게이트(전종목 평균등락 60일MA>0) + 당일 거래대금 ≥ 30일평균 ×1.5 + 거래대금 ≥ 30억",
+    "rsi_reversal": "RSI(14) < 30 (과매도) + 거래대금 ≥ 10억",
+    "rsi_vol": "RSI(14) < 30 + 당일 거래대금 > 20일평균 ×2.0(거래량 급증) + 거래대금 ≥ 10억",
 }
-_KIS_EXIT = {
-    "h52w_for3d_mkt": "진입 20영업일째 종가 또는 -15% 손절(전일 종가 기준)",
-    "for_high20_mkt": "진입 20영업일째 종가 또는 -10% 손절",
-    "gc_for3d":       "진입 15영업일째 종가 또는 -26% 손절",
-}
-# 키움 안C (손절 없음 = 시간청산)
-# 2026-10-18 rsi_reversal·rsi_vol 제거 → high_500d_filt 6슬롯, 신고가 2종 강도 필터 면제(설명서 §56)
-_KW_STRATEGY_SLOTS = {"high_500d_filt": 6, "high_52w_filt": 4}
-_KW_STRATEGY_LABEL = {
-    "high_500d_filt": "500일 신고가+거래량",
-    "high_52w_filt":  "52주 신고가+거래량",
-}
-_KW_STRATEGY_HOLD = {"high_500d_filt": 20, "high_52w_filt": 20}
-_KW_ENTRY = {
-    "high_500d_filt": "종가 > 직전 500영업일 최고가(약 2년 신고가) + 시장강세 게이트(전종목 평균등락 60일MA>0) + 당일 거래대금 ≥ 30일평균 ×1.5 + 거래대금 ≥ 30억 · 강도 필터 면제(강도순 정렬만) · 우선 배정",
-    "high_52w_filt":  "종가 > 직전 252영업일 신고가(52주 돌파) + 시장강세 게이트(전종목 평균등락 60일MA>0) + 당일 거래대금 ≥ 30일평균 ×1.5 + 거래대금 ≥ 30억 · 강도 필터 면제(2026-10-18, 강도순 정렬만)",
-}
-_KW_EXIT = {
-    "high_500d_filt": "진입 20영업일째 종가 (손절·익절 없음)",
-    "high_52w_filt":  "익절 +50% 장중 지정가(매일 아침 발주) 또는 진입 20영업일째 종가 (손절 없음)",
-}
+
+
+def _live_tables(acct):
+    """계좌의 현재 운용 구성 → (slots, labels, holds, entries, exits, stops%) — 설정에서 매번 만든다."""
+    import live_config as LC
+    A = LC.account(acct)
+    base = _STRAT_BASE_INFO()
+    slots = {ln: A["slots"][ln] for ln in A["priority"]}
+    labels, holds, entries, exits, stops = {}, {}, {}, {}, {}
+    for ln in A["priority"]:
+        d = base.get(ln) or {}
+        labels[ln] = _LIVE_BASE_LABEL.get(ln) or d.get("title") or ln
+        ent = _LIVE_BASE_ENTRY.get(ln) or " + ".join(d.get("buy") or []) or ln
+        entries[ln] = ent + (" · 강도 필터 면제(강도순 정렬만)" if ln in A["exempt"]
+                             else f" + 강도(score_ic) ≥ {A['min_strength']:g}")
+        holds[ln] = A["holding"][ln]
+        st, tk = A["stop"].get(ln), A["take"].get(ln)
+        stops[ln] = round(st * 100) if st is not None else ""
+        parts = []
+        if tk is not None:
+            parts.append(f"익절 +{tk * 100:g}% " + ("장중 지정가(매일 아침 발주)" if acct == "kiwoom"
+                                                   else "(전일 종가 판정 → 다음날 시가 매도)"))
+        if st is not None:
+            parts.append(f"{st * 100:g}% 손절" + (" (15:21 평가손익 판정 → 마감 동시호가 매도)" if acct == "kiwoom"
+                                                  else "(전일 종가 판정 → 다음날 시가 매도)"))
+        exits[ln] = " 또는 ".join(parts + [f"진입 {holds[ln]}영업일째 종가"]) + ("" if parts else " (손절·익절 없음)")
+    return slots, labels, holds, entries, exits, stops
 
 
 def _slot_status_detail(ledger_csv, slots, labels, holds, entries, exits, stops):
@@ -1098,15 +1110,11 @@ def _slot_status_detail(ledger_csv, slots, labels, holds, entries, exits, stops)
 
 
 def _kis_slot_status():
-    return _slot_status_detail(KIS_DIR / "kis_positions.csv",
-                               _KIS_STRATEGY_SLOTS, _KIS_STRATEGY_LABEL,
-                               _KIS_STRATEGY_HOLD, _KIS_ENTRY, _KIS_EXIT, _KIS_STRATEGY_STOP)
+    return _slot_status_detail(KIS_DIR / "kis_positions.csv", *_live_tables("kis"))
 
 
 def _kiwoom_slot_status():
-    return _slot_status_detail(KIWOOM_DIR / "kiwoom_positions.csv",
-                               _KW_STRATEGY_SLOTS, _KW_STRATEGY_LABEL,
-                               _KW_STRATEGY_HOLD, _KW_ENTRY, _KW_EXIT, {})
+    return _slot_status_detail(KIWOOM_DIR / "kiwoom_positions.csv", *_live_tables("kiwoom"))
 
 def get_kis_mock(date_from="", date_to=""):
     out = {
@@ -2279,9 +2287,16 @@ def _pbt_parse(req):
     try:
         import period_backtest as P
         strength = P.parse_strength(b.get("strength", ""))
-    except ValueError as e:
+        stop, take = P.parse_exits(b.get("stop"), b.get("take"))      # [2026-10-21] 손절·익절
+    except (ValueError, TypeError) as e:
         return None, str(e)
-    return (start, end, names, bool(b.get("luck")), strength), None
+    mode = str(b.get("exit_mode") or "close")
+    if mode not in ("close", "intraday"):
+        return None, "판정 방식은 close / intraday"
+    ex = (["--stop", f"{stop:g}"] if stop is not None else []) + (["--take", f"{take:g}"] if take is not None else [])
+    if ex:
+        ex += ["--exit-mode", mode]
+    return (start, end, names, bool(b.get("luck")), strength, ex), None
 
 
 @app.route("/api/pbt/meta")
@@ -2321,9 +2336,8 @@ def api_pbt_meta():
 _STRAT_INFO_CACHE = {}
 
 
-def build_strategy_info():
-    """전 탭 마우스오버 설명용 {이름: 설명} — 엔진 55전략 + 라이브 이름 별칭 + 옛 이름 + 모의매매 규칙. (2026-10-19)
-    라이브 규칙(슬롯·손절·익절·강도)은 이 파일의 _KW_*/_KIS_* 표(슬롯 드롭다운과 같은 출처)에서 붙인다."""
+def _STRAT_BASE_INFO():
+    """엔진 55전략 + 라이브 이름 별칭 + 옛 이름 설명(서버 기동 후 1회 생성·캐시). 운용 규칙은 build_strategy_info 가 붙인다."""
     if _STRAT_INFO_CACHE:
         return _STRAT_INFO_CACHE
     import strategy_engine as E
@@ -2336,15 +2350,6 @@ def build_strategy_info():
     for live_name, eng in X.LIVE_ALIAS.items():
         if eng in info:
             info[live_name] = dict(info[eng], engine=eng)
-    for acct, slots, label, entry, exit_, stop in (
-            ("키움", _KW_STRATEGY_SLOTS, _KW_STRATEGY_LABEL, _KW_ENTRY, _KW_EXIT, {}),
-            ("KIS", _KIS_STRATEGY_SLOTS, _KIS_STRATEGY_LABEL, _KIS_ENTRY, _KIS_EXIT, _KIS_STRATEGY_STOP)):
-        for n, k in slots.items():
-            if n not in info:
-                continue
-            info[n] = dict(info[n], live={"account": acct, "slots": k, "label": label.get(n, n),
-                                          "entry": entry.get(n, ""), "exit": exit_.get(n, ""),
-                                          "stop": stop.get(n)})
     for n, note in X.RETIRED.items():
         if n in info:
             info[n] = dict(info[n], retired=note)
@@ -2354,12 +2359,30 @@ def build_strategy_info():
     return _STRAT_INFO_CACHE
 
 
+def build_strategy_info():
+    """전 탭 마우스오버 설명용 {이름: 설명} — 기본 설명 + **지금** 설정된 모의매매 규칙(계좌·슬롯·사는/파는 조건).
+    (2026-10-19 신설, 10-21 설정 기능과 연결: 운용 규칙은 요청마다 live_config 에서)"""
+    import live_config as LC
+    info = {k: dict(v) for k, v in _STRAT_BASE_INFO().items()}
+    for acct, lab in (("kiwoom", "키움"), ("kis", "KIS")):
+        slots, labels, holds, entries, exits, stops = _live_tables(acct)
+        for n, k in slots.items():
+            if n not in info:
+                info[n] = {"title": n, "buy": [], "sell": [], "data": [], "caution": []}
+            info[n]["live"] = {"account": lab, "slots": k, "label": labels.get(n, n),
+                               "entry": entries.get(n, ""), "exit": exits.get(n, ""),
+                               "stop": stops.get(n) if stops.get(n) != "" else None}
+            info[n].pop("retired", None)            # 다시 운용하면 '운용 종료' 표시는 뗀다
+    return info
+
+
 @app.route("/api/strategy_info")
 def api_strategy_info():
     try:
         info = build_strategy_info()
         # 한글 표기(슬롯 라벨 등) → 전략 이름: 영문 이름이 안 보이는 칸에서도 설명이 뜨게
-        al = {v: k for k, v in list(_KW_STRATEGY_LABEL.items()) + list(_KIS_STRATEGY_LABEL.items()) if k in info}
+        al = {v: k for a in ("kiwoom", "kis") for k, v in _live_tables(a)[1].items() if k in info}
+        al.update({v: k for k, v in _LIVE_BASE_LABEL.items() if k in info and v not in al})
         return jsonify({"ok": True, "info": info, "aliases": al})
     except Exception as e:
         return jsonify({"ok": False, "msg": f"{type(e).__name__}: {str(e)[:150]}", "info": {}})
@@ -2374,8 +2397,8 @@ def api_pbt_check():
     parsed, err = _pbt_parse(request)
     if err:
         return jsonify({"ok": False, "msg": err}), 400
-    start, end, names, luck, strength = parsed
-    st_arg = ["--strength", ",".join(f"{v:g}" for v in strength)] if strength else []
+    start, end, names, luck, strength, ex_arg = parsed
+    st_arg = (["--strength", ",".join(f"{v:g}" for v in strength)] if strength else []) + ex_arg
     cmd = [_VENV_PYTHON, str(BASE / "period_backtest.py"), "--check", "--start", start,
            "--end", end, "--names", ",".join(names)] + (["--luck"] if luck else []) + st_arg
     try:
@@ -2403,8 +2426,8 @@ def api_pbt_run():
     parsed, err = _pbt_parse(request)
     if err:
         return jsonify({"ok": False, "msg": err}), 400
-    start, end, names, luck, strength = parsed
-    st_arg = ["--strength", ",".join(f"{v:g}" for v in strength)] if strength else []
+    start, end, names, luck, strength, ex_arg = parsed
+    st_arg = (["--strength", ",".join(f"{v:g}" for v in strength)] if strength else []) + ex_arg
     p = _PBT_PROC["proc"]
     if p is not None and p.poll() is None:
         return jsonify({"ok": False, "msg": f"이미 실행 중({_PBT_PROC['job']}) — 끝난 뒤 다시 시도",
@@ -2422,6 +2445,141 @@ def api_pbt_run():
                         + (f" × 강도 {len(strength) + 1}줄" if strength else "")})
     except Exception as e:
         return jsonify({"ok": False, "msg": str(e)[:150]}), 500
+
+
+# ── 9d. 모의매매 전략 설정 (2026-10-21) ─────────────────────────────────────────
+# 계좌별 전략(최대 4)·슬롯(합 10)·강도 기준·전략별 강도 면제·손절·익절을 대시보드에서 바꾼다.
+# 저장 = live_config.save(검증·백업·이력). 거래일 08:30~15:40 은 잠금. 화면은 두 번 확인하고, 서버는 confirm=2 를 요구.
+# 정기 신호(18:30)가 지났거나 휴장일이면 저장 직후 regen_signals.py 로 오늘 신호를 다시 만든다 → 다음 거래일 09:00 부터 새 방식.
+_LC_REGEN = {"proc": None}
+_LAG_NOTE = {
+    "credit": "신용잔고는 1~2거래일 늦게 공개 — 당일 신호가 대부분 안 나옴(백테스트는 당일 값을 써 낙관적)",
+    "short": "공매도 비중은 다음날 공표 — 당일 신호가 대부분 안 나옴",
+    "individual": "개인 순매수는 18:30 신호 때 KRX 에서 바로 받아 씀(못 받으면 그날은 건너뜀)",
+}
+
+
+def _lc_engine_list():
+    import strategy_engine as E
+    import period_backtest as P
+    import live_config as LC
+    base = _STRAT_BASE_INFO()
+    out = []
+    for s in E.ALL_STRATEGIES:
+        v = vars(s)
+        hold = int(v.get("holding_days") or v.get("holding") or 20)
+        needs = P.aux_needs(s)
+        out.append({"engine": s.name, "live": LC.live_name(s.name), "title": (base.get(s.name) or {}).get("title", s.name),
+                    "holding": hold, "needs": [P._AUX_LABEL[k] for k in needs],
+                    "note": " / ".join(_LAG_NOTE[k] for k in needs if k in _LAG_NOTE)})
+    return out
+
+
+def _lc_view(cfg):
+    import live_config as LC
+    view = {"updated": cfg.get("updated"), "note": cfg.get("note"), "fallback": cfg.get("_fallback"), "accounts": {}}
+    for a in LC.ACCOUNTS:
+        A = cfg["accounts"][a]
+        view["accounts"][a] = {"label": LC.ACCOUNT_LABEL[a], "min_strength": A["min_strength"],
+                               "strategies": [dict(x, live=LC.live_name(x["engine"])) for x in A["strategies"]]}
+    return view
+
+
+@app.route("/api/live_config")
+def api_live_config():
+    import live_config as LC
+    locked, why = LC.is_locked()
+    hist = []
+    try:
+        with open(LC.history_path(), encoding="utf-8") as f:
+            hist = [json.loads(l) for l in f.readlines()[-10:] if l.strip()][::-1]
+    except Exception:
+        pass
+    p = _LC_REGEN["proc"]
+    return jsonify({"ok": True, "config": _lc_view(LC.load()), "engines": _lc_engine_list(),
+                    "locked": locked, "lock_msg": why, "regen_after_save": LC.needs_regen(),
+                    "regen_running": bool(p is not None and p.poll() is None),
+                    "slots_total": LC.SLOTS_TOTAL, "max_strategies": LC.MAX_STRATEGIES, "history": hist})
+
+
+def _lc_from_request(b):
+    """요청 본문 → 저장용 설정(보유일은 엔진 값으로 강제 — 화면 값은 믿지 않는다)."""
+    import live_config as LC
+    hold = {e["engine"]: e["holding"] for e in _lc_engine_list()}
+    acc = (b or {}).get("accounts") or {}
+    new = {"accounts": {}}
+    for a in LC.ACCOUNTS:
+        A = acc.get(a) or {}
+        rows = []
+        for x in (A.get("strategies") or [])[:LC.MAX_STRATEGIES + 1]:
+            def num(v):
+                if v is None or v == "":
+                    return None
+                return float(v)
+            e = str(x.get("engine", ""))
+            rows.append({"engine": e, "slots": int(x.get("slots") or 0), "exempt": bool(x.get("exempt")),
+                         "stop": num(x.get("stop")), "take": num(x.get("take")), "holding": hold.get(e, 20)})
+        new["accounts"][a] = {"min_strength": float(A.get("min_strength", 5.7)), "strategies": rows}
+    return new
+
+
+@app.route("/api/live_config/preview", methods=["POST"])
+def api_live_config_preview():
+    if not _same_origin_action(request):
+        return jsonify({"ok": False, "msg": "대시보드 페이지에서만 실행할 수 있습니다(CSRF 차단)"}), 403
+    if not _is_local(request):
+        return jsonify({"ok": False, "msg": "로컬에서만 허용"}), 403
+    import live_config as LC
+    try:
+        new = _lc_from_request(request.get_json(silent=True))
+    except (TypeError, ValueError) as e:
+        return jsonify({"ok": False, "errors": [f"입력 값 오류: {e}"]}), 400
+    errs = LC.validate(new, {e["engine"] for e in _lc_engine_list()})
+    cur = LC.load()
+    changes = [] if errs else LC.diff(cur, new)
+    locked, why = LC.is_locked()
+    regen = LC.needs_regen()
+    return jsonify({"ok": not errs, "errors": errs, "changes": changes, "locked": locked, "lock_msg": why,
+                    "effective": ("저장 즉시 오늘 신호를 새 설정으로 다시 만듭니다 → 다음 거래일 09:00 매수부터 새 방식"
+                                  if regen else "오늘 18:30 정기 신호부터 새 설정 → 다음 거래일 09:00 매수부터 새 방식")})
+
+
+@app.route("/api/live_config", methods=["POST"])
+def api_live_config_save():
+    if not _same_origin_action(request):
+        return jsonify({"ok": False, "msg": "대시보드 페이지에서만 실행할 수 있습니다(CSRF 차단)"}), 403
+    if not _is_local(request):
+        return jsonify({"ok": False, "msg": "로컬에서만 허용(원격 변경 불가)"}), 403
+    import live_config as LC
+    b = request.get_json(silent=True) or {}
+    if b.get("confirm") != 2:
+        return jsonify({"ok": False, "msg": "두 번 확인이 필요합니다"}), 400
+    locked, why = LC.is_locked()
+    if locked:
+        return jsonify({"ok": False, "msg": why}), 423
+    try:
+        new = _lc_from_request(b)
+        cfg, changes = LC.save(new, note=str(b.get("note", ""))[:200],
+                               engine_names={e["engine"] for e in _lc_engine_list()})
+    except (TypeError, ValueError) as e:
+        return jsonify({"ok": False, "msg": str(e)[:400]}), 400
+    regen = LC.needs_regen()
+    msg = "저장됨 — 오늘 18:30 신호부터 새 설정, 다음 거래일 09:00 매수부터 적용"
+    if regen:
+        p = _LC_REGEN["proc"]
+        if p is None or p.poll() is not None:
+            (BASE / "logs").mkdir(exist_ok=True)
+            logf = open(BASE / "logs" / "run_regen_signals.log", "w", encoding="utf-8", errors="replace")
+            _LC_REGEN["proc"] = _sp.Popen([_VENV_PYTHON, str(BASE / "regen_signals.py")], cwd=str(BASE),
+                                          stdout=logf, stderr=_sp.STDOUT, creationflags=_NO_WIN)
+        msg = "저장됨 — 오늘 신호를 새 설정으로 다시 만드는 중(1~3분) → 다음 거래일 09:00 매수부터 적용"
+    try:
+        import notifier
+        notifier.safe_send("🛠 [모의매매 전략 설정 변경]\n" + ("\n".join("· " + c for c in changes) or "· 변경 없음")
+                           + "\n" + msg)
+    except Exception:
+        pass
+    return jsonify({"ok": True, "msg": msg, "changes": changes, "config": _lc_view(cfg), "regen": regen})
 
 
 @app.route("/api/pbt/jobs")
@@ -2446,6 +2604,7 @@ def api_pbt_jobs():
             "finished": d.get("finished"), "elapsed_sec": d.get("elapsed_sec"),
             "start": prm.get("start"), "end": prm.get("eff_end") or prm.get("end"),
             "names": prm.get("names") or [], "strength": prm.get("strength") or [], "luck": bool(prm.get("luck")),
+            "stop": prm.get("stop"), "take": prm.get("take"), "exit_mode": prm.get("exit_mode"),
             "market_cagr": (d.get("market") or {}).get("cagr"),
             "n_results": len(d.get("results") or []), "n_warn": len(d.get("warnings") or []),
             "error": d.get("error"),
@@ -2764,6 +2923,10 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
 
 <!-- ===== 모의계좌 ===== -->
 <div id="tab-mock" class="tab-content">
+  <div class="section" id="lc-mock-sec">
+    <h2>🛠 모의매매 전략 설정 <span style="color:#8b949e;font-size:11px;font-weight:400">— 전략·슬롯·강도·손절·익절을 골라 다음 거래일부터 이 방식으로 매매 (두 번 확인)</span></h2>
+    <div id="lc-mock"><span style="color:#64748b;font-size:12px">불러오는 중…</span></div>
+  </div>
   <!-- Kiwoom -->
   <div class="section">
     <h2>키움 잔고</h2>
@@ -2846,6 +3009,10 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
 
 <!-- ===== 강도매매 ===== -->
 <div id="tab-strength" class="tab-content">
+  <div class="section" id="lc-strength-sec">
+    <h2>🛠 모의매매 전략 설정 <span style="color:#8b949e;font-size:11px;font-weight:400">— 전략·슬롯·강도·손절·익절을 골라 다음 거래일부터 이 방식으로 매매 (두 번 확인)</span></h2>
+    <div id="lc-strength"><span style="color:#64748b;font-size:12px">불러오는 중…</span></div>
+  </div>
   <div class="section">
     <h2>신호 강도 백데이터 <span style="color:#8b949e;font-size:12px;font-weight:400">&mdash; 실거래는 슬롯 균등분배(강도 무관). 여기는 "이 강도면 이렇게 매매했을 것"을 사후 검증하기 위한 누적 기록</span></h2>
     <div class="stats-row" id="st-summary"></div>
@@ -2948,6 +3115,12 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
       <span style="flex:1"></span>
       <label style="font-size:13px;color:#cbd5e1"><span class="pbt-tip" data-tip="강도 비교(선택)|쉼표로 여러 값: 예 4, 5, 5.7 → 전략마다 [강도 없음] + [≥4] [≥5] [≥5.7] 줄이 나란히 나옴|강도 줄은 그날 후보를 강도 높은 순으로 담음(모의매매와 같은 규칙) · 0 = 거르지 않고 강도순으로만 담기|강도는 신호마다 그날 데이터로 다시 계산 — 가중치는 해마다 그 이전 매매로만 학습(미래 미사용)|처음 한 번은 수 분, 같은 날 다시 돌리면 저장분 사용">강도 비교</span>
         <input type="text" id="pbt-strength" placeholder="예: 4, 5, 5.7" style="width:110px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"></label>
+      <label style="font-size:13px;color:#cbd5e1"><span class="pbt-tip" data-tip="손절·익절(선택)|비우면 없음(만기에만 팖) · 모든 전략·강도 줄에 같은 규칙|손절은 음수(예 -10), 익절은 양수(예 20) — 진입가(다음날 시가) 기준|판정 '종가 기준' = 그날 종가가 선을 넘으면 다음날 시가에 팖(KIS 모의매매 손절과 같음, 보수적)|'장중 도달' = 그날 저가·고가가 닿으면 그 가격에 팖(키움 익절 지정가와 비슷, 시가부터 넘어 열리면 시가)">손절 %</span>
+        <input type="number" id="pbt-stop" placeholder="없음" step="1" min="-50" max="-1" style="width:66px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"></label>
+      <label style="font-size:13px;color:#cbd5e1">익절 %
+        <input type="number" id="pbt-take" placeholder="없음" step="1" min="1" max="300" style="width:66px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"></label>
+      <select id="pbt-exitmode" title="손절·익절 판정 방식" style="background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px;font-size:12px">
+        <option value="close">종가 기준(다음날 시가)</option><option value="intraday">장중 도달(그 가격)</option></select>
       <label style="font-size:13px;color:#cbd5e1" title="전략 5개 이상·거래일 80일 이상일 때 SPA·PBO·DSR 수행(1~2분 추가)"><input type="checkbox" id="pbt-luck"> 운 검정(SPA·PBO)</label>
     </div>
     <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px">
@@ -3763,7 +3936,9 @@ function pbtSel(p){
 function _pbtBody(){
   return {start:document.getElementById('pbt-start').value.replace(/-/g,''), end:document.getElementById('pbt-end').value.replace(/-/g,''),
           names:[...document.querySelectorAll('#pbt-list input:checked')].map(i=>i.value), luck:document.getElementById('pbt-luck').checked,
-          strength:(document.getElementById('pbt-strength')||{}).value||''};
+          strength:(document.getElementById('pbt-strength')||{}).value||'',
+          stop:(document.getElementById('pbt-stop')||{}).value||'', take:(document.getElementById('pbt-take')||{}).value||'',
+          exit_mode:(document.getElementById('pbt-exitmode')||{}).value||'close'};
 }
 async function _pbtPost(url){
   const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Action':'1'},body:JSON.stringify(_pbtBody())});
@@ -3795,7 +3970,7 @@ async function pbtHistLoad(silent){
   setHtml('pbt-hist', _pbtHist.length?_pbtHist.map(j=>{
     const t=j.top&&j.top[0];
     const head=`<b style="color:#e2e8f0">${_pbtEsc((j.started||'').slice(0,16))}</b>
-      <span style="color:#94a3b8"> · ${_pbtD(j.start)} ~ ${_pbtD(j.end)} · ${j.names.length}전략${j.strength.length?' · 강도 '+j.strength.join('/'):''}${j.luck?' · 운검정':''}</span>
+      <span style="color:#94a3b8"> · ${_pbtD(j.start)} ~ ${_pbtD(j.end)} · ${j.names.length}전략${j.strength.length?' · 강도 '+j.strength.join('/'):''}${j.stop!=null?' · 손절 '+j.stop+'%':''}${j.take!=null?' · 익절 +'+j.take+'%':''}${j.luck?' · 운검정':''}</span>
       <span style="color:${j.status==='done'?'#10b981':j.status==='error'?'#ef4444':'#38bdf8'}"> · ${st[j.status]||_pbtEsc(j.status)}</span>
       ${t?`<span style="color:#cbd5e1"> · 1위 ${_pbtEsc(t.strategy)} <span class="${clr(t.cagr)}">${f(t.cagr)}</span></span>`:''}`;
     const rows=(j.top||[]).map((r,k)=>`<tr><td>${k+1}</td><td>${_pbtEsc(r.strategy)}</td><td class="r">${r.n_trades??'-'}</td>
@@ -3830,6 +4005,9 @@ function pbtHistReuse(job){
   document.querySelectorAll('#pbt-list input').forEach(i=>{ i.checked=want.has(i.value); if(i.checked) have.add(i.value); });
   const miss=j.names.filter(n=>!have.has(n)).length;
   const st=document.getElementById('pbt-strength'); if(st) st.value=(j.strength||[]).join(', ');
+  const sp=document.getElementById('pbt-stop'); if(sp) sp.value=j.stop==null?'':j.stop;
+  const tk=document.getElementById('pbt-take'); if(tk) tk.value=j.take==null?'':j.take;
+  const em=document.getElementById('pbt-exitmode'); if(em) em.value=j.exit_mode||'close';
   const lk=document.getElementById('pbt-luck'); if(lk) lk.checked=!!j.luck;
   _pbtCount();
   setHtml('pbt-warn', `<span style="color:#38bdf8;font-size:13px">↺ ${_pbtEsc(job)} 의 조건을 불러왔습니다${miss?` (지금은 없는 전략 ${miss}개 제외)`:''} — [데이터 점검]·[실행]으로 다시 계산</span>`);
@@ -3970,7 +4148,7 @@ function pbtRender(d){
   setHtml('pbt-res', `<table><thead><tr><th><span class="pbt-tip" data-tip="${_pbtEsc(_PBT_TIPS.strategy)}">전략</span></th>${th('n','매매수')}${th('win','승률')}${th('avg','신호 평균')}${th('slot','슬롯 실매매')}
     ${th('tot','총수익')}${th('cagr','CAGR')}${th('mdd','MDD')}${th('sharpe','샤프')}${th('vs','시장 대비')}${years.map(y=>`<th class="r"><span class="pbt-tip" data-tip="${_pbtEsc(_PBT_TIPS.year)}">${y}</span></th>`).join('')}</tr></thead>
     <tbody>${d.market?row(d.market,true):''}${rs.map(r=>row(r,false)).join('')}</tbody></table>
-    <div style="font-size:11px;color:#64748b;margin-top:6px">전략마다 10슬롯 단독 · 다음날 시가 진입·보유일 만기·손절/익절 없음·비용 0.245% · 일별 평가(MTM) · 시장 = 코스닥 유니버스 동일가중 · 연도별은 기간 안 각 해의 자본 증감${(p.strength||[]).length?' · <b>강도 줄</b> = 강도 기준 넘은 신호만, 강도 높은 순으로 담음(기본 줄은 강도 무관·전략 점수순)':''}</div>
+    <div style="font-size:11px;color:#64748b;margin-top:6px">전략마다 10슬롯 단독 · 다음날 시가 진입·보유일 만기${(p.stop!=null||p.take!=null)?'':'·손절/익절 없음'}·비용 0.245% · 일별 평가(MTM) · 시장 = 코스닥 유니버스 동일가중 · 연도별은 기간 안 각 해의 자본 증감${(p.strength||[]).length?' · <b>강도 줄</b> = 강도 기준 넘은 신호만, 강도 높은 순으로 담음(기본 줄은 강도 무관·전략 점수순)':''}${(p.stop!=null||p.take!=null)?` · <b>청산</b>: ${p.stop!=null?'손절 '+p.stop+'%':''}${p.stop!=null&&p.take!=null?' / ':''}${p.take!=null?'익절 +'+p.take+'%':''} (${p.exit_mode==='intraday'?'장중 도달 → 그 가격':'종가 판정 → 다음날 시가'})`:''}</div>
     ${d.strength_info&&Object.keys(d.strength_info).length?`<div style="font-size:11px;color:#64748b;margin-top:3px">강도 가중치(워크포워드) — ${Object.entries(d.strength_info).map(([y,v])=>v.skipped?`${y}: 학습 ${v.n_train}건 부족 → 채점 안 함`:`${y}: ${y}년 이전 매매 ${Number(v.n_train).toLocaleString()}건으로 학습(${_pbtEsc((v.top||[]).join(', '))})`).join(' · ')}</div>`:''}`);
   const L=d.luck;
   if(L&&!L.error&&L.pbo!=null){
@@ -4417,6 +4595,101 @@ function initTableSort(){
   });
 }
 
+// ══ 2026-10-21 모의매매 전략 설정 — 모의계좌 탭·강도매매 탭(같은 편집기) ══
+let _lc=null, _lcDraft=null;
+const _LC_BOX=['lc-mock','lc-strength'];
+const _lcEsc=v=>String(v==null?'':v).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function lcLoad(){
+  try{ _lc=await fetch('/api/live_config').then(r=>r.json()); }
+  catch(e){ _LC_BOX.forEach(id=>setHtml(id,`<span style="color:#ef4444">설정 로드 실패: ${_lcEsc(e.message)}</span>`)); return; }
+  _lcDraft=JSON.parse(JSON.stringify(_lc.config.accounts));
+  lcRender();
+}
+function _lcEng(name){ return ((_lc&&_lc.engines)||[]).find(e=>e.engine===name)||{}; }
+function lcRender(){
+  if(!_lc) return;
+  const L=_lc, D=_lcDraft;
+  const inp='background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:3px 5px';
+  const opts=sel=>L.engines.map(e=>`<option value="${_lcEsc(e.engine)}"${e.engine===sel?' selected':''}>${_lcEsc(e.engine)} — ${_lcEsc(e.title)}</option>`).join('');
+  const card=a=>{
+    const A=D[a], tot=A.strategies.reduce((t,s)=>t+(Number(s.slots)||0),0);
+    const rows=A.strategies.map((s,i)=>{ const e=_lcEng(s.engine);
+      return `<tr>
+        <td style="white-space:nowrap">${i+1}
+          <button class="runbtn" style="padding:0 6px" title="위로(먼저 슬롯을 채움)" onclick="lcMove('${a}',${i},-1)">▲</button>
+          <button class="runbtn" style="padding:0 6px" title="아래로" onclick="lcMove('${a}',${i},1)">▼</button></td>
+        <td><select style="${inp};max-width:330px" onchange="lcSet('${a}',${i},'engine',this.value)">${opts(s.engine)}</select>
+          ${e.note?`<div style="color:#fbbf24;font-size:11px;max-width:340px">⚠ ${_lcEsc(e.note)}</div>`:''}</td>
+        <td><input type="number" min="1" max="10" step="1" value="${s.slots}" style="${inp};width:52px" onchange="lcSet('${a}',${i},'slots',this.value)"></td>
+        <td style="text-align:center"><input type="checkbox" ${s.exempt?'checked':''} onchange="lcSet('${a}',${i},'exempt',this.checked)" title="체크하면 강도 기준과 상관없이 삼(후보가 많으면 강도 높은 순)"></td>
+        <td><input type="number" step="1" min="-50" max="-1" placeholder="없음" value="${s.stop==null?'':s.stop}" style="${inp};width:64px" onchange="lcSet('${a}',${i},'stop',this.value)"></td>
+        <td><input type="number" step="1" min="1" max="300" placeholder="없음" value="${s.take==null?'':s.take}" style="${inp};width:64px" onchange="lcSet('${a}',${i},'take',this.value)"></td>
+        <td style="color:#94a3b8">${e.holding??s.holding}일</td>
+        <td><button class="runbtn" style="padding:0 7px" title="빼기" onclick="lcDel('${a}',${i})">✕</button></td></tr>`; }).join('');
+    const stopSem=a==='kiwoom'?'15:21 평가손익 판정 → 마감 동시호가 매도':'전일 종가 판정 → 다음날 09:01 시가 매도';
+    const takeSem=a==='kiwoom'?'매일 아침 장중 지정가(닿으면 그 가격)':'전일 종가 판정 → 다음날 09:01 시가 매도';
+    return `<div style="flex:1;min-width:560px;background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:10px 12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+        <b style="font-size:14px">${_lcEsc(L.config.accounts[a].label)}</b>
+        <label style="font-size:13px;color:#cbd5e1">강도 기준 ≥
+          <input type="number" min="0" max="10" step="0.1" value="${A.min_strength}" style="${inp};width:62px" onchange="lcSetAcc('${a}','min_strength',this.value)"></label>
+        <span style="font-size:12px;color:${tot===L.slots_total?'#10b981':'#ef4444'}">슬롯 합 ${tot}/${L.slots_total}</span></div>
+      <table style="font-size:12px;margin-top:6px;width:100%"><thead><tr><th>순서</th><th>전략</th><th>슬롯</th>
+        <th title="강도 기준과 상관없이 삼">강도 면제</th><th title="${_lcEsc(stopSem)}">손절 %</th><th title="${_lcEsc(takeSem)}">익절 %</th><th>보유</th><th></th></tr></thead>
+        <tbody>${rows}</tbody></table>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
+        ${A.strategies.length<L.max_strategies?`<button class="runbtn" onclick="lcAdd('${a}')">+ 전략 추가</button>`:'<span style="font-size:11px;color:#64748b">전략은 최대 4개</span>'}
+        <span style="font-size:11px;color:#64748b">손절: ${_lcEsc(stopSem)} · 익절: ${_lcEsc(takeSem)} · 보유일은 전략 정의대로</span></div></div>`;
+  };
+  const hist=(L.history||[]).slice(0,5).map(h=>`<div>· <b>${_lcEsc(h.time)}</b> ${_lcEsc((h.changes||[]).join(' / ')||'변경 없음')}</div>`).join('');
+  const html=`<div style="font-size:12px;color:#94a3b8;margin-bottom:8px">
+      지금 설정: <b style="color:#e2e8f0">${_lcEsc(L.config.updated||'기본값(현행)')}</b>${L.config.fallback?` <span style="color:#ef4444">⚠ ${_lcEsc(L.config.fallback)}</span>`:''}
+      · 적용: ${L.regen_after_save?'저장하면 오늘 신호를 새 설정으로 다시 만듦 → 다음 거래일 09:00 매수부터':'오늘 18:30 신호부터 → 다음 거래일 09:00 매수부터'}
+      ${L.regen_running?' · <span style="color:#38bdf8">신호 다시 만드는 중…</span>':''}</div>
+    ${L.locked?`<div style="padding:6px 10px;border-radius:6px;background:rgba(239,68,68,.08);border:1px solid #7f1d1d;color:#fca5a5;font-size:12px;margin-bottom:8px">🔒 ${_lcEsc(L.lock_msg)}</div>`:''}
+    <div style="display:flex;gap:10px;flex-wrap:wrap">${card('kiwoom')}${card('kis')}</div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap">
+      <button class="runbtn" style="background:#2563eb;color:#fff;${L.locked?'opacity:.5':''}" ${L.locked?'disabled':''} onclick="lcSave()">💾 변경 확인 후 저장</button>
+      <button class="runbtn" onclick="lcLoad()">↺ 현재 설정 다시 불러오기</button>
+      <span id="lc-msg" style="font-size:12px;color:#94a3b8"></span></div>
+    <details style="margin-top:8px"><summary style="cursor:pointer;font-size:12px;color:#94a3b8">최근 변경 기록</summary>
+      <div style="font-size:12px;color:#cbd5e1;margin-top:4px;line-height:1.7">${hist||'<span style="color:#64748b">아직 없음</span>'}</div></details>
+    <div style="font-size:11px;color:#64748b;margin-top:6px">빠진 전략으로 이미 산 종목은 원래 보유일·손절·익절대로 만기까지 갑니다 · 거래일 08:30~15:40 은 잠금 · 바꿀 때 두 번 확인합니다 · 백테스트 탭 '기간 백테스트'로 먼저 확인해 보세요</div>`;
+  _LC_BOX.forEach(id=>setHtml(id,html.replace('id="lc-msg"',`id="lc-msg-${id}"`)));
+}
+function _lcMsg(h){ _LC_BOX.forEach(id=>setHtml('lc-msg-'+id,h)); }
+function lcSet(a,i,k,v){
+  const s=_lcDraft[a].strategies[i];
+  if(k==='slots') s.slots=parseInt(v||'0',10)||0;
+  else if(k==='exempt') s.exempt=!!v;
+  else if(k==='stop'||k==='take') s[k]=(v===''||v==null)?null:Number(v);
+  else if(k==='engine'){ s.engine=v; const e=_lcEng(v); s.holding=e.holding; }
+  lcRender();
+}
+function lcSetAcc(a,k,v){ _lcDraft[a][k]=Number(v); lcRender(); }
+function lcMove(a,i,d){ const S=_lcDraft[a].strategies, j=i+d; if(j<0||j>=S.length) return; [S[i],S[j]]=[S[j],S[i]]; lcRender(); }
+function lcDel(a,i){ const S=_lcDraft[a].strategies; if(S.length<=1){ alert('전략은 최소 1개'); return; } S.splice(i,1); lcRender(); }
+function lcAdd(a){
+  const S=_lcDraft[a].strategies, used=new Set(S.map(s=>s.engine));
+  const e=(_lc.engines||[]).find(x=>!used.has(x.engine)); if(!e) return;
+  S.push({engine:e.engine,slots:1,exempt:false,stop:null,take:null,holding:e.holding}); lcRender();
+}
+async function lcSave(){
+  const post=async(url,extra)=>{ const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Action':'1'},
+      body:JSON.stringify(Object.assign({accounts:_lcDraft},extra||{}))}); let d={}; try{ d=await r.json(); }catch(e){ d={ok:false,msg:'응답 해석 실패 ('+r.status+')'}; } return d; };
+  const pv=await post('/api/live_config/preview');
+  if(!pv.ok){ alert('저장할 수 없습니다:\\n- '+(pv.errors||[pv.msg]).join('\\n- ')); return; }
+  if(pv.locked){ alert(pv.lock_msg); return; }
+  if(!(pv.changes||[]).length){ alert('바뀐 내용이 없습니다'); return; }
+  // ① 첫 번째 확인 — 무엇이 바뀌는지
+  if(!confirm('[1/2] 모의매매 전략을 이렇게 바꿉니다:\\n\\n- '+pv.changes.join('\\n- ')+'\\n\\n적용 시점: '+pv.effective+'\\n\\n계속할까요?')) return;
+  // ② 두 번째 확인 — 정말로
+  if(!confirm('[2/2] 정말로 적용할까요?\\n\\n다음 거래일 09:00 매수부터 이 방식으로 매매합니다.\\n되돌리려면 다시 바꿔야 합니다.')) return;
+  const d=await post('/api/live_config',{confirm:2});
+  _lcMsg(d.ok?`<span style="color:#10b981">✓ ${_lcEsc(d.msg)}</span>`:`<span style="color:#ef4444">${_lcEsc(d.msg||'저장 실패')}</span>`);
+  if(d.ok){ await lcLoad(); _lcMsg(`<span style="color:#10b981">✓ ${_lcEsc(d.msg)}</span>`); }
+}
+
 // ══ 2026-10-19 ① 섹션 접기/펴기(모든 탭) ② 전략 이름 마우스오버 설명(모든 탭) ══
 // 저장 키 = 탭 + (섹션 id 또는 탭 안 순번) — 제목 글자는 데이터 로딩 후 바뀌는 칸이 있어 키로 안 쓴다
 function _secKey(sec){ const tab=sec.closest('.tab-content');
@@ -4496,7 +4769,7 @@ function _stratTipInit(){
     cur.classList.remove('strat-hot'); cur=null; box.style.display='none';
   });
 }
-window.addEventListener('load',()=>{ try{ _secInit(); }catch(e){} try{ _stratTipInit(); }catch(e){} });
+window.addEventListener('load',()=>{ try{ _secInit(); }catch(e){} try{ _stratTipInit(); }catch(e){} try{ lcLoad(); }catch(e){} });
 window.addEventListener('load',()=>{
   load();
   initTableSort();

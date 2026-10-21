@@ -21,8 +21,8 @@ sys.path.insert(0, os.getcwd())
 import pandas as pd
 
 from strategies.daily_loader import load_macro_daily
-from live_signal import (detect_high_52w_filt, detect_high_500d_filt,
-                         load_name_cache, _compute_mkt_strong)
+from live_signal import (detect_high_52w_filt, detect_high_500d_filt, detect_rsi_reversal, detect_rsi_vol,
+                         load_name_cache, _compute_mkt_strong, is_excluded, _offset_date)
 
 OUT = "db/kiwoom/intraday_preview.json"
 
@@ -83,12 +83,17 @@ def main():
     name_cache = load_name_cache()
     mkt_dict = _compute_mkt_strong(df)
 
-    # [2026-10-18] 키움 운용 전략 교체(rsi 2종 → high_500d_filt) — live_signal 과 같은 집합
-    sig0 = detect_high_500d_filt(df.copy(), last_date, all_dates, name_cache, mkt_dict)
-    sig1 = detect_high_52w_filt(df.copy(), last_date, all_dates, name_cache, mkt_dict)
+    # [2026-10-21] 키움 운용 전략 = live_config(대시보드에서 고름) — live_signal 과 같은 경로
+    import engine_signals as ES
+    known = {"high_500d_filt": lambda d, ld, ad, nc: detect_high_500d_filt(d, ld, ad, nc, mkt_dict),
+             "high_52w_filt": lambda d, ld, ad, nc: detect_high_52w_filt(d, ld, ad, nc, mkt_dict),
+             "rsi_reversal": detect_rsi_reversal, "rsi_vol": detect_rsi_vol}
+    df["date"] = df["date"].astype(str)
+    groups, _skipped = ES.run_configured("kiwoom", df, str(last_date), [str(x) for x in all_dates], name_cache,
+                                         known, is_excluded, _offset_date)
 
     items = []
-    for strat, sigs in [("high_500d_filt", sig0), ("high_52w_filt", sig1)]:
+    for strat, sigs in groups:
         for s in sigs:
             items.append({
                 "code": str(s.get("code", "")).zfill(6),
@@ -98,10 +103,11 @@ def main():
             })
     result["as_of"] = today
     result["items"] = items
-    result["counts"] = {"high_500d_filt": len(sig0), "high_52w_filt": len(sig1)}
+    result["counts"] = {strat: len(sigs) for strat, sigs in groups}
+    result["skipped"] = [{"strategy": n, "why": w} for n, w in _skipped]
     _write(result)
-    print(f"[preview] 잠정 후보 {len(items)}건 "
-          f"(500일 {len(sig0)} / 52주 {len(sig1)}) → {OUT}")
+    print(f"[preview] 잠정 후보 {len(items)}건 ("
+          + " / ".join(f"{k} {v}" for k, v in result["counts"].items()) + f") → {OUT}")
 
 
 def _write(result):

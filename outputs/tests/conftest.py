@@ -28,6 +28,11 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# [2026-10-21] 모의매매 전략 설정(db/live_config.json)은 사용자가 대시보드에서 바꾼다 — 테스트는 그 파일과
+# 무관하게 '기본값(현행 구성)'으로 돌아야 한다(트레이더 상수는 import 시점에 설정을 읽으므로 가장 먼저 지정).
+import tempfile as _tempfile
+os.environ["LIVE_CONFIG_PATH"] = os.path.join(_tempfile.mkdtemp(prefix="lc_test_"), "live_config.json")
+
 _sent = []
 
 

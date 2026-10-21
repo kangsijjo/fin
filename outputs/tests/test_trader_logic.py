@@ -587,9 +587,10 @@ def test_strength_thresholds_declared_per_account():
     assert kx.MIN_STRENGTH_SCORE == 5.7, "KIS 강도 임계가 의도(5.7)와 다름"
 
     # 가상매매(strength 포트폴리오)는 키움 라이브 룰을 미러링 → 같은 값이어야 비교 성립
+    # [2026-10-21] 값은 live_config 단일 출처 — 가상매매도 같은 출처를 읽는지 확인
     src = open(os.path.join(OUTPUTS, "ai_paper_trader.py"), encoding="utf-8").read()
-    assert f'min_score={kt.MIN_STRENGTH_SCORE}' in src, \
-        "ai_paper_trader 의 strength 시뮬 min_score 가 키움 라이브 임계와 불일치"
+    assert 'min_score=_LC.account("kiwoom")["min_strength"]' in src, \
+        "ai_paper_trader 의 strength 시뮬 min_score 가 키움 라이브 임계(설정)와 다른 출처"
 
 
 def test_verify_strength_recovers_and_fails_closed(tmp_path, monkeypatch):
@@ -1984,7 +1985,7 @@ def test_cut_monitor_does_not_touch_trading_code():
 def test_cut_monitor_thresholds_are_walkforward_constants():
     """임계는 상수로 고정돼 있어야 한다(실행 시점에 재계산하면 결과가 표류)."""
     import strength_cut_monitor as M
-    assert M.CUR_TH == 5.7, "현행 비교 기준이 라이브 임계(5.7)와 다르다"
+    assert M.CUR_TH == {"kiwoom": 5.7, "kis": 5.7}, "현행 비교 기준이 라이브 임계(기본 5.7)와 다르다"
     for cuts in (M.CUTS_40, M.CUTS_50):
         # [2026-10-18] 강도 면제 전략(high_500d_filt 등)은 컷이 필요 없다 — 비면제 전략은 전부 컷이 있어야 한다
         assert set(M.HOLD) - M.EXEMPT <= set(cuts) <= set(M.HOLD), "비면제 전략의 컷 누락"
@@ -2003,9 +2004,9 @@ def test_cut_monitor_live_constants_match_traders():
     assert M.CAPS["kiwoom"] == KW.STRATEGY_MAX_SLOTS, "키움 슬롯 상한 불일치"
     assert M.PRIORITY["kiwoom"] == KW.STRATEGY_PRIORITY, "키움 우선순위 불일치"
     assert M.PRIORITY["kis"] == KI.STRATEGY_PRIORITY, "KIS 우선순위 불일치"
-    assert M.STOP == KI.STRATEGY_STOP, "KIS 손절값 불일치"
-    assert M.TAKE == KW.PROFIT_TARGET, "키움 익절값 불일치"
-    assert M.CUR_TH == KW.MIN_STRENGTH_SCORE == KI.MIN_STRENGTH_SCORE, "강도 임계 불일치"
+    assert M.STOP == {**KW.STRATEGY_STOP, **KI.STRATEGY_STOP}, "손절값 불일치"
+    assert M.TAKE == {**KW.PROFIT_TARGET, **KI.STRATEGY_TAKE}, "익절값 불일치"
+    assert M.CUR_TH == {"kiwoom": KW.MIN_STRENGTH_SCORE, "kis": KI.MIN_STRENGTH_SCORE}, "강도 임계 불일치"
 
 
 def test_cut_monitor_accounts_have_separate_books():
@@ -2301,16 +2302,14 @@ def test_kiwoom_buy_skips_unknown_strategy_instead_of_remapping():
     assert "운용 중이 아닌 전략" in src
 
 
-def test_live_signal_generates_only_kiwoom_live_strategies():
+def test_live_signal_generates_configured_kiwoom_strategies():
+    """[2026-10-21] 신호 대상 = live_config 의 키움 전략(대시보드에서 고름). 감지기가 있으면 감지기, 없으면 엔진 신호."""
     src = open(os.path.join(OUTPUTS, "live_signal.py"), encoding="utf-8").read()
-    import re
     main = src[src.index("def main():"):]
-    called = set(re.findall(r"detect_([a-z0-9_]+)\(", main))
-    assert called == {"high_500d_filt", "high_52w_filt"}, called
-    m = re.search(r'LIVE_STRATEGIES = \(([^)]*)\)', src)
-    import kiwoom_trader as kt
-    assert set(re.findall(r'"([a-z0-9_]+)"', m.group(1))) == set(kt.STRATEGY_PRIORITY)
+    assert 'ES.run_configured("kiwoom"' in main
     assert "_HIGH_500D = dict(_HIGH_52W, lookback=500)" in src
+    ksrc = open(os.path.join(OUTPUTS, "kis_live_signal.py"), encoding="utf-8").read()
+    assert 'ES.run_configured("kis"' in ksrc
 
 
 def test_live_map_matches_kiwoom_and_engine():
@@ -2326,11 +2325,13 @@ def test_live_map_matches_kiwoom_and_engine():
 
 
 def test_dashboard_kiwoom_slots_match_trader():
+    """[2026-10-21] 대시보드 슬롯표도 live_config 에서 만든다 — 트레이더와 같은 값."""
     import kiwoom_trader as kt
-    src = open(os.path.join(OUTPUTS, "integrated_dashboard_server.py"), encoding="utf-8").read()
-    assert '_KW_STRATEGY_SLOTS = {"high_500d_filt": 6, "high_52w_filt": 4}' in src
-    assert '_STRATEGY_MAX_SLOTS = {"high_500d_filt": 6, "high_52w_filt": 4}' in src
-    assert kt.STRATEGY_MAX_SLOTS == {"high_500d_filt": 6, "high_52w_filt": 4}
+    import kis_trader as kx
+    import integrated_dashboard_server as d
+    assert d._live_tables("kiwoom")[0] == kt.STRATEGY_MAX_SLOTS == {"high_500d_filt": 6, "high_52w_filt": 4}
+    assert d._live_tables("kis")[0] == kx.STRATEGY_MAX_SLOTS
+    assert d._live_tables("kis")[5] == {"h52w_for3d_mkt": -15, "for_high20_mkt": -10, "gc_for3d": -26}
 
 
 def test_paper_strength_portfolio_buys_exempt_low_score():
