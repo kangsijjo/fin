@@ -312,3 +312,21 @@ def test_pbt_api_passes_exit_rules(dash, monkeypatch):
     cmd = calls[0]
     assert cmd[cmd.index("--stop") + 1] == "-10" and cmd[cmd.index("--take") + 1] == "20"
     assert cmd[cmd.index("--exit-mode") + 1] == "intraday"
+
+
+# ── [2026-10-22] 강도 피처 일일 수집 ──
+def test_scheduler_has_daily_indicator_and_kiwoom_jobs():
+    src = open(os.path.join(os.path.dirname(OUTPUTS), "Stock_AI_Project", "scheduler.py"), encoding="utf-8").read()
+    assert 'schedule.every().day.at("16:15").do(daily_indicators_job)' in src
+    assert 'schedule.every().day.at("17:30").do(kiwoom_daily_job)' in src
+    i = src.index("def kiwoom_daily_job")
+    body = src[i:src.index("def weekend_audit_job")]
+    assert body.count('"--force"') == 2 and "_is_krx_holiday()" in body and "_run_in_background" in body
+    j = src.index("def daily_indicators_job")
+    assert "_korea_stocks_rows(today) >= 1000" in src[j:i], "오늘 가격이 들어온 뒤에 계산"
+
+
+def test_watchdog_thresholds_follow_daily_collection():
+    src = open(os.path.join(OUTPUTS, "watchdog.py"), encoding="utf-8").read()
+    assert '("korea_indicators", "date", 3, True)' in src and '("program_trading", "date", 3, True)' in src
+    assert '("credit_balance", "date", 4, True)' in src

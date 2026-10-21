@@ -4,6 +4,8 @@ import os
 import subprocess
 import sys
 import importlib.util
+import sqlite3
+import threading
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -229,6 +231,77 @@ def kiwoom_weekly_job():
                      "--backfill", "--since", "2022-01-01", "--until", "23:30"])
 
 
+# ── [2026-10-22] 평일 일일 갱신 — 강도(score_ic) 피처가 주 1회 수집이라 주중엔 최대 5일 묵은 값으로
+#    채점되던 문제(학습은 '그날 값')를 없앤다. 둘 다 오래 걸리므로 백그라운드 스레드로 돌려 다른 잡(DART 30분 등)을
+#    막지 않는다. 같은 잡이 아직 돌고 있으면 이번 회차는 건너뜀(겹침 방지). ──
+_BG_JOBS = {}
+
+
+def _run_in_background(name, fn):
+    t = _BG_JOBS.get(name)
+    if t is not None and t.is_alive():
+        log(f"{name}: 이전 실행이 아직 진행 중 — 이번 회차 건너뜀", level='WARNING')
+        return
+    t = threading.Thread(target=fn, name=name, daemon=True)
+    _BG_JOBS[name] = t
+    t.start()
+
+
+def _korea_stocks_rows(date_iso):
+    db = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "stock.db")
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=30)
+    try:
+        return con.execute("SELECT count(*) FROM korea_stocks WHERE date=?", (date_iso,)).fetchone()[0]
+    finally:
+        con.close()
+
+
+def daily_indicators_job():
+    """평일 16:15 — 기술지표(korea_indicators) 전 섹터 재계산(45~90분). 강도 IC 상위 피처(rsi_db·macd_hist_db·bb_pct_db)의 원천.
+    오늘 가격(korea_stocks, 천억이 KIS_Paper 15:50 pykrx_collector 가 넣음)이 들어올 때까지 최대 80분 기다린 뒤 실행
+    → 18:30 신호 전에 끝나는 게 목표. 늦으면 그날 신호는 전일 값(강도 쪽 3거래일 묵음 가드가 그 이상은 버림)."""
+    if not _is_weekday() or _is_krx_holiday():
+        return
+
+    def work():
+        today = datetime.now().strftime('%Y-%m-%d')
+        for _ in range(16):
+            try:
+                if _korea_stocks_rows(today) >= 1000:
+                    break
+            except Exception as e:
+                log(f"korea_stocks 확인 실패: {e}", level='WARNING')
+            time.sleep(300)
+        else:
+            log("오늘 가격(korea_stocks)이 80분 안에 안 들어와 일일 지표 갱신 생략 — 일요일 주간 정비에서 자가치유",
+                level='WARNING')
+            return
+        log("===== 일일 기술지표 갱신 시작 =====")
+        run_pipeline('indicators')
+        log("===== 일일 기술지표 갱신 완료 =====")
+
+    _run_in_background("daily_indicators", work)
+
+
+def kiwoom_daily_job():
+    """평일 17:30 — 키움 신용/대차 + 프로그램매매 일일 증분(공백만, 멱등). 매매(09:00·15:21)가 끝난 뒤라 키 충돌 없는
+    시간대(파일락 공유). 프로그램매매 5일합은 강도 IC 최상위 피처라 18:30 신호 **전에** 그날 값이 있어야 한다.
+    신용잔고는 원래 1~2거래일 늦게 공개 — 이걸로도 신용 전략의 당일 신호는 불가(신호기가 그날 건너뜀).
+    주중 실행이라 --force 필요(키 공유 정책 weekend_guard). 혹시 토큰이 바뀌어도 08:50 장전 예열이 다시 받는다.
+    토요일 kiwoom_weekly_job 은 그대로(30일 공백 메우기 + 프로그램 과거 백필)."""
+    if not _is_weekday() or _is_krx_holiday():
+        return
+
+    def work():
+        since = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        _run_subprocess("키움 신용/대차 수집(일일)",
+                        [sys.executable, "-m", "src.collector.kiwoom_extra", "--since", since, "--force"])
+        _run_subprocess("키움 프로그램매매 수집(일일)",
+                        [sys.executable, "-m", "src.collector.kiwoom_program", "--since", since, "--force"])
+
+    _run_in_background("kiwoom_daily", work)
+
+
 def weekend_audit_job():
     """매주 토요일 07:00 - 데이터 갭 감지 + 자동 백필.
     일요일 07:00 weekly_job 이 깨끗한 데이터로 재학습할 수 있게 미리 정리.
@@ -298,6 +371,8 @@ schedule.every().day.at("09:00").do(korea_market_scanner_job)     # 한국 시�
 schedule.every().day.at("22:20").do(usa_scan_job)                 # 미국 스캔 (데이터 수집)
 schedule.every(30).minutes.do(dart_realtime_job)                  # DART 30분마다
 schedule.every().saturday.at("07:00").do(weekend_audit_job)       # 주말 갭 백필
+schedule.every().day.at("16:15").do(daily_indicators_job)         # [2026-10-22] 평일 기술지표 일일 갱신(백그라운드)
+schedule.every().day.at("17:30").do(kiwoom_daily_job)             # [2026-10-22] 평일 키움 신용·프로그램 일일(백그라운드)
 schedule.every().saturday.at("08:00").do(kiwoom_weekly_job)       # 키움 주간 수집 (신용/대차)
 schedule.every().sunday.at("07:00").do(weekly_job)                # 주간 재학습
 schedule.every().day.at("06:00").do(monthly_sector_update_job)    # 월간 섹터 분류 갱신 (매월 1일만 실제 실행)
@@ -340,6 +415,8 @@ if __name__ == "__main__":
         log("30min dart_realtime_job - DART realtime disclosure")
         log("Sat 07:00 weekend_audit_job - gap backfill")
         log("Sat 08:00 kiwoom_weekly_job - kiwoom credit/program weekly")
+        log("Weekday 16:15 daily_indicators_job - korea_indicators daily (background)")
+        log("Weekday 17:30 kiwoom_daily_job - kiwoom credit/program daily (background)")
         log("Sun 07:00 weekly_job - full retrain")
         log("[disabled] trading/monitor jobs handled by kiwoom_trader.py")
 

@@ -103,6 +103,23 @@ from feature_spec import (
 )
 
 
+STALE_TRADING_DAYS = 3     # [2026-10-22] 이보다 오래된 DB 피처 값은 '없음' 처리(학습=그날 값)
+
+
+def _stale_cutoff(date_str, n=STALE_TRADING_DAYS):
+    """date_str(YYYYMMDD) 기준 n 거래일 전 날짜(YYYYMMDD) — 이보다 앞선 최신값은 묵은 값. 휴장일 반영(market_calendar),
+    실패하면 주말만 건너뛰는 근사."""
+    try:
+        from market_calendar import prev_trading_day, load_holidays
+        hol = load_holidays()
+        d = _dt.strptime(date_str, "%Y%m%d").date()
+        for _ in range(n):
+            d = prev_trading_day(d, hol)
+        return d.strftime("%Y%m%d")
+    except Exception:
+        return (pd.Timestamp(date_str) - pd.offsets.BDay(n)).strftime("%Y%m%d")
+
+
 class FactorScorer:
     """다인수 팩터 점수 엔진 (IC + SHAP)."""
 
@@ -419,6 +436,12 @@ class FactorScorer:
         except Exception as e:
             print(f"[FactorScorer] foreign_ratio 로드 실패: {e}")
 
+        # [2026-10-22] 묵은 값 가드 — 기술지표·신용·프로그램매매는 수집이 밀리면 '그날 이하 최신값'이 며칠 전 값일 수
+        # 있다(주 1회 수집이던 시절 최대 5일). 학습(trades_history)은 그날 값으로 했으므로 STALE_TRADING_DAYS 거래일보다
+        # 오래된 값은 '없음'으로 둔다 → available-only 채점이 있는 피처로만 판단(틀린 값으로 채점하지 않음).
+        stale_cut = _stale_cutoff(date_str)
+        stale_drop = {"korea_indicators": 0, "credit_balance": 0, "program_trading": 0}
+
         # korea_indicators
         try:
             ki = pd.read_sql(
@@ -434,6 +457,9 @@ class FactorScorer:
                 for code, g in ki.groupby("ticker"):
                     g = g[g["date"] <= date_str]
                     if len(g) == 0:
+                        continue
+                    if g["date"].iloc[-1] < stale_cut:
+                        stale_drop["korea_indicators"] += 1
                         continue
                     row = g.iloc[-1]
                     code = str(code).zfill(6)
@@ -458,6 +484,9 @@ class FactorScorer:
                 for code, g in cb.groupby("ticker"):
                     g = g[g["date"] <= date_str]
                     if len(g) == 0:
+                        continue
+                    if g["date"].iloc[-1] < stale_cut:
+                        stale_drop["credit_balance"] += 1
                         continue
                     code = str(code).zfill(6)
                     if code not in result:
@@ -486,6 +515,9 @@ class FactorScorer:
                     g = g[g["date"] <= date_str].sort_values("date").tail(5)
                     if len(g) < 5:          # 5거래일 미만이면 정의 불충족 → 결측 유지
                         continue
+                    if g["date"].iloc[-1] < stale_cut:
+                        stale_drop["program_trading"] += 1
+                        continue
                     code = str(code).zfill(6)
                     if code not in result:
                         result[code] = {}
@@ -495,6 +527,9 @@ class FactorScorer:
         except Exception as e:
             print(f"[FactorScorer] program_trading 로드 실패: {e}")
 
+        if any(stale_drop.values()):
+            print(f"[FactorScorer] 묵은 값 제외({STALE_TRADING_DAYS}거래일 초과, 기준 {stale_cut} 이전): "
+                  + " / ".join(f"{k} {v}종목" for k, v in stale_drop.items() if v))
         return result
 
     # ─────────────────────────────────────────────────────────────────────

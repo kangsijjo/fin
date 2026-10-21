@@ -90,3 +90,25 @@ def test_build_feature_vec_ratio_uses_same_day_trading_value():
     assert "prm_net_5d_ratio" not in fs.build_feature_vec("079960", {"079960": {}}, {}, db)
     assert "prm_net_5d_ratio" not in fs.build_feature_vec("079960", {"079960": {"trading_value": 0.0}}, {}, db)
     assert "prm_net_5d_ratio" not in fs.build_feature_vec("079960", {"079960": {"trading_value": np.nan}}, {}, db)
+
+
+# ── [2026-10-22] 묵은 값 가드 — 3거래일보다 오래된 DB 피처는 '없음' ──
+def test_stale_db_features_are_dropped():
+    rows = [(f"2026-10-{d:02d}", "079960", 10.0) for d in (6, 7, 8, 10, 13)]     # 마지막 10-13
+    con = _db_with_program(rows)
+    con.execute("INSERT INTO korea_indicators VALUES ('2026-10-13','079960',55,0.1,110,90,100)")
+    con.execute("INSERT INTO korea_indicators VALUES ('2026-10-21','000020',45,0.1,110,90,100)")
+    con.execute("INSERT INTO credit_balance VALUES ('2026-10-14','079960',3.2)")
+    con.commit()
+    db = _scorer().prepare_db_features(con, "20261022")          # 3거래일 전 = 10-19
+    assert "rsi_db" not in db.get("079960", {}) and "prm_net_5d_raw" not in db.get("079960", {})
+    assert "crd_remn_rt" not in db.get("079960", {})
+    assert db["000020"]["rsi_db"] == 45.0, "3거래일 이내 값은 그대로"
+    db = _scorer().prepare_db_features(con, "20261015")          # 그때 기준이면 신선
+    assert db["079960"]["rsi_db"] == 55.0 and db["079960"]["crd_remn_rt"] == 3.2
+
+
+def test_stale_cutoff_skips_holidays():
+    from factor_scorer import _stale_cutoff
+    assert _stale_cutoff("20261013") == "20261007", "10-09 한글날 휴장 반영"
+    assert _stale_cutoff("20261022") == "20261019"

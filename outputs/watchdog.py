@@ -259,10 +259,14 @@ def check_data():
     # 그래서 매주 금요일 저녁~토요일에 오경보가 반복됐다(08-22·08-23·08-29·09-12 실측, 전부
     # 다음 일요일 갱신으로 자동 해소). 같은 테이블을 보는 아래 indicator_cov 체크는 임계가 6이라
     # 같은 시각에 '정상'을 냈다 — 두 체크의 기준이 어긋나 있었다. 갱신 하루 지연까지 견디도록 7.
+    # [2026-10-22] 기술지표(평일 16:15)·키움 신용/프로그램(평일 17:30)을 **매일** 수집하게 되어 임계를 좁힘:
+    # korea_indicators 7 → 3영업일, credit_balance 8 → 4영업일(공표 자체가 1~2일 늦음), program_trading 신설 3영업일.
+    # 강도 채점은 3거래일 넘은 값을 버리므로(factor_scorer STALE_TRADING_DAYS) 이보다 오래 멈추면 강도가 조용히 약해진다.
     specs = [("korea_stocks", "date", 5, True), ("supply_demand", "date", 5, True),
-             ("korea_indicators", "date", 7, True), ("foreign_ratio", "date", 5, True),
+             ("korea_indicators", "date", 3, True), ("foreign_ratio", "date", 5, True),
              ("usa_stocks", "date", 6, False), ("macro_indicators", "date", 6, False),
-             ("credit_balance", "date", 8, True), ("news", "pubDate", 6, False)]
+             ("credit_balance", "date", 4, True), ("program_trading", "date", 3, True),
+             ("news", "pubDate", 6, False)]
     # [2026-10-09] credit_balance 10달력일 → 8영업일(휴장일 제외). 주 1회(토 08:00) 수집 +
     # 공표 지연(T+2 안팎)이라 토요일 아침 수집 직전엔 정상이어도 8영업일 안팎이 된다.
     # 달력일 기준은 연휴 주간에 이를 넘겨 10-03 07:45 에 오경보(수집은 08:00 정상 완료)
