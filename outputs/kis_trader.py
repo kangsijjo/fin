@@ -109,6 +109,7 @@ STRATEGY_TAKE = dict(_ACC["take"])
 # 강도 무기록 신호는 매수 전 '강도 재확인'에서 즉석 재계산 후에도 불가하면 차단(fail-closed,
 # 2026-07-21) — 종전 fail-open 이 6 미만 체결의 잔여 경로였음.
 MIN_STRENGTH_SCORE = _ACC["min_strength"]     # 기본 5.7
+STRENGTH_VERSION = _ACC["strength_version"]   # [2026-10-22] v1(공통) / v2(전략별) — 기본 v1
 
 # [2026-10-15 사용자 결정] 강도 필터 면제 전략 — 신호 전량 매수 후보(정렬은 강도순 유지, 무기록이면 tv순).
 # 근거(§48): gc_for3d 는 강도가 높을수록 오히려 나빴다(워크포워드 900건: 필터없음 +0.36% /
@@ -1151,6 +1152,10 @@ def _strength_map(sigs):
             df = df[df["account"].astype(str).str.lower().str.startswith("kis")]
         df["code"] = df["code"].astype(str).str.zfill(6)
         df["score_ic"] = pd.to_numeric(df["score_ic"], errors="coerce")
+        # [2026-10-22] 강도 방식(설정): v2 면 전략별 점수(score_v2)를 쓰고, v2 모델이 없는 전략만 v1 로 대체
+        if STRENGTH_VERSION == "v2" and "score_v2" in df.columns:
+            _v2 = pd.to_numeric(df["score_v2"], errors="coerce")
+            df["score_ic"] = _v2.where(_v2.notna(), df["score_ic"])
         out = {}
         for _, r in df.iterrows():
             if pd.notna(r["score_ic"]):

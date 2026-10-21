@@ -2293,9 +2293,14 @@ def _pbt_parse(req):
     mode = str(b.get("exit_mode") or "close")
     if mode not in ("close", "intraday"):
         return None, "판정 방식은 close / intraday"
+    sv = str(b.get("strength_version") or "v1")
+    if sv not in ("v1", "v2"):
+        return None, "강도 방식은 v1 / v2"
     ex = (["--stop", f"{stop:g}"] if stop is not None else []) + (["--take", f"{take:g}"] if take is not None else [])
     if ex:
         ex += ["--exit-mode", mode]
+    if strength and sv == "v2":
+        ex += ["--strength-version", "v2"]
     return (start, end, names, bool(b.get("luck")), strength, ex), None
 
 
@@ -2481,6 +2486,7 @@ def _lc_view(cfg):
     for a in LC.ACCOUNTS:
         A = cfg["accounts"][a]
         view["accounts"][a] = {"label": LC.ACCOUNT_LABEL[a], "min_strength": A["min_strength"],
+                               "strength_version": A.get("strength_version", "v1"),
                                "strategies": [dict(x, live=LC.live_name(x["engine"])) for x in A["strategies"]]}
     return view
 
@@ -2496,7 +2502,16 @@ def api_live_config():
     except Exception:
         pass
     p = _LC_REGEN["proc"]
-    return jsonify({"ok": True, "config": _lc_view(LC.load()), "engines": _lc_engine_list(),
+    v2 = {}
+    try:
+        import strength_model as SM
+        for f in (Path(SM.MODEL_DIR).glob("*.json") if Path(SM.MODEL_DIR).exists() else []):
+            m = SM.load_model(f.stem)
+            if m:
+                v2[f.stem] = {"trained": m.get("trained"), "n": m.get("n"), "n_ic": len(m.get("ic", {}))}
+    except Exception:
+        pass
+    return jsonify({"ok": True, "config": _lc_view(LC.load()), "engines": _lc_engine_list(), "v2_models": v2,
                     "locked": locked, "lock_msg": why, "regen_after_save": LC.needs_regen(),
                     "regen_running": bool(p is not None and p.poll() is None),
                     "slots_total": LC.SLOTS_TOTAL, "max_strategies": LC.MAX_STRATEGIES, "history": hist})
@@ -2519,7 +2534,8 @@ def _lc_from_request(b):
             e = str(x.get("engine", ""))
             rows.append({"engine": e, "slots": int(x.get("slots") or 0), "exempt": bool(x.get("exempt")),
                          "stop": num(x.get("stop")), "take": num(x.get("take")), "holding": hold.get(e, 20)})
-        new["accounts"][a] = {"min_strength": float(A.get("min_strength", 5.7)), "strategies": rows}
+        new["accounts"][a] = {"min_strength": float(A.get("min_strength", 5.7)),
+                              "strength_version": str(A.get("strength_version") or "v1"), "strategies": rows}
     return new
 
 
@@ -2565,6 +2581,19 @@ def api_live_config_save():
         return jsonify({"ok": False, "msg": str(e)[:400]}), 400
     regen = LC.needs_regen()
     msg = "저장됨 — 오늘 18:30 신호부터 새 설정, 다음 거래일 09:00 매수부터 적용"
+    # 강도 v2 를 쓰는 계좌의 전략 중 모델이 없는 것은 학습(전략당 1~3분). 재생성이 필요하면 regen_signals 가 먼저 학습한다.
+    try:
+        import strength_model as SM
+        v2_missing = sorted({s["engine"] for a in LC.ACCOUNTS if cfg["accounts"][a].get("strength_version") == "v2"
+                             for s in cfg["accounts"][a]["strategies"] if not SM.load_model(s["engine"])})
+    except Exception:
+        v2_missing = []
+    if v2_missing and not regen:
+        (BASE / "logs").mkdir(exist_ok=True)
+        _sp.Popen([_VENV_PYTHON, str(BASE / "strength_model.py"), "--train", ",".join(v2_missing)], cwd=str(BASE),
+                  stdout=open(BASE / "logs" / "run_strength_v2_train.log", "w", encoding="utf-8", errors="replace"),
+                  stderr=_sp.STDOUT, creationflags=_NO_WIN)
+        msg += f" · 강도 v2 모델 학습 시작({', '.join(v2_missing)} — 끝나기 전 신호는 v1 점수로 대체)"
     if regen:
         p = _LC_REGEN["proc"]
         if p is None or p.poll() is not None:
@@ -2605,6 +2634,7 @@ def api_pbt_jobs():
             "start": prm.get("start"), "end": prm.get("eff_end") or prm.get("end"),
             "names": prm.get("names") or [], "strength": prm.get("strength") or [], "luck": bool(prm.get("luck")),
             "stop": prm.get("stop"), "take": prm.get("take"), "exit_mode": prm.get("exit_mode"),
+            "strength_version": prm.get("strength_version"),
             "market_cagr": (d.get("market") or {}).get("cagr"),
             "n_results": len(d.get("results") or []), "n_warn": len(d.get("warnings") or []),
             "error": d.get("error"),
@@ -3115,6 +3145,8 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
       <span style="flex:1"></span>
       <label style="font-size:13px;color:#cbd5e1"><span class="pbt-tip" data-tip="강도 비교(선택)|쉼표로 여러 값: 예 4, 5, 5.7 → 전략마다 [강도 없음] + [≥4] [≥5] [≥5.7] 줄이 나란히 나옴|강도 줄은 그날 후보를 강도 높은 순으로 담음(모의매매와 같은 규칙) · 0 = 거르지 않고 강도순으로만 담기|강도는 신호마다 그날 데이터로 다시 계산 — 가중치는 해마다 그 이전 매매로만 학습(미래 미사용)|처음 한 번은 수 분, 같은 날 다시 돌리면 저장분 사용">강도 비교</span>
         <input type="text" id="pbt-strength" placeholder="예: 4, 5, 5.7" style="width:110px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"></label>
+      <select id="pbt-sver" title="강도 방식 — v1: 라이브 6전략 공통 가중치(종전) / v2: 전략마다 자기 과거 매매로 학습(§62)" style="background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px;font-size:12px">
+        <option value="v1">강도 v1(공통)</option><option value="v2">강도 v2(전략별)</option></select>
       <label style="font-size:13px;color:#cbd5e1"><span class="pbt-tip" data-tip="손절·익절(선택)|비우면 없음(만기에만 팖) · 모든 전략·강도 줄에 같은 규칙|손절은 음수(예 -10), 익절은 양수(예 20) — 진입가(다음날 시가) 기준|판정 '종가 기준' = 그날 종가가 선을 넘으면 다음날 시가에 팖(KIS 모의매매 손절과 같음, 보수적)|'장중 도달' = 그날 저가·고가가 닿으면 그 가격에 팖(키움 익절 지정가와 비슷, 시가부터 넘어 열리면 시가)">손절 %</span>
         <input type="number" id="pbt-stop" placeholder="없음" step="1" min="-50" max="-1" style="width:66px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"></label>
       <label style="font-size:13px;color:#cbd5e1">익절 %
@@ -3938,7 +3970,8 @@ function _pbtBody(){
           names:[...document.querySelectorAll('#pbt-list input:checked')].map(i=>i.value), luck:document.getElementById('pbt-luck').checked,
           strength:(document.getElementById('pbt-strength')||{}).value||'',
           stop:(document.getElementById('pbt-stop')||{}).value||'', take:(document.getElementById('pbt-take')||{}).value||'',
-          exit_mode:(document.getElementById('pbt-exitmode')||{}).value||'close'};
+          exit_mode:(document.getElementById('pbt-exitmode')||{}).value||'close',
+          strength_version:(document.getElementById('pbt-sver')||{}).value||'v1'};
 }
 async function _pbtPost(url){
   const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Action':'1'},body:JSON.stringify(_pbtBody())});
@@ -3970,7 +4003,7 @@ async function pbtHistLoad(silent){
   setHtml('pbt-hist', _pbtHist.length?_pbtHist.map(j=>{
     const t=j.top&&j.top[0];
     const head=`<b style="color:#e2e8f0">${_pbtEsc((j.started||'').slice(0,16))}</b>
-      <span style="color:#94a3b8"> · ${_pbtD(j.start)} ~ ${_pbtD(j.end)} · ${j.names.length}전략${j.strength.length?' · 강도 '+j.strength.join('/'):''}${j.stop!=null?' · 손절 '+j.stop+'%':''}${j.take!=null?' · 익절 +'+j.take+'%':''}${j.luck?' · 운검정':''}</span>
+      <span style="color:#94a3b8"> · ${_pbtD(j.start)} ~ ${_pbtD(j.end)} · ${j.names.length}전략${j.strength.length?' · 강도'+(j.strength_version==='v2'?'v2 ':' ')+j.strength.join('/'):''}${j.stop!=null?' · 손절 '+j.stop+'%':''}${j.take!=null?' · 익절 +'+j.take+'%':''}${j.luck?' · 운검정':''}</span>
       <span style="color:${j.status==='done'?'#10b981':j.status==='error'?'#ef4444':'#38bdf8'}"> · ${st[j.status]||_pbtEsc(j.status)}</span>
       ${t?`<span style="color:#cbd5e1"> · 1위 ${_pbtEsc(t.strategy)} <span class="${clr(t.cagr)}">${f(t.cagr)}</span></span>`:''}`;
     const rows=(j.top||[]).map((r,k)=>`<tr><td>${k+1}</td><td>${_pbtEsc(r.strategy)}</td><td class="r">${r.n_trades??'-'}</td>
@@ -4008,6 +4041,7 @@ function pbtHistReuse(job){
   const sp=document.getElementById('pbt-stop'); if(sp) sp.value=j.stop==null?'':j.stop;
   const tk=document.getElementById('pbt-take'); if(tk) tk.value=j.take==null?'':j.take;
   const em=document.getElementById('pbt-exitmode'); if(em) em.value=j.exit_mode||'close';
+  const sv=document.getElementById('pbt-sver'); if(sv) sv.value=j.strength_version||'v1';
   const lk=document.getElementById('pbt-luck'); if(lk) lk.checked=!!j.luck;
   _pbtCount();
   setHtml('pbt-warn', `<span style="color:#38bdf8;font-size:13px">↺ ${_pbtEsc(job)} 의 조건을 불러왔습니다${miss?` (지금은 없는 전략 ${miss}개 제외)`:''} — [데이터 점검]·[실행]으로 다시 계산</span>`);
@@ -4148,8 +4182,11 @@ function pbtRender(d){
   setHtml('pbt-res', `<table><thead><tr><th><span class="pbt-tip" data-tip="${_pbtEsc(_PBT_TIPS.strategy)}">전략</span></th>${th('n','매매수')}${th('win','승률')}${th('avg','신호 평균')}${th('slot','슬롯 실매매')}
     ${th('tot','총수익')}${th('cagr','CAGR')}${th('mdd','MDD')}${th('sharpe','샤프')}${th('vs','시장 대비')}${years.map(y=>`<th class="r"><span class="pbt-tip" data-tip="${_pbtEsc(_PBT_TIPS.year)}">${y}</span></th>`).join('')}</tr></thead>
     <tbody>${d.market?row(d.market,true):''}${rs.map(r=>row(r,false)).join('')}</tbody></table>
-    <div style="font-size:11px;color:#64748b;margin-top:6px">전략마다 10슬롯 단독 · 다음날 시가 진입·보유일 만기${(p.stop!=null||p.take!=null)?'':'·손절/익절 없음'}·비용 0.245% · 일별 평가(MTM) · 시장 = 코스닥 유니버스 동일가중 · 연도별은 기간 안 각 해의 자본 증감${(p.strength||[]).length?' · <b>강도 줄</b> = 강도 기준 넘은 신호만, 강도 높은 순으로 담음(기본 줄은 강도 무관·전략 점수순)':''}${(p.stop!=null||p.take!=null)?` · <b>청산</b>: ${p.stop!=null?'손절 '+p.stop+'%':''}${p.stop!=null&&p.take!=null?' / ':''}${p.take!=null?'익절 +'+p.take+'%':''} (${p.exit_mode==='intraday'?'장중 도달 → 그 가격':'종가 판정 → 다음날 시가'})`:''}</div>
-    ${d.strength_info&&Object.keys(d.strength_info).length?`<div style="font-size:11px;color:#64748b;margin-top:3px">강도 가중치(워크포워드) — ${Object.entries(d.strength_info).map(([y,v])=>v.skipped?`${y}: 학습 ${v.n_train}건 부족 → 채점 안 함`:`${y}: ${y}년 이전 매매 ${Number(v.n_train).toLocaleString()}건으로 학습(${_pbtEsc((v.top||[]).join(', '))})`).join(' · ')}</div>`:''}`);
+    <div style="font-size:11px;color:#64748b;margin-top:6px">전략마다 10슬롯 단독 · 다음날 시가 진입·보유일 만기${(p.stop!=null||p.take!=null)?'':'·손절/익절 없음'}·비용 0.245% · 일별 평가(MTM) · 시장 = 코스닥 유니버스 동일가중 · 연도별은 기간 안 각 해의 자본 증감${(p.strength||[]).length?` · <b>강도 줄(${_pbtEsc(p.strength_version||'v1')})</b> = 강도 기준 넘은 신호만, 강도 높은 순으로 담음(기본 줄은 강도 무관·전략 점수순)`:''}${(p.stop!=null||p.take!=null)?` · <b>청산</b>: ${p.stop!=null?'손절 '+p.stop+'%':''}${p.stop!=null&&p.take!=null?' / ':''}${p.take!=null?'익절 +'+p.take+'%':''} (${p.exit_mode==='intraday'?'장중 도달 → 그 가격':'종가 판정 → 다음날 시가'})`:''}</div>
+    ${d.strength_info&&Object.keys(d.strength_info).length?`<div style="font-size:11px;color:#64748b;margin-top:3px">강도 ${_pbtEsc(p.strength_version||'v1')} 가중치(워크포워드) — ${
+      p.strength_version==='v2'
+        ? Object.entries(d.strength_info).map(([n,yy])=>`<b>${_pbtEsc(n)}</b>: `+Object.entries(yy||{}).map(([y,v])=>v.skipped||!v.n_ic?`${y} 채점 안 함`:`${y} 지표 ${v.n_ic}개`).join(', ')).join(' · ')
+        : Object.entries(d.strength_info).map(([y,v])=>v.skipped?`${y}: 학습 ${v.n_train}건 부족 → 채점 안 함`:`${y}: ${y}년 이전 매매 ${Number(v.n_train).toLocaleString()}건으로 학습(${_pbtEsc((v.top||[]).join(', '))})`).join(' · ')}</div>`:''}`);
   const L=d.luck;
   if(L&&!L.error&&L.pbo!=null){
     const pass=(L.spa_cash!=null&&L.spa_cash<0.05)||(L.dsr!=null&&L.dsr>=0.95);
@@ -4619,7 +4656,9 @@ function lcRender(){
           <button class="runbtn" style="padding:0 6px" title="위로(먼저 슬롯을 채움)" onclick="lcMove('${a}',${i},-1)">▲</button>
           <button class="runbtn" style="padding:0 6px" title="아래로" onclick="lcMove('${a}',${i},1)">▼</button></td>
         <td><select style="${inp};max-width:330px" onchange="lcSet('${a}',${i},'engine',this.value)">${opts(s.engine)}</select>
-          ${e.note?`<div style="color:#fbbf24;font-size:11px;max-width:340px">⚠ ${_lcEsc(e.note)}</div>`:''}</td>
+          ${e.note?`<div style="color:#fbbf24;font-size:11px;max-width:340px">⚠ ${_lcEsc(e.note)}</div>`:''}
+          ${A.strength_version==='v2'?((L.v2_models||{})[s.engine]?`<div style="color:#64748b;font-size:11px">v2 모델: ${_lcEsc(L.v2_models[s.engine].trained)} · 학습 ${L.v2_models[s.engine].n}건 · 지표 ${L.v2_models[s.engine].n_ic}개</div>`
+            :'<div style="color:#fbbf24;font-size:11px">v2 모델 없음 — 저장하면 학습(1~3분), 그 전엔 v1 점수로 대체</div>'):''}</td>
         <td><input type="number" min="1" max="10" step="1" value="${s.slots}" style="${inp};width:52px" onchange="lcSet('${a}',${i},'slots',this.value)"></td>
         <td style="text-align:center"><input type="checkbox" ${s.exempt?'checked':''} onchange="lcSet('${a}',${i},'exempt',this.checked)" title="체크하면 강도 기준과 상관없이 삼(후보가 많으면 강도 높은 순)"></td>
         <td><input type="number" step="1" min="-50" max="-1" placeholder="없음" value="${s.stop==null?'':s.stop}" style="${inp};width:64px" onchange="lcSet('${a}',${i},'stop',this.value)"></td>
@@ -4633,6 +4672,9 @@ function lcRender(){
         <b style="font-size:14px">${_lcEsc(L.config.accounts[a].label)}</b>
         <label style="font-size:13px;color:#cbd5e1">강도 기준 ≥
           <input type="number" min="0" max="10" step="0.1" value="${A.min_strength}" style="${inp};width:62px" onchange="lcSetAcc('${a}','min_strength',this.value)"></label>
+        <select style="${inp};font-size:12px" title="v1: 라이브 6전략 공통 가중치(종전) / v2: 전략마다 자기 과거 매매로 학습(방향이 해마다 유지된 지표만·시장 지표 제외, §62). v2 권장 기준 5.5" onchange="lcSetAcc('${a}','strength_version',this.value)">
+          <option value="v1"${(A.strength_version||'v1')==='v1'?' selected':''}>강도 v1(공통)</option>
+          <option value="v2"${A.strength_version==='v2'?' selected':''}>강도 v2(전략별)</option></select>
         <span style="font-size:12px;color:${tot===L.slots_total?'#10b981':'#ef4444'}">슬롯 합 ${tot}/${L.slots_total}</span></div>
       <table style="font-size:12px;margin-top:6px;width:100%"><thead><tr><th>순서</th><th>전략</th><th>슬롯</th>
         <th title="강도 기준과 상관없이 삼">강도 면제</th><th title="${_lcEsc(stopSem)}">손절 %</th><th title="${_lcEsc(takeSem)}">익절 %</th><th>보유</th><th></th></tr></thead>
@@ -4666,7 +4708,7 @@ function lcSet(a,i,k,v){
   else if(k==='engine'){ s.engine=v; const e=_lcEng(v); s.holding=e.holding; }
   lcRender();
 }
-function lcSetAcc(a,k,v){ _lcDraft[a][k]=Number(v); lcRender(); }
+function lcSetAcc(a,k,v){ _lcDraft[a][k]=(k==='min_strength')?Number(v):v; lcRender(); }
 function lcMove(a,i,d){ const S=_lcDraft[a].strategies, j=i+d; if(j<0||j>=S.length) return; [S[i],S[j]]=[S[j],S[i]]; lcRender(); }
 function lcDel(a,i){ const S=_lcDraft[a].strategies; if(S.length<=1){ alert('전략은 최소 1개'); return; } S.splice(i,1); lcRender(); }
 function lcAdd(a){

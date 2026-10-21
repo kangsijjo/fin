@@ -197,13 +197,20 @@ def compute_features(df, pairs, con=None, log=print):
 
 def features_cached(df, pairs, log=print):
     """캐시에서 꺼내고 없는 쌍만 계산해 덧붙인다. → DataFrame[code, date, 피처…]"""
-    data_max = str(df["date"].max())
-    key = (FEATURE_VERSION, data_max, datetime.now().strftime("%Y%m%d"))
+    # [2026-10-22] 캐시를 날마다 버리지 않는다 — 과거 날짜의 피처는 바뀌지 않으므로 유지하고, 최근 15거래일 쌍만
+    # 다시 계산한다(잠정 수급의 확정치 교체·신용 공표 지연 등으로 최근 값은 바뀔 수 있음). 강도 v2 학습이 매일
+    # 수만 쌍을 재계산하지 않게 하려는 것.
+    key = (FEATURE_VERSION,)
+    import glob as _glob                  # 기준 = 실제 최신 거래일(잘라 넘긴 df 의 끝이 아니라 일봉 폴더 전체)
+    dates = sorted(os.path.basename(f)[:8] for f in _glob.glob(os.path.join(HERE, "macro_data", "daily", "*.csv"))
+                   if os.path.basename(f)[:8].isdigit())
+    recent = dates[-15] if len(dates) >= 15 else "00000000"
     have = None
     try:
         obj = pd.read_pickle(CACHE)
-        if obj.get("key") == key:
+        if obj.get("key") == key or (isinstance(obj.get("key"), tuple) and obj["key"][:1] == key):
             have = obj["df"]
+            have = have[have["date"].astype(str) < recent]
     except Exception:
         pass
     need = pairs[["code", "date"]].drop_duplicates()
@@ -294,12 +301,17 @@ def walk_forward_scores(X, years, hist=None):
     return out, info
 
 
-def score_trades(df, trades, log=print):
-    """매매 목록 → 같은 순서의 강도 점수 배열 + 연도별 정보."""
-    if not trades:
-        return np.array([]), {}
+def trade_features(df, trades, log=print):
+    """매매 목록 → 같은 순서의 피처 표(신호일 기준)."""
     sig = sig_dates_for(df, trades)
     pairs = pd.DataFrame({"code": [str(t.code).zfill(6) for t in trades], "date": sig})
-    X = features_cached(df, pairs, log=log)
+    return features_cached(df, pairs, log=log)
+
+
+def score_trades(df, trades, log=print):
+    """매매 목록 → 같은 순서의 강도(v1) 점수 배열 + 연도별 정보."""
+    if not trades:
+        return np.array([]), {}
+    X = trade_features(df, trades, log=log)
     years = [str(t.entry_date)[:4] for t in trades]
     return walk_forward_scores(X, years)

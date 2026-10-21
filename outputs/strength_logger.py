@@ -51,6 +51,7 @@ _FIELDS = [
     "logged_at", "signal_date", "account", "strategy", "code", "name",
     "entry_close", "market_strong", "score_ic", "n_factors", "score_tv",
     "ai_prob", "slot_rank", "factors_json",
+    "score_v2",          # [2026-10-22] 강도 v2(전략별 학습, strength_model) — 모델 없으면 공란. 열 추가는 _migrate_header 가 정합화
 ]
 
 # stock.db 후보 경로 (live_signal._open_stock_db 와 동일 정책)
@@ -192,6 +193,7 @@ def _build_rows(account, df, last_date, signals, *, verbose=True):
         n_factors = None
         score_tv = None
         ai_prob = None   # meta_model_v4 forward 예측확률(big-win)
+        score_v2 = None
         feats = {}
         if scorer is not None:
             try:
@@ -208,6 +210,13 @@ def _build_rows(account, df, last_date, signals, *, verbose=True):
                 score_ic = _clean(ic.get("total"))
                 n_factors = ic.get("n_available")
                 score_tv = _clean(feats.get("score_tv"))
+                # [2026-10-22] 강도 v2 — 같은 피처로 '그 전략 자신의' 가중치 채점(모델 없으면 None → 트레이더가 v1 로 대체)
+                try:
+                    import live_config as _LC
+                    import strength_model as _SM
+                    score_v2 = _SM.score(_LC.engine_name(strat), feats)
+                except Exception:
+                    score_v2 = None
                 # forward AI 누적: 신호시점 모델 확률(없으면 None) — 나중에 실현수익과 조인
                 try:
                     ai_prob = scorer.model_proba(feats)
@@ -231,6 +240,7 @@ def _build_rows(account, df, last_date, signals, *, verbose=True):
             "ai_prob": ai_prob if ai_prob is not None else "",
             "slot_rank": None,  # 아래서 채움
             "factors_json": json.dumps(factors_clean, ensure_ascii=False),
+            "score_v2": score_v2 if score_v2 is not None else "",
         })
 
     _assign_slot_rank(rows)

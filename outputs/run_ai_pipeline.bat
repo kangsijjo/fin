@@ -128,6 +128,17 @@ cd /d "%OUT%"
 if errorlevel 1 ( echo [WARN] full strategy backtest failed ^(exit !ERRORLEVEL!^) - dashboard keeps last table >> "%LOG%" )
 echo [%time%] [6] done.
 
+REM ---- 7 (NOT gated) strength v2 weekly retrain (2026-10-22, see system doc 62) ----
+REM   strength_model.py --train : per-strategy IC weights for every strategy in db\live_config.json
+REM   (both accounts). Live signals score with the new weights from Monday. Failure = warning only
+REM   (the previous model file stays; strategies without a model fall back to v1 scores).
+echo [%time%] [7] Strength v2 retrain (strength_model --train)...
+echo [7] strength_model.py --train ... >> "%LOG%"
+cd /d "%OUT%"
+"%PYEXE%" -u strength_model.py --train >> "%LOG%" 2>&1
+if errorlevel 1 ( echo [WARN] strength v2 retrain failed ^(exit !ERRORLEVEL!^) - previous models kept >> "%LOG%" )
+echo [%time%] [7] done.
+
 echo [%date% %time%] AI pipeline DONE >> "%LOG%"
 del "%LOCK%" 2>nul
 Forfiles /P "C:\fin\logs" /M ai_pipeline_*.log /D -60 /C "cmd /c del @file" 2>nul

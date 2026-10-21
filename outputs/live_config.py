@@ -24,6 +24,7 @@ MAX_STRATEGIES = 4
 ACCOUNTS = ("kiwoom", "kis")
 ACCOUNT_LABEL = {"kiwoom": "키움 안C", "kis": "KIS 안D"}
 ALIAS = {"star_high_52w_20_filt": "high_52w_filt", "star_high_500d_20": "high_500d_filt"}   # engine → live
+STRENGTH_VERSIONS = {"v1": "공통(라이브 6전략 풀 학습, 종전)", "v2": "전략별(그 전략 자신의 과거 매매로 학습, §62)"}
 LOCK_WINDOW = ("0830", "1540")      # 거래일 이 시간엔 변경 금지(장전 예열·매수·손절·만기매도가 도는 구간)
 SIGNAL_TIME = "1825"                # 이 시각 이후(또는 휴장일)에 바꾸면 오늘 신호를 새 설정으로 다시 만든다
 
@@ -86,6 +87,8 @@ def validate(cfg, engine_names=None):
         ms = A.get("min_strength")
         if not isinstance(ms, (int, float)) or not 0 <= ms <= 10:
             errs.append(f"{lab}: 강도 기준은 0~10")
+        if A.get("strength_version", "v1") not in STRENGTH_VERSIONS:
+            errs.append(f"{lab}: 강도 방식은 v1/v2")
         S = A.get("strategies")
         if not isinstance(S, list) or not 1 <= len(S) <= MAX_STRATEGIES:
             errs.append(f"{lab}: 전략은 1~{MAX_STRATEGIES}개")
@@ -148,6 +151,7 @@ def account(acct, cfg=None):
     A = cfg["accounts"][acct]
     rows = A["strategies"]
     out = {"min_strength": float(A["min_strength"]), "rows": rows,
+           "strength_version": A.get("strength_version", "v1"),
            "slots": {}, "priority": [], "exempt": set(), "stop": {}, "take": {}, "holding": {}, "engine": {}}
     # 누적 규칙 먼저(옛 보유분), 그 위에 현재 규칙
     for ln, r in (cfg.get("exit_rules") or {}).items():
@@ -212,6 +216,9 @@ def diff(old, new):
         o, n = old["accounts"][a], new["accounts"][a]
         if o["min_strength"] != n["min_strength"]:
             out.append(f"{lab} 강도 기준 {o['min_strength']:g} → {n['min_strength']:g}")
+        if o.get("strength_version", "v1") != n.get("strength_version", "v1"):
+            out.append(f"{lab} 강도 방식 {o.get('strength_version', 'v1')} → {n.get('strength_version', 'v1')}"
+                       f" ({STRENGTH_VERSIONS.get(n.get('strength_version', 'v1'), '')})")
         om = {s["engine"]: s for s in o["strategies"]}
         nm = {s["engine"]: s for s in n["strategies"]}
         for e in nm:
@@ -245,6 +252,7 @@ def save(new, note="", engine_names=None):
     old.pop("_fallback", None)
     cfg = {"version": 1, "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "note": note or "",
            "accounts": {a: {"min_strength": float(new["accounts"][a]["min_strength"]),
+                            "strength_version": new["accounts"][a].get("strength_version", "v1"),
                             "strategies": [{k: s.get(k) for k in ("engine", "slots", "exempt", "stop", "take", "holding")}
                                            for s in new["accounts"][a]["strategies"]]}
                         for a in ACCOUNTS}}

@@ -531,12 +531,14 @@ def _with_score(t, sc):
                            gross_pct=getattr(t, "gross_pct", t.net_pct), score=float(sc))
 
 
-def run_job(job, start, end, names, luck, strength=None, stop=None, take=None, exit_mode="close"):
+def run_job(job, start, end, names, luck, strength=None, stop=None, take=None, exit_mode="close",
+            strength_version="v1"):
     t0 = time.time()
     strength = list(strength or [])
     state = {"job": job, "status": "running", "params": {"start": start, "end": end, "names": names,
              "luck": luck, "strength": strength, "stop": stop, "take": take,
-             "exit_mode": exit_mode if (stop is not None or take is not None) else None}, "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+             "exit_mode": exit_mode if (stop is not None or take is not None) else None,
+             "strength_version": strength_version if strength else None}, "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
              "progress": [0, len(names)], "current": "", "warnings": [], "results": [],
              "market": None, "luck": None}
     _write(job, state)
@@ -570,6 +572,22 @@ def run_job(job, start, end, names, luck, strength=None, stop=None, take=None, e
     # 기간 막바지 진입분이 통째로 사라져 마지막 몇 주가 '현금'으로 계산된다. 기간 안 진입만 집계하고,
     # 종료일에 미청산이면 그날 종가로 평가(자본곡선은 종료일에서 끝남).
     i1 = cal.index(win[-1])
+    train_tables = {}
+    if strength and strength_version == "v2":
+        # 강도 v2: 전략마다 '자기 과거 매매' 학습 표본이 필요 — 주간 학습 저장분(db/strength_v2/*_train.pkl)을 쓰고,
+        # 없으면 전체 기간으로 지금 만든다(잘라내기 전 df). 각 해 Y 는 Y 이전 매매로만 학습(워크포워드).
+        import strength_model as SM
+        for n in names:
+            state["current"] = f"강도 v2 학습 표본 준비: {n}"
+            _write(job, state)
+            try:
+                p = SM.train_path(n)
+                train_tables[n] = pd.read_pickle(p) if os.path.exists(p) else SM.build_train_table(n, df, log=print)
+            except Exception as e:
+                train_tables[n] = None
+                state["warnings"].append({"level": "warn", "strategy": n,
+                                          "msg": f"강도 v2 학습 표본을 만들지 못함({type(e).__name__}) — 이 전략 강도 줄 없음"})
+        gc.collect()
     df = df[(df["date"] >= cal[max(0, i0 - need - 5)]) &
             (df["date"] <= cal[min(len(cal) - 1, i1 + 45)])].reset_index(drop=True)
     m = df[df["date"].isin(win)].groupby("date")["change_pct"].mean().reindex(win).fillna(0)
@@ -612,7 +630,19 @@ def run_job(job, start, end, names, luck, strength=None, stop=None, take=None, e
         import strength_backtest as SB
         allt = [t for n in kept for t in kept[n]]
         try:
-            scores, info = SB.score_trades(df, allt, log=print)
+            if strength_version == "v2":
+                import strength_model as SM
+                X = SB.trade_features(df, allt, log=print)
+                scores, info, pos = np.full(len(allt), np.nan), {}, 0
+                for n in kept:
+                    k = len(kept[n])
+                    Xn = X.iloc[pos:pos + k].reset_index(drop=True)
+                    yrs = [str(t.entry_date)[:4] for t in kept[n]]
+                    scores[pos:pos + k], inf = SM.walk_forward(train_tables.get(n), Xn, yrs)
+                    info[n] = inf
+                    pos += k
+            else:
+                scores, info = SB.score_trades(df, allt, log=print)
         except Exception as e:
             scores, info = None, {}
             state["warnings"].append({"level": "error", "strategy": "",
@@ -686,6 +716,7 @@ def main():
     ap.add_argument("--stop", type=float, default=None, help="손절 %(음수, 예 -10)")
     ap.add_argument("--take", type=float, default=None, help="익절 %(양수, 예 20)")
     ap.add_argument("--exit-mode", default="close", choices=sorted(EXIT_MODES))
+    ap.add_argument("--strength-version", default="v1", choices=["v1", "v2"], help="강도 방식 v1(공통)/v2(전략별)")
     a = ap.parse_args()
     names = [n.strip() for n in a.names.split(",") if n.strip()]
     if a.check:
@@ -714,7 +745,8 @@ def main():
     job = a.job or datetime.now().strftime("pbt_%Y%m%d_%H%M%S")
     try:
         stop, take = parse_exits(a.stop, a.take)
-        run_job(job, a.start, a.end, names, a.luck, parse_strength(a.strength), stop, take, a.exit_mode)
+        run_job(job, a.start, a.end, names, a.luck, parse_strength(a.strength), stop, take, a.exit_mode,
+                a.strength_version)
     except Exception as e:
         try:
             st = json.load(open(_job_path(job), encoding="utf-8"))

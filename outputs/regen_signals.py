@@ -23,6 +23,14 @@ def main():
     py = sys.executable
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
     res = []
+    # [2026-10-22] 강도 v2 를 쓰는데 모델이 없는 전략은 먼저 학습(신호 기록 때 v2 점수가 같이 남도록)
+    try:
+        import live_config as LC
+        cfg = LC.load()
+        if any(cfg["accounts"][a].get("strength_version") == "v2" for a in LC.ACCOUNTS):
+            subprocess.run([py, "-u", "strength_model.py", "--train", "--missing-only"], cwd=HERE, env=env)
+    except Exception as e:
+        print(f"[regen] 강도 v2 학습 건너뜀: {e}")
     for script, label in (("live_signal.py", "키움"), ("kis_live_signal.py", "KIS")):
         print(f"[regen] {datetime.now():%H:%M:%S} {script} 시작", flush=True)
         r = subprocess.run([py, "-u", script], cwd=HERE, env=env)

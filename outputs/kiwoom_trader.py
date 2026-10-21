@@ -222,6 +222,7 @@ CIRCUIT_BREAKER_PCT = -40.0
 # forward 표본 축적도 느려짐. 강도 기록 없는 신호는 통과(fail-open) — 기록 실패로
 # 매매가 전면 중단되는 것을 막기 위함(이 경로로는 6 미만도 통과 가능).
 MIN_STRENGTH_SCORE = _ACC["min_strength"]     # 기본 5.7
+STRENGTH_VERSION = _ACC["strength_version"]   # [2026-10-22] v1(공통) / v2(전략별) — 기본 v1
 
 
 def _strength_gate(strat, sc):
@@ -619,6 +620,10 @@ def _strength_map(sigs):
             df = df[df["account"].astype(str).str.lower().str.startswith("kiwoom")]
         df["code"] = df["code"].astype(str).str.zfill(6)
         df["score_ic"] = pd.to_numeric(df["score_ic"], errors="coerce")
+        # [2026-10-22] 강도 방식(설정): v2 면 전략별 점수(score_v2)를 쓰고, v2 모델이 없는 전략만 v1 로 대체
+        if STRENGTH_VERSION == "v2" and "score_v2" in df.columns:
+            _v2 = pd.to_numeric(df["score_v2"], errors="coerce")
+            df["score_ic"] = _v2.where(_v2.notna(), df["score_ic"])
         out = {}
         for _, r in df.iterrows():
             if pd.notna(r["score_ic"]):
