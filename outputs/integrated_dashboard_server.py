@@ -3876,7 +3876,7 @@ function fillBacktest(bt, sc){
 let _pbtMeta=null, _pbtTimer=null, _pbtLastRes=null;
 // ── 지표 설명(마우스를 올리면 뜸) — '|' 는 줄바꿈 (2026-10-18) ──
 const _PBT_TIPS={
-  strategy:'전략 이름을 누르면 어떤 조건으로 사고파는지 쉬운 말로 설명이 뜹니다|★ = 지금 모의매매에서 쓰는 전략',
+  strategy:'전략 이름을 누르면 어떤 조건으로 사고파는지 쉬운 말로 설명이 뜹니다|★ = 지금 모의매매에서 쓰는 전략|이름 옆 ℹ 참고 · ⚠ 경고(데이터·표본 부족) · ⛔ 오류 — 마우스를 올리면 이유와 결과를 읽는 법이 뜸',
   n:'기간 안에 신호가 난 매매 건수(10칸이 다 차서 실제로 못 산 신호도 포함)|(미완료 N) = 종료일 뒤에 팔리는 매매',
   win:'끝난 매매 중 이익으로 끝난 비율|높아도 손실 한 번이 크면 전체는 마이너스일 수 있음',
   avg:'신호 전부를 샀다고 칠 때 한 건 평균 수익률(비용 포함)|10칸 제약 없이 본 ’신호 자체의 실력’',
@@ -3978,6 +3978,17 @@ async function _pbtPost(url){
   const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Action':'1'},body:JSON.stringify(_pbtBody())});
   let d={}; try{ d=await r.json(); }catch(e){ d={ok:false,msg:'응답 해석 실패 ('+r.status+')'}; }
   return d;
+}
+// [2026-10-22] 경고 문장 → '그래서 결과를 어떻게 읽나' 한 줄(옛 기록에도 적용)
+function _pbtWarnMeaning(m){
+  m=String(m||'');
+  if(/강도를 매기지 못한/.test(m)&&!/짧은 기간/.test(m)) return '강도 v2는 해마다 그 이전 매매로만 학습하므로 첫 해들은 강도를 못 매김 — 강도 줄은 기본 줄보다 짧은 기간(뒤쪽 해들)만 본 결과';
+  if(/표본 부족/.test(m)) return '매매 수가 적어 우연에 크게 좌우됨 — 숫자를 그대로 믿지 말 것';
+  if(/과거 \\d+거래일이 필요/.test(m)) return '기간 초반엔 계산에 필요한 과거 가격이 없어 신호가 안 나옴 — 초반 성과는 현금 상태';
+  if(/데이터는 .* 부터입니다/.test(m)) return '그 전 기간은 신호가 없어 현금 — 기간 전체 CAGR이 실제보다 낮게 보일 수 있음';
+  if(/멈춰 있습니다/.test(m)) return '최근 구간은 신호가 없어 현금 — 수집 버튼으로 채운 뒤 다시 계산 권장';
+  if(/데이터가 없습니다/.test(m)) return '필요한 보조 데이터가 없어 이 전략 결과는 거의 의미 없음';
+  return '';
 }
 function _pbtWarnHtml(ws, head){
   if(!ws||!ws.length) return head?`<div style="padding:8px 12px;border-radius:8px;background:rgba(16,185,129,.08);border:1px solid #065f46;color:#6ee7b7;font-size:13px">✓ ${head} — 데이터 부족 없음</div>`:'';
@@ -4162,12 +4173,22 @@ function pbtRender(d){
   const years=[...new Set([...(d.market?Object.keys(d.market.yearly||{}):[]),...rs.flatMap(r=>Object.keys(r.yearly||{}))])].sort();
   const f=(v,k)=>v==null||isNaN(v)?'-':(v>0?'+':'')+Number(v).toFixed(k==null?2:k)+'%';
   const c=v=>v==null?'':clr(v);
-  const wmap={}; (d.warnings||[]).forEach(w=>{ if(w.strategy){ (wmap[w.strategy]=wmap[w.strategy]||[]).push(w.msg); } });
+  // [2026-10-22] 줄마다 경고 표시 — 수준별 아이콘(⛔ 오류/⚠ 경고/ℹ 참고) + 마우스 올리면 이유·뜻(전략 설명 팝업에 가리지 않게 pbt-tip 사용).
+  //   강도 관련 경고는 강도 줄(└ 강도 ≥x)에, 나머지는 전략 줄에 붙인다.
+  const wmap={}; (d.warnings||[]).forEach(w=>{ if(!w.strategy) return;
+    const strength=w.row==='strength'||/강도 줄/.test(w.msg||'');
+    const k=strength?'S:'+w.strategy:w.strategy; (wmap[k]=wmap[k]||[]).push(w); });
+  const _wMark=ws=>{ if(!ws||!ws.length) return '';
+    const lv=ws.some(w=>w.level==='error')?'error':ws.some(w=>w.level==='warn')?'warn':'info';
+    const ic={error:'⛔',warn:'⚠',info:'ℹ'}[lv], col={error:'#ef4444',warn:'#fbbf24',info:'#60a5fa'}[lv];
+    const head={error:'⛔ 오류 — 이 줄 결과를 믿기 어려움',warn:'⚠ 경고 — 데이터·표본이 모자라 결과가 덜 믿을 만함',info:'ℹ 참고 — 결과를 읽을 때 알아둘 점'}[lv];
+    const lines=ws.map(w=>'· '+w.msg+(_pbtWarnMeaning(w.msg)?' → '+_pbtWarnMeaning(w.msg):''));
+    return ` <span class="pbt-tip" data-tip="${_pbtEsc([head,...lines].join('|').replace(/"/g,"'"))}" style="color:${col};cursor:help">${ic}</span>`; };
   // ★ 는 '지금' 운용 중인 전략 기준(작업 파일의 live 는 실행 당시 값이라 교체 후엔 틀릴 수 있다)
   const _live=n=>{ const x=((_pbtMeta&&_pbtMeta.strategies)||[]).find(z=>z.name===n); return x?x.live:''; };
   const row=(r,isM)=>`<tr${r.strength_min!=null?' style="background:#0b1220;font-size:12px"':(!isM&&_live(r.strategy)?' style="background:rgba(251,191,36,0.06)"':'')}${isM?' style="background:#111827;font-style:italic"':''}>
-    <td style="font-weight:500">${r.strength_min!=null?`<span style="color:#64748b;padding-left:14px">└ 강도 ≥${r.strength_min}</span> <span style="color:#64748b;font-size:11px" title="이 전략 신호 중 강도 기준을 넘은 비율">(통과 ${r.pass_pct??'-'}%)</span>`:
-      `${!isM&&_live(r.strategy)?'<span style="color:#fbbf24">★ </span>':''}${isM?_pbtEsc(r.name):`<a href="javascript:void(0)" onclick="pbtExplain('${_pbtEsc(r.strategy)}')" style="color:#93c5fd;text-decoration:underline dotted" title="눌러서 전략 설명 보기">${_pbtEsc(r.strategy)}</a>`}`}${wmap[r.strategy]?` <span title="${_pbtEsc(wmap[r.strategy].join(' / '))}" style="color:#fbbf24;cursor:help">⚠</span>`:''}${r.error?` <span style="color:#ef4444" title="${_pbtEsc(r.error)}">오류</span>`:''}</td>
+    <td style="font-weight:500">${r.strength_min!=null?`<span style="color:#64748b;padding-left:14px">└ 강도 ≥${r.strength_min}</span> <span style="color:#64748b;font-size:11px" title="이 전략 신호 중 강도 기준을 넘은 비율">(통과 ${r.pass_pct??'-'}%)</span>${_wMark([...(wmap['S:'+r.base]||[]),...(wmap[r.strategy]||[])])}`:
+      `${!isM&&_live(r.strategy)?'<span style="color:#fbbf24">★ </span>':''}${isM?_pbtEsc(r.name):`<a href="javascript:void(0)" onclick="pbtExplain('${_pbtEsc(r.strategy)}')" style="color:#93c5fd;text-decoration:underline dotted" title="눌러서 전략 설명 보기">${_pbtEsc(r.strategy)}</a>`}`}${r.strength_min==null?_wMark(wmap[r.strategy]):''}${r.error?` <span style="color:#ef4444" title="${_pbtEsc(r.error)}">오류</span>`:''}</td>
     <td class="r" style="color:#94a3b8">${isM?'-':(r.n_trades??'-')}${!isM&&r.n_open?`<span style="font-size:10px" title="기간 안에 신호가 났지만 종료일 뒤에 청산되는 매매 — 신호 평균·승률에서 제외, 자본곡선에선 실제로 보유 중인 것만 종료일 종가로 평가"> (미완료 ${r.n_open})</span>`:''}</td>
     <td class="r">${isM||r.win==null?'-':r.win.toFixed(1)+'%'}</td>
     <td class="r ${c(r.avg_net)}">${isM?'-':f(r.avg_net)}</td>

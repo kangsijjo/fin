@@ -4,7 +4,7 @@ period_backtest.py — 기간 지정 백테스트 테스트기 (대시보드 백
 
 무엇을 하나
   선택한 전략들을 지정 기간으로 백테스트한다. **전략마다 10슬롯을 단독 사용**(§50·§52 와 같은 규약),
-  엔진 규칙(다음날 시가 진입·보유일 만기·손절/익절/강도필터 없음·비용 0.245%), 일별 MTM 자본곡선.
+  엔진 규칙(다음날 시가 진입·보유일 만기·손절/익절/강도필터 없음·비용 왕복 ≈0.33% 연도별 거래세), 일별 MTM 자본곡선.
   ① 실행 전 데이터 충분성 점검 → 부족하면 경고(대시보드 + 텔레그램)
      · 가격 데이터 범위 밖(시작 이전 = 오류 / 종료 이후 = 마지막 데이터일로 자름)
      · 전략별 워밍업(과거 N거래일 필요 — 500일 신고가면 500일)이 기간 시작 전에 없음
@@ -79,23 +79,10 @@ def strategies_by_name():
 
 def warmup_days(s) -> int:
     """신호가 나오려면 기간 시작 전에 필요한 과거 거래일 수(근사·보수적).
-    전략 파라미터 중 '창 길이'의 최댓값 + 시장강세 게이트(60일) + 여유 5일."""
+    전략 파라미터 중 '창 길이'의 최댓값(_swing_base.signal_lookback) + 시장강세 게이트(60일) + 여유 5일."""
+    from strategies._swing_base import signal_lookback
     v = vars(s)
-    keys = ("lookback", "baseline", "high_period", "slow", "slow_ma", "ma_period", "period",
-            "bb_period", "ma_days", "accum_days", "window", "rsi_period", "k_period", "vol_ma_days",
-            "n_days")
-    w = max([int(v[k]) for k in keys if isinstance(v.get(k), (int, float)) and v.get(k)] or [0])
-    if v.get("squeeze_window"):
-        w = max(w, int(v["squeeze_window"]) + int(v.get("bb_period") or 20))
-    cls = type(s).__name__
-    if cls == "PullbackMaStrategy":
-        w = max(w, 60 + int(v.get("ma60_slope_days") or 5))
-    if cls == "MaRibbonStrategy":
-        w = max(w, 120)
-    if cls == "FiveDayMomentumStrategy":
-        w = max(w, 5)
-    if not w:
-        w = 260
+    w = signal_lookback(s)
     if v.get("use_mkt") or v.get("use_market_filter"):
         w += int(v.get("mkt_ma") or 60)
     return w + 5
@@ -291,9 +278,11 @@ def equity_curve(trades, price_map, cal, slots=SLOTS, capital=CAPITAL0):
     by = {d: g.sort_values("s", ascending=False) for d, g in T.groupby("e")}
     cash, pos, taken = float(capital), [], []
     for d in cal:
+        # [2026-10-23] 실매매와 같은 순서: 어제까지 판 것만 아침에 쓰고(오늘 만기분은 매수 뒤 장 마감에 반영),
+        # 이미 들고 있는 종목은 다시 사지 않는다 — capital_simulator.simulate_capital 과 같은 규칙(테스트 고정).
         keep = []
         for p in pos:
-            if p["x"] <= d:
+            if p["x"] < d:
                 cash += p["v"] * (1 + p["n"] / 100)
             else:
                 keep.append(p)
@@ -301,6 +290,8 @@ def equity_curve(trades, price_map, cal, slots=SLOTS, capital=CAPITAL0):
         g = by.get(d)
         if g is not None:
             for r in g.itertuples():
+                if any(p["c"] == r.c for p in pos):
+                    continue
                 left = slots - len(pos)
                 if left <= 0:
                     break
@@ -310,6 +301,13 @@ def equity_curve(trades, price_map, cal, slots=SLOTS, capital=CAPITAL0):
                 pos.append({"c": r.c, "x": r.x, "v": v, "p": r.p, "n": r.n})
                 taken.append(r.n)
                 cash -= v
+        keep = []
+        for p in pos:                                  # 오늘 종가 청산분
+            if p["x"] <= d:
+                cash += p["v"] * (1 + p["n"] / 100)
+            else:
+                keep.append(p)
+        pos = keep
         inv = 0.0
         for p in pos:
             px = price_map.get((p["c"], d))
@@ -656,8 +654,12 @@ def run_job(job, start, end, names, luck, strength=None, stop=None, take=None, e
                 pos += len(tw)
                 n_un = int(np.isnan(sc).sum())
                 if n_un:
-                    state["warnings"].append({"level": "info", "strategy": n,
-                                              "msg": f"강도를 매기지 못한 신호 {n_un:,}건(학습 표본 부족한 해) — 강도 줄에서 제외"})
+                    # [2026-10-22] 어느 해가 빠졌는지·무슨 뜻인지까지 적는다(대시보드 ⚠/ℹ 표시에 그대로 뜸)
+                    yrs_un = sorted({str(t.entry_date)[:4] for t, v in zip(tw, sc) if v != v})
+                    state["warnings"].append({"level": "info", "strategy": n, "row": "strength",
+                                              "msg": f"강도를 매기지 못한 신호 {n_un:,}건 / 전체 {len(tw):,}건"
+                                                     f"({', '.join(yrs_un)}년) — 그 해 이전의 학습 표본이 모자라서. "
+                                                     f"이 신호들은 강도 줄에서 빠지므로 강도 줄은 기본 줄보다 짧은 기간을 본 결과"})
                 for th in strength:
                     lab = f"{n} ≥{th:g}"
                     state["current"] = lab
