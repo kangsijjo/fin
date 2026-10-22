@@ -3194,7 +3194,7 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
       <b>신호 평균%</b> = 신호가 뜬 매매 전체의 평균 · <b>슬롯 실매매%</b> = 10슬롯이 실제로 산 매매(거래대금 큰 순)의 평균 —
       두 값이 다르면 자본곡선은 슬롯 쪽을 따른다(예: rsi_reversal 신호 +0.71% / 실매매 −1.62% → 자본 −100%).
       CAGR·MDD·샤프는 일별 평가(MTM) 자본곡선. <b>최근2년</b> = 표본외 구간(과거에만 좋았던 전략 판별).<br>
-      ⚠ 엔진 가정: 한 전략이 10슬롯을 단독 사용, 보유일 만기 청산(라이브의 KIS 손절·키움 익절 미반영), 비용 0.245%.
+      ⚠ 엔진 가정: 한 전략이 10슬롯을 단독 사용, 보유일 만기 청산(라이브의 KIS 손절·키움 익절 미반영), 비용 왕복 ≈0.33%(매도 연도 실제 거래세).
       라이브 포트(전략 혼합 4/4/2·강도 정렬)와 같지 않다 — 전략 간 '상대 비교'용. ★ = 라이브 운용 중. 매주 일요일 AI 파이프라인 뒤 자동 갱신.
     </div>
     <div style="overflow-x:auto"><table><thead><tr>
@@ -4183,7 +4183,7 @@ function pbtRender(d){
   setHtml('pbt-res', `<table><thead><tr><th><span class="pbt-tip" data-tip="${_pbtEsc(_PBT_TIPS.strategy)}">전략</span></th>${th('n','매매수')}${th('win','승률')}${th('avg','신호 평균')}${th('slot','슬롯 실매매')}
     ${th('tot','총수익')}${th('cagr','CAGR')}${th('mdd','MDD')}${th('sharpe','샤프')}${th('vs','시장 대비')}${years.map(y=>`<th class="r"><span class="pbt-tip" data-tip="${_pbtEsc(_PBT_TIPS.year)}">${y}</span></th>`).join('')}</tr></thead>
     <tbody>${d.market?row(d.market,true):''}${rs.map(r=>row(r,false)).join('')}</tbody></table>
-    <div style="font-size:11px;color:#64748b;margin-top:6px">전략마다 10슬롯 단독 · 다음날 시가 진입·보유일 만기${(p.stop!=null||p.take!=null)?'':'·손절/익절 없음'}·비용 0.245% · 일별 평가(MTM) · 시장 = 코스닥 유니버스 동일가중 · 연도별은 기간 안 각 해의 자본 증감${(p.strength||[]).length?` · <b>강도 줄(${_pbtEsc(p.strength_version||'v1')})</b> = 강도 기준 넘은 신호만, 강도 높은 순으로 담음(기본 줄은 강도 무관·전략 점수순)`:''}${(p.stop!=null||p.take!=null)?` · <b>청산</b>: ${p.stop!=null?'손절 '+p.stop+'%':''}${p.stop!=null&&p.take!=null?' / ':''}${p.take!=null?'익절 +'+p.take+'%':''} (${p.exit_mode==='intraday'?'장중 도달 → 그 가격':'종가 판정 → 다음날 시가'})`:''}</div>
+    <div style="font-size:11px;color:#64748b;margin-top:6px">전략마다 10슬롯 단독 · 다음날 시가 진입·보유일 만기${(p.stop!=null||p.take!=null)?'':'·손절/익절 없음'}·비용 왕복 ≈0.33%(연도별 거래세) · 상한가 시초가 미체결 · 상폐·정지는 마지막 거래가 청산 · 분할·병합 낀 신호 제외 · 일별 평가(MTM) · 시장 = 코스닥 유니버스 동일가중 · 연도별은 기간 안 각 해의 자본 증감${(p.strength||[]).length?` · <b>강도 줄(${_pbtEsc(p.strength_version||'v1')})</b> = 강도 기준 넘은 신호만, 강도 높은 순으로 담음(기본 줄은 강도 무관·전략 점수순)`:''}${(p.stop!=null||p.take!=null)?` · <b>청산</b>: ${p.stop!=null?'손절 '+p.stop+'%':''}${p.stop!=null&&p.take!=null?' / ':''}${p.take!=null?'익절 +'+p.take+'%':''} (${p.exit_mode==='intraday'?'장중 도달 → 그 가격':'종가 판정 → 다음날 시가'})`:''}</div>
     ${d.strength_info&&Object.keys(d.strength_info).length?`<div style="font-size:11px;color:#64748b;margin-top:3px">강도 ${_pbtEsc(p.strength_version||'v1')} 가중치(워크포워드) — ${
       p.strength_version==='v2'
         ? Object.entries(d.strength_info).map(([n,yy])=>`<b>${_pbtEsc(n)}</b>: `+Object.entries(yy||{}).map(([y,v])=>v.skipped||!v.n_ic?`${y} 채점 안 함`:`${y} 지표 ${v.n_ic}개`).join(', ')).join(' · ')
@@ -4644,11 +4644,13 @@ async function lcLoad(){
   lcRender();
 }
 function _lcEng(name){ return ((_lc&&_lc.engines)||[]).find(e=>e.engine===name)||{}; }
+// [2026-10-23] 전략 고르기 목록은 알파벳순(대소문자 무시) — 엔진 정의 순서는 계열이 섞여 찾기 어려움
+function _lcSorted(){ return ((_lc&&_lc.engines)||[]).slice().sort((x,y)=>x.engine.localeCompare(y.engine,'en',{sensitivity:'base',numeric:true})); }
 function lcRender(){
   if(!_lc) return;
   const L=_lc, D=_lcDraft;
   const inp='background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:3px 5px';
-  const opts=sel=>L.engines.map(e=>`<option value="${_lcEsc(e.engine)}"${e.engine===sel?' selected':''}>${_lcEsc(e.engine)} — ${_lcEsc(e.title)}</option>`).join('');
+  const opts=sel=>_lcSorted().map(e=>`<option value="${_lcEsc(e.engine)}"${e.engine===sel?' selected':''}>${_lcEsc(e.engine)} — ${_lcEsc(e.title)}</option>`).join('');
   const card=a=>{
     const A=D[a], tot=A.strategies.reduce((t,s)=>t+(Number(s.slots)||0),0);
     const rows=A.strategies.map((s,i)=>{ const e=_lcEng(s.engine);
@@ -4714,7 +4716,7 @@ function lcMove(a,i,d){ const S=_lcDraft[a].strategies, j=i+d; if(j<0||j>=S.leng
 function lcDel(a,i){ const S=_lcDraft[a].strategies; if(S.length<=1){ alert('전략은 최소 1개'); return; } S.splice(i,1); lcRender(); }
 function lcAdd(a){
   const S=_lcDraft[a].strategies, used=new Set(S.map(s=>s.engine));
-  const e=(_lc.engines||[]).find(x=>!used.has(x.engine)); if(!e) return;
+  const e=_lcSorted().find(x=>!used.has(x.engine)); if(!e) return;
   S.push({engine:e.engine,slots:1,exempt:false,stop:null,take:null,holding:e.holding}); lcRender();
 }
 async function lcSave(){
