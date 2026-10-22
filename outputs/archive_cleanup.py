@@ -11,6 +11,7 @@ archive_cleanup.py — 안 쓰는 대용량 파일을 C:\\fin\\_archive\\YYYYMMD
   oneoff    : trades_history_v3_{final,ind,new,now}.csv, backup/trades_history_v3_*.csv,
               calculator_data_*.csv, results/_base_trades_cache_*.pkl (전부 재생성 가능)
   ticks     : db/ticks.db (+wal/shm) — 읽는 곳 없음. 옮기기 전에 KIS_Tick_Collector 작업을 꺼야 다시 안 쌓인다.
+  legacy_scripts / research / olddocs : [2026-10-23 §66] 안 쓰는 옛 bat·ps1, 끝난 연구 스크립트(+결과 csv), 옛 문서·db_export
 
 사용
   python archive_cleanup.py --dry-run                         # 무엇을 옮길지 목록만
@@ -79,7 +80,37 @@ def pick_ticks(here):
     return [p for p in (base, base + "-wal", base + "-shm", base + "-journal") if os.path.isfile(p)]
 
 
+# [2026-10-23] 2차 정리(§66) — 자동작업·대시보드·트레이더·테스트 어디서도 실행/import 하지 않음을 참조 검사로 확인한 것만.
+LEGACY_SCRIPTS = ["register_task.bat", "unregister_task.bat",              # 옛 KISDataCollector_* 작업 등록/해제
+                  "cleanup_legacy_tasks.bat", "cleanup_legacy_tasks.ps1",  # 2026-07 1회 정리 완료
+                  "rebuild_after_backfill.bat",          # run_verify_kis.bat/verify_kis_account.py 는 KIS 조회 점검 도구라 유지
+                  "start_monitor.bat", "monitor.ps1", "taillog.ps1",
+                  "start_dashboard.bat"]                                  # run_dashboard.bat 로 통합
+RESEARCH = ["apply_trades_rebuild.py", "backfill_strength.py", "backfill_investor_breakdown.py",
+            "breaker_sweep.py", "build_stop_counterfactual.py", "flow_form_diagnostic.py",
+            "foreign_ratio_backtest.py", "improvement_map.py", "investor_stock_ic.py", "kospi_beta_control.py",
+            "mkt_flow_gate.py", "mkt_flow_gate2.py", "mkt_regime_2018.py", "portfolio_fixes.py",
+            "profit_sweep.py", "regime_feature_ic.py", "regime_gate_capital.py", "regime_gate_final.py",
+            "regime_gate_live_sim.py", "regime_on_live_filter.py", "regime_strength_sim.py", "shortfund_ic.py",
+            "signal_count.py", "stop_sweep.py", "strategy_verify.py", "strength_per_strategy_cut.py",
+            "strength_relative_threshold.py", "strength_threshold_study.py", "strength_year_sim.py",
+            "trades_rebuild_compare.py", "unused_feature_scan.py", "xover_exit_grid.py", "xover_exit_matrix.py",
+            "xover_stop_sweep.py", "xover_variants.py",
+            "breaker_sweep_result.csv", "profit_sweep_result.csv", "stop_sweep_result.csv", "strength_year_trades.csv"]
+OLD_DOCS = ["AUTOMATION_GUIDE.md", "BACKTEST_GUIDE.md", "pt_dashboard.html"]
+
+
+def pick_list(names, subdirs=()):
+    out = [os.path.join(HERE, f) for f in names if os.path.isfile(os.path.join(HERE, f))]
+    for d in subdirs:
+        out += [os.path.join(HERE, d, f) for f in _files(os.path.join(HERE, d))]
+    return out
+
+
 PICKERS = {"snapshots": lambda: pick_snapshots(os.path.join(HERE, "results")),
+           "legacy_scripts": lambda: pick_list(LEGACY_SCRIPTS),
+           "research": lambda: pick_list(RESEARCH),
+           "olddocs": lambda: pick_list(OLD_DOCS, subdirs=("db_export",)),
            "oneoff": lambda: pick_oneoff(HERE),
            "ticks": lambda: pick_ticks(HERE)}
 
@@ -112,6 +143,13 @@ def archive(sets, dry=False, stamp=None, now=None):
                 continue
         moved.append((s, rel, size))
         total += size
+    if not dry:                                       # 통째로 비워진 폴더(db_export 등)는 빈 폴더만 치움(파일 삭제 아님)
+        for d in {os.path.dirname(src) for _, src in plan}:
+            if d != HERE and os.path.isdir(d) and not os.listdir(d):
+                try:
+                    os.rmdir(d)
+                except OSError:
+                    pass
     if moved and not dry:
         man = os.path.join(dest_root, "MANIFEST.csv")
         new = not os.path.exists(man)

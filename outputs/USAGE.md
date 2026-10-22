@@ -85,17 +85,17 @@
 | **팩터 스코어 단독 테스트** | `python factor_scorer.py` (IC 가중치 + 현재 피처 점수 출력) |
 | 스케줄 재등록 | `register_tasks.bat` 우클릭 → 관리자 실행 (구 `install_scheduler.ps1` 폐기 — 쓰지 말 것) |
 | **StockAI 작업 등록 (1회만)** | `register_tasks.bat` 우클릭 → 관리자 권한으로 실행 |
-| **대시보드 시작** | `start_dashboard.bat` 더블클릭 (venv 자동 선택) |
+| **대시보드 시작·재시작** | `run_dashboard.bat` 더블클릭 (켜져 있던 서버를 끄고 새로 켬, 2026-10 통합) |
 | 대시보드 수동 시작 | `(.venv) > python integrated_dashboard_server.py` → 브라우저 `http://localhost:5050` |
 
-> **대시보드 주의**: `python integrated_dashboard_server.py` 를 직접 실행하지 말고 `start_dashboard.bat` 를 사용할 것. 직접 실행 시 시스템 Python(Flask 없음)이 선택될 수 있음. 포트 5050이 이미 사용 중이면 "포트 이미 사용 중" 메시지 출력 후 자동 종료됨.
+> **대시보드 주의**: `python integrated_dashboard_server.py` 를 직접 실행하지 말고 `run_dashboard.bat` 를 사용할 것. 직접 실행 시 시스템 Python(Flask 없음)이 선택될 수 있음. 포트 5050이 이미 사용 중이면 "포트 이미 사용 중" 메시지 출력 후 자동 종료됨.
 
 ## 1.4 문제가 생기면
 
 - `logs\recheck_YYYYMMDD.log` 에서 [FAIL] 항목 확인 → 위 표의 해당 수집기 수동 실행
 - 한글 깨짐/!변수! 그대로 출력 → .bat 파일이 ASCII+CRLF 인지 확인 (메모장 다른이름저장 시 주의)
 - KRX/pykrx 가 사이트 개편으로 깨지면 recheck 로그에 [FAIL] 로 나타남 → 그때 점검
-- **대시보드 "로드 실패" / 데이터 없음** → `start_dashboard.bat` 로 서버를 새로 시작한 후 브라우저 Ctrl+Shift+R 로 강력 새로고침. CMD 창에 `[Dashboard] /api/all ERROR` 메시지가 있으면 내용을 확인해 조치
+- **대시보드 "로드 실패" / 데이터 없음** → `run_dashboard.bat` 로 서버를 새로 시작한 후 브라우저 Ctrl+Shift+R 로 강력 새로고침. CMD 창에 `[Dashboard] /api/all ERROR` 메시지가 있으면 내용을 확인해 조치
 
 ## 1.5 키움 모의투자 자동매매 (2026-06-12 신설 / 2026-06-16 3전략 전환)
 
