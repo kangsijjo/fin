@@ -2458,8 +2458,8 @@ def api_pbt_run():
 # 정기 신호(18:30)가 지났거나 휴장일이면 저장 직후 regen_signals.py 로 오늘 신호를 다시 만든다 → 다음 거래일 09:00 부터 새 방식.
 _LC_REGEN = {"proc": None}
 _LAG_NOTE = {
-    "credit": "신용잔고는 1~2거래일 늦게 공개 — 당일 신호가 대부분 안 나옴(백테스트는 당일 값을 써 낙관적)",
-    "short": "공매도 비중은 다음날 공표 — 당일 신호가 대부분 안 나옴",
+    "credit": "신용잔고는 1~2거래일 늦게 공개 — 이 판은 실매매 신호가 안 나옴(백테스트는 당일 값을 써 낙관적). 실매매는 _lag2 / _wait2 판을 고르세요",
+    "short": "공매도 비중은 다음날 공표 — 이 판은 실매매 신호가 안 나옴. 실매매는 _lag2 / _wait2 판을 고르세요",
     "individual": "개인 순매수는 18:30 신호 때 KRX 에서 바로 받아 씀(못 받으면 그날은 건너뜀)",
 }
 
@@ -2476,7 +2476,8 @@ def _lc_engine_list():
         needs = P.aux_needs(s)
         out.append({"engine": s.name, "live": LC.live_name(s.name), "title": (base.get(s.name) or {}).get("title", s.name),
                     "holding": hold, "needs": [P._AUX_LABEL[k] for k in needs],
-                    "note": " / ".join(_LAG_NOTE[k] for k in needs if k in _LAG_NOTE)})
+                    "note": (f"공개 지연 {v.get('data_lag')}거래일 반영판 — 실매매에서도 신호가 나옴(백테스트와 같은 정보)"
+                             if v.get("data_lag") else " / ".join(_LAG_NOTE[k] for k in needs if k in _LAG_NOTE))})
     return out
 
 

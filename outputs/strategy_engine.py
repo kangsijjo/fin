@@ -96,6 +96,14 @@ ALL_STRATEGIES = [
     High52wShortDecreaseStrategy(holding_days=20, name="h52w_short_dec"),
     GcForeignStrategy(fast_ma=20, slow_ma=60, foreign_n=3, holding_days=15, name="gc_for3d"),
     GcForeignStrategy(fast_ma=20, slow_ma=60, foreign_n=3, holding_days=15, use_market_filter=MKT, name="gc_for3d_mkt"),
+    # [2026-10-23] 공개 지연을 반영한 '실매매 가능' 판 — 신용잔고는 1~2거래일, 공매도 비중은 다음날 공표 후 20:00 수집이라
+    # 18:30 신호 때 최신값은 2거래일 전 것. 원본(h52w_cred_dec·h52w_short_dec)은 그날 값을 써서 실매매에선 신호가 안 나온다.
+    #   _lag2  = 2거래일 전 값으로 판정(가격 조건은 그날) → 다음날 매수
+    #   _wait2 = 그날 값으로 판정하되 공개를 기다려 2거래일 뒤 신호 → 그다음날 매수
+    High52wCreditDecreaseStrategy(holding_days=20, data_lag=2, lag_mode="data", name="h52w_cred_dec_lag2"),
+    High52wCreditDecreaseStrategy(holding_days=20, data_lag=2, lag_mode="entry", name="h52w_cred_dec_wait2"),
+    High52wShortDecreaseStrategy(holding_days=20, data_lag=2, lag_mode="data", name="h52w_short_dec_lag2"),
+    High52wShortDecreaseStrategy(holding_days=20, data_lag=2, lag_mode="entry", name="h52w_short_dec_wait2"),
     High52wCreditDecreaseStrategy(holding_days=20, name="h52w_cred_dec"),
     # ── 수급 역전(개인 이탈 + 외국인/기관 유입) — 2026-09-08 사용자 아이디어 ──
     # 개인 20일누적 양→음 교차 + 외인/기관 20일누적 음→양 교차, cross_window 내 동시 → 20일 보유.

@@ -58,12 +58,20 @@ def signal_frame(strategy, df):
     return box.get("df"), box.get("sig_col", "signal")
 
 
-def aux_ready(strategy, df, last_date):
-    """오늘 보조 데이터가 있는가 → (True, '') 또는 (False, 이유)."""
+def aux_ready(strategy, df, last_date, all_dates=None):
+    """오늘 보조 데이터가 있는가 → (True, '') 또는 (False, 이유).
+    [2026-10-23] 공개 지연 반영판(data_lag>0, 예 h52w_cred_dec_lag2)은 신용·공매도를 **lag 거래일 전** 값으로 쓰므로
+    그날짜 값만 있으면 된다(실매매에서도 신호가 나옴)."""
     import period_backtest as P
     need = P.aux_needs(strategy)
     if not need:
         return True, ""
+    lag = int(getattr(strategy, "data_lag", 0) or 0)
+    lag_date = str(last_date)
+    if lag and all_dates:
+        ad = [str(x) for x in all_dates]
+        i = ad.index(str(last_date)) if str(last_date) in ad else len(ad) - 1
+        lag_date = ad[max(0, i - lag)]
     today = df[df["date"].astype(str) == str(last_date)]
     for k in need:
         if k in ("foreign", "inst"):
@@ -78,21 +86,23 @@ def aux_ready(strategy, df, last_date):
                     return False, (f"오늘({last_date}) 개인 순매수를 받지 못함(KRX {n}종목) — "
                                    "이 전략은 오늘 신호를 만들지 않음")
         elif k == "short":
-            f = os.path.join(HERE, "macro_data", "shortfund_kosdaq", f"{last_date}.csv")
+            f = os.path.join(HERE, "macro_data", "shortfund_kosdaq", f"{lag_date}.csv")
             if not os.path.exists(f):
-                return False, f"오늘({last_date}) 공매도 비중 파일이 없음 — KRX 공표가 늦어 다음날 채워짐"
+                return False, (f"{lag_date} 공매도 비중 파일이 없음 — KRX 공표가 늦어 다음날 채워짐"
+                               + ("" if lag else " (공개 지연 반영판 h52w_short_dec_lag2/_wait2 를 쓰면 실매매 가능)"))
         elif k == "credit":
             try:
                 import sqlite3
                 from fin_paths import STOCK_DB
                 con = sqlite3.connect(f"file:{STOCK_DB}?mode=ro", uri=True, timeout=30)
                 n = con.execute("SELECT count(*) FROM credit_balance WHERE date=?",
-                                (f"{last_date[:4]}-{last_date[4:6]}-{last_date[6:]}",)).fetchone()[0]
+                                (f"{lag_date[:4]}-{lag_date[4:6]}-{lag_date[6:]}",)).fetchone()[0]
                 con.close()
             except Exception:
                 n = 0
             if n < 100:
-                return False, f"오늘({last_date}) 신용잔고가 없음 — 1~2거래일 늦게 공개돼 이 전략은 매일 신호가 늦음"
+                return False, (f"{lag_date} 신용잔고가 없음 — 1~2거래일 늦게 공개됨"
+                               + ("" if lag else " (공개 지연 반영판 h52w_cred_dec_lag2/_wait2 를 쓰면 실매매 가능)"))
     return True, ""
 
 
@@ -119,7 +129,7 @@ def _fill_individual_today(df, last_date):
 def today_signals(strategy, df, last_date, all_dates, name_cache, live_name, holding, is_excluded, offset_date):
     """엔진 전략 → 신호 CSV 행 목록(live_signal 과 같은 열). 보조 데이터가 없으면 ([], 이유)."""
     import period_backtest as P
-    ok, why = aux_ready(strategy, df, last_date)
+    ok, why = aux_ready(strategy, df, last_date, all_dates)
     if not ok:
         return [], why
     # 계산량 줄이기: 전략이 필요로 하는 과거 + 여유만 남긴다

@@ -330,3 +330,62 @@ def test_watchdog_thresholds_follow_daily_collection():
     src = open(os.path.join(OUTPUTS, "watchdog.py"), encoding="utf-8").read()
     assert '("korea_indicators", "date", 3, True)' in src and '("program_trading", "date", 3, True)' in src
     assert '("credit_balance", "date", 4, True)' in src
+
+
+# ── [2026-10-23] 공개 지연 반영판(신용·공매도) ──
+def _credit_toy():
+    dates = [d.strftime("%Y%m%d") for d in pd.bdate_range("20240102", periods=300)]
+    px = list(np.linspace(100, 400, 300))
+    df = pd.DataFrame({"code": "000010", "date": dates, "open": px, "high": px, "low": px, "close": px,
+                       "trading_value": 5e9, "volume": 1e6})
+    # 신용잔고율: 날마다 감소하다가 마지막 2일만 급증 → '당일' 판정은 마지막 2일 신호 없음, 2일 전 값이면 신호 있음
+    rt = [50 - i * 0.1 for i in range(298)] + [99.0, 99.0]
+    cr = pd.DataFrame({"code": "000010", "date": dates, "credit_ratio": rt})
+    return df, cr, dates
+
+
+def test_credit_lag_variants(monkeypatch):
+    import strategies.high52w_credit_decrease as H
+    import engine_signals as ES
+    df, cr, dates = _credit_toy()
+    monkeypatch.setattr(H, "_load_credit_ratio_db", lambda db_path=None: cr.copy())
+    base = H.High52wCreditDecreaseStrategy(lookback_days=20)
+    lag2 = H.High52wCreditDecreaseStrategy(lookback_days=20, data_lag=2, lag_mode="data")
+    wait2 = H.High52wCreditDecreaseStrategy(lookback_days=20, data_lag=2, lag_mode="entry")
+    sig = {}
+    for k, s in (("base", base), ("lag2", lag2), ("wait2", wait2)):
+        f, col = ES.signal_frame(s, df)
+        sig[k] = f.set_index("date")[col]
+    d = dates
+    assert sig["base"][d[-3]] and not sig["base"][d[-1]] and not sig["base"][d[-2]], "당일 신용이 급증한 날은 원본 신호 없음"
+    # 데이터 지연: t 일은 t-2 값으로 판정 → 아직 '공개 안 된' 급증은 모른다 → 신호
+    assert sig["lag2"][d[-1]] and sig["lag2"][d[-2]]
+    # 매수 지연: 원본 신호를 2거래일 뒤로 민다
+    assert all(sig["wait2"][d[i]] == sig["base"][d[i - 2]] for i in range(30, 300))
+
+
+def test_aux_ready_checks_lagged_date(tmp_path, monkeypatch):
+    import engine_signals as ES
+    import strategy_engine as E
+    m = {s.name: s for s in E.ALL_STRATEGIES}
+    dates = ["20261019", "20261020", "20261021", "20261022"]
+    d = tmp_path / "macro_data" / "shortfund_kosdaq"
+    d.mkdir(parents=True)
+    (d / "20261020.csv").write_text("x")
+    monkeypatch.setattr(ES, "HERE", str(tmp_path))
+    df = pd.DataFrame({"date": dates, "code": "000001"})
+    ok, why = ES.aux_ready(m["h52w_short_dec"], df, "20261022", dates)
+    assert not ok and "_lag2" in why, "원본은 오늘 파일이 필요 — 실매매판 안내"
+    ok, why = ES.aux_ready(m["h52w_short_dec_lag2"], df, "20261022", dates)
+    assert ok, why
+    ok, _ = ES.aux_ready(m["h52w_short_dec_wait2"], df, "20261022", dates)
+    assert ok
+
+
+def test_lag_variants_registered_and_explained():
+    import strategy_engine as E
+    import strategy_explain as X
+    m = {s.name: s for s in E.ALL_STRATEGIES}
+    for n in ("h52w_cred_dec_lag2", "h52w_cred_dec_wait2", "h52w_short_dec_lag2", "h52w_short_dec_wait2"):
+        assert m[n].data_lag == 2 and "실매매 가능판" in " ".join(X.explain(m[n])["caution"])
+    assert "_lag2" in " ".join(X.explain(m["h52w_cred_dec"])["caution"])

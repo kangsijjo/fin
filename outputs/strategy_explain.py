@@ -44,7 +44,17 @@ def _common(s, buy, sell, data=None, caution=None, title="", idea=""):
             "data": data or ["가격·거래대금(일봉)"], "caution": caution or []}
 
 
-def explain(s):
+def _lag_caution(v, label):
+    """공개 지연 반영판 설명(data_lag>0) — 없으면 None."""
+    lag = int(v.get("data_lag") or 0)
+    if not lag:
+        return None
+    if v.get("lag_mode") == "entry":
+        return [f"✅ 실매매 가능판 — {label}가 공개될 때까지 기다려 판정일 {lag}거래일 뒤에 신호, 그다음날 시가 매수(가격 조건은 판정일 기준)"]
+    return [f"✅ 실매매 가능판 — 오늘 가격 조건 + {lag}거래일 전 {label}(그때 공개된 최신값)로 판정, 다음날 시가 매수"]
+
+
+def _explain(s):
     """전략 객체 → 쉬운 설명 dict. 모르는 클래스면 None."""
     c = type(s).__name__
     v = vars(s)
@@ -170,7 +180,9 @@ def explain(s):
                        data=["가격·거래대금", "코스닥 공매도 거래 비중(2018-06~)"],
                        title="52주 신고가 + 공매도 감소",
                        idea="신고가인데 주가 하락에 베팅하던 공매도가 줄면 위로 더 갈 여지가 있다는 가정.",
-                       caution=["'공매도 잔고'가 아니라 '공매도 거래 비중'이다", "2020-03~2021-05 공매도 금지기간엔 신호가 거의 없다"])
+                       caution=["'공매도 잔고'가 아니라 '공매도 거래 비중'이다", "2020-03~2021-05 공매도 금지기간엔 신호가 거의 없다"]
+                               + (_lag_caution(v, "공매도 비중") or
+                                  ["⚠ 이 판은 당일 공매도 비중을 쓴다 — 실매매에선 신호가 안 나옴. 실매매용은 h52w_short_dec_lag2 / _wait2"]))
     if c == "GcForeignStrategy":
         return _common(s, [f"{v['fast_ma']}일 이동평균이 {v['slow_ma']}일 이동평균을 위로 뚫었다(골든크로스)",
                            f"외국인이 {v['foreign_n']}일 연속 순매수"], [_hold(H)],
@@ -183,8 +195,9 @@ def explain(s):
                        data=["가격·거래대금", "종목별 신용잔고(키움, 2021-01~)"],
                        title="52주 신고가 + 신용잔고 감소",
                        idea="빚내서 산 물량(나중에 던질 매물)이 줄어든 신고가 종목이 더 오래 간다는 가정.",
-                       caution=["⚠ 신용잔고는 1~2거래일 늦게 공개되는데 백테스트는 당일 값을 썼다 — 실제보다 좋게 나온다",
-                                "2일 늦게 보게 하면 2022~2025 CAGR 9.2% → 1.0%, 2026년 −47% (설명서 §56)"])
+                       caution=(_lag_caution(v, "신용잔고") or
+                                ["⚠ 신용잔고는 1~2거래일 늦게 공개되는데 이 판은 당일 값을 쓴다 — 실매매에선 신호가 안 나오고 백테스트는 낙관적",
+                                 "실매매용은 h52w_cred_dec_lag2(2일 전 값으로 판정) / h52w_cred_dec_wait2(공개 기다려 2일 뒤 매수)"]))
     if c == "SupplyReversalStrategy":
         b = [f"개인의 최근 {v['accum_days']}일 누적 순매수가 플러스 → 마이너스로 바뀌었다(개인이 팔기 시작)",
              f"외국인{' 그리고' if v['smart_mode'] == 'and' else ' 또는'} 기관의 {v['accum_days']}일 누적이 마이너스 → 플러스로 바뀌었다(큰손이 사기 시작)",
@@ -215,6 +228,16 @@ def explain(s):
                        idea="큰손 누적 매수가 개인을 추월하는 순간을 산다.",
                        caution=["작은 익절 + 무손절은 '작게 자주 벌고 가끔 크게 잃는' 구조 — 승률보다 평균·MDD 로 봐야 한다"] if tp else [])
     return None
+
+
+def explain(s):
+    """전략 객체 → 쉬운 설명 dict. 모르는 클래스면 None. 공개 지연 반영판은 제목에 표시."""
+    d = _explain(s)
+    lag = int(vars(s).get("data_lag") or 0) if d else 0
+    if lag:
+        d["title"] += (f" (공개 기다려 {lag}일 뒤 매수)" if vars(s).get("lag_mode") == "entry"
+                       else f" ({lag}일 전 공개값 사용)")
+    return d
 
 
 # 백테스트 공통 규칙(팝업 하단 고정 문구)
