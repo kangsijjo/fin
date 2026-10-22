@@ -2612,6 +2612,113 @@ def api_live_config_save():
     return jsonify({"ok": True, "msg": msg, "changes": changes, "config": _lc_view(cfg), "regen": regen})
 
 
+# ══ 2026-10-22 AI·강도 가상매매 전략 설정(§68) — 강도매매 탭. 실계좌와 별개 파일(db/virtual_config.json) ══
+# 저장 = virtual_config.save(검증·백업·적용일 이력). 장중 잠금 없음(주문이 없는 장부 시뮬). 화면은 두 번 확인, 서버는 confirm=2.
+def _vc_live_names():
+    import live_config as LC
+    out = set()
+    for a in LC.ACCOUNTS:
+        out |= set(LC.account(a)["priority"])
+    return out
+
+
+@app.route("/api/virtual_config")
+def api_virtual_config():
+    import live_config as LC
+    import virtual_config as VC
+    cfg = VC.load()
+    hist = cfg.get("history") or []
+    today = datetime.now().strftime("%Y%m%d")
+    active, pending = VC.state(today)
+    src = pending or (active if active and not active.get("legacy") else None)
+    draft = (src or {}).get("portfolios") or VC.default_portfolios()
+    v2 = {}
+    try:
+        import strength_model as SM
+        for f in (Path(SM.MODEL_DIR).glob("*.json") if Path(SM.MODEL_DIR).exists() else []):
+            m = SM.load_model(f.stem)
+            if m:
+                v2[f.stem] = {"trained": m.get("trained"), "n": m.get("n"), "n_ic": len(m.get("ic", {}))}
+    except Exception:
+        pass
+    view = lambda e: None if not e else {"effective": e["effective"], "saved": e.get("saved"), "legacy": bool(e.get("legacy")),
+                                         "desc": VC.describe_legacy(e) if e.get("legacy") else "",
+                                         "portfolios": e.get("portfolios")}
+    hist_v = [{"effective": e["effective"], "saved": e.get("saved"), "legacy": bool(e.get("legacy")),
+               "desc": VC.describe_legacy(e) if e.get("legacy") else " / ".join(
+                   f"{VC.LABEL[p]}: " + ", ".join(f"{s['engine']}({s['slots']})" for s in e["portfolios"][p]["strategies"])
+                   for p in VC.PORTFOLIOS)} for e in sorted(hist, key=lambda x: x["effective"], reverse=True)[:8]]
+    return jsonify({"ok": True, "active": view(active), "pending": view(pending), "draft": draft,
+                    "fallback": cfg.get("_fallback"), "engines": _lc_engine_list(),
+                    "live_names": sorted(_vc_live_names()), "aliases": LC.ALIAS, "v2_models": v2,
+                    "effective": VC.effective_date(), "slots_total": VC.SLOTS_TOTAL,
+                    "max_strategies": VC.MAX_STRATEGIES, "labels": VC.LABEL, "history": hist_v,
+                    "legacy_now": VC.describe_legacy(VC.legacy_snapshot()) if not hist else ""})
+
+
+def _vc_effective_msg(eff):
+    return f"{eff[:4]}-{eff[4:6]}-{eff[6:]} 신호부터 새 설정 (그 전 기록·이미 산 종목은 종전 규칙 그대로)"
+
+
+@app.route("/api/virtual_config/preview", methods=["POST"])
+def api_virtual_config_preview():
+    if not _same_origin_action(request):
+        return jsonify({"ok": False, "msg": "대시보드 페이지에서만 실행할 수 있습니다(CSRF 차단)"}), 403
+    if not _is_local(request):
+        return jsonify({"ok": False, "msg": "로컬에서만 허용"}), 403
+    import virtual_config as VC
+    hold = {e["engine"]: e["holding"] for e in _lc_engine_list()}
+    try:
+        new = VC.clean((request.get_json(silent=True) or {}).get("portfolios"), hold)
+    except (TypeError, ValueError) as e:
+        return jsonify({"ok": False, "errors": [f"입력 값 오류: {e}"]}), 400
+    errs = VC.validate(new, set(hold))
+    eff = VC.effective_date()
+    changes = []
+    if not errs:
+        prev = VC.entry_for(VC.load().get("history") or [], eff)
+        changes = VC.diff(None if (prev is None or prev.get("legacy")) else prev["portfolios"], new)
+    return jsonify({"ok": not errs, "errors": errs, "changes": changes, "effective": _vc_effective_msg(eff)})
+
+
+@app.route("/api/virtual_config", methods=["POST"])
+def api_virtual_config_save():
+    if not _same_origin_action(request):
+        return jsonify({"ok": False, "msg": "대시보드 페이지에서만 실행할 수 있습니다(CSRF 차단)"}), 403
+    if not _is_local(request):
+        return jsonify({"ok": False, "msg": "로컬에서만 허용(원격 변경 불가)"}), 403
+    import virtual_config as VC
+    b = request.get_json(silent=True) or {}
+    if b.get("confirm") != 2:
+        return jsonify({"ok": False, "msg": "두 번 확인이 필요합니다"}), 400
+    hold = {e["engine"]: e["holding"] for e in _lc_engine_list()}
+    try:
+        new = VC.clean(b.get("portfolios"), hold)
+        cfg, changes, eff = VC.save(new, note=str(b.get("note", ""))[:200], engine_names=set(hold))
+    except (TypeError, ValueError) as e:
+        return jsonify({"ok": False, "msg": str(e)[:400]}), 400
+    msg = "저장됨 — " + _vc_effective_msg(eff)
+    try:      # 강도 v2 를 고른 강도 포트의 전략 중 모델이 없는 것은 학습(전략당 1~3분, 없으면 v1 점수로 대체)
+        import strength_model as SM
+        miss = sorted({s["engine"] for s in new["strength"]["strategies"]
+                       if new["strength"].get("strength_version") == "v2" and not SM.load_model(s["engine"])})
+    except Exception:
+        miss = []
+    if miss:
+        (BASE / "logs").mkdir(exist_ok=True)
+        _sp.Popen([_VENV_PYTHON, str(BASE / "strength_model.py"), "--train", ",".join(miss)], cwd=str(BASE),
+                  stdout=open(BASE / "logs" / "run_strength_v2_train.log", "w", encoding="utf-8", errors="replace"),
+                  stderr=_sp.STDOUT, creationflags=_NO_WIN)
+        msg += f" · 강도 v2 모델 학습 시작({', '.join(miss)})"
+    try:
+        import notifier
+        notifier.safe_send("🧪 [AI·강도 가상매매 설정 변경]\n" + ("\n".join("· " + c for c in changes) or "· 변경 없음")
+                           + "\n" + msg)
+    except Exception:
+        pass
+    return jsonify({"ok": True, "msg": msg, "changes": changes})
+
+
 @app.route("/api/pbt/jobs")
 def api_pbt_jobs():
     """지난 기간 백테스트 기록(최신순) — 요약만. 전체 결과는 /api/pbt/status?job= 로 연다. (2026-10-19)"""
@@ -3040,9 +3147,9 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
 
 <!-- ===== 강도매매 ===== -->
 <div id="tab-strength" class="tab-content">
-  <div class="section" id="lc-strength-sec">
-    <h2>🛠 모의매매 전략 설정 <span style="color:#8b949e;font-size:11px;font-weight:400">— 전략·슬롯·강도·손절·익절을 골라 다음 거래일부터 이 방식으로 매매 (두 번 확인)</span></h2>
-    <div id="lc-strength"><span style="color:#64748b;font-size:12px">불러오는 중…</span></div>
+  <div class="section" id="vc-strength-sec">
+    <h2>🧪 AI·강도 가상매매 전략 설정 <span style="color:#8b949e;font-size:11px;font-weight:400">— 아래 '가상매매 실행' 두 포트폴리오의 전략·슬롯·기준·손절·익절을 골라 다음 거래일 신호부터 적용 (두 번 확인 · 실계좌 무관)</span></h2>
+    <div id="vc-strength"><span style="color:#64748b;font-size:12px">불러오는 중…</span></div>
   </div>
   <div class="section">
     <h2>신호 강도 백데이터 <span style="color:#8b949e;font-size:12px;font-weight:400">&mdash; 실거래는 슬롯 균등분배(강도 무관). 여기는 "이 강도면 이렇게 매매했을 것"을 사후 검증하기 위한 누적 기록</span></h2>
@@ -4656,7 +4763,7 @@ function initTableSort(){
 
 // ══ 2026-10-21 모의매매 전략 설정 — 모의계좌 탭·강도매매 탭(같은 편집기) ══
 let _lc=null, _lcDraft=null;
-const _LC_BOX=['lc-mock','lc-strength'];
+const _LC_BOX=['lc-mock'];   // [2026-10-22] 강도매매 탭은 AI·강도 가상매매 설정(vc-strength)으로 바뀜
 const _lcEsc=v=>String(v==null?'':v).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 async function lcLoad(){
   try{ _lc=await fetch('/api/live_config').then(r=>r.json()); }
@@ -4756,6 +4863,106 @@ async function lcSave(){
   if(d.ok){ await lcLoad(); _lcMsg(`<span style="color:#10b981">✓ ${_lcEsc(d.msg)}</span>`); }
 }
 
+// ══ 2026-10-22 AI·강도 가상매매 전략 설정(§68) — 강도매매 탭. 모의계좌 설정과 같은 모양, 다른 파일(실계좌 무관) ══
+let _vc=null, _vcDraft=null;
+async function vcLoad(){
+  try{ _vc=await fetch('/api/virtual_config').then(r=>r.json()); }
+  catch(e){ setHtml('vc-strength',`<span style="color:#ef4444">설정 로드 실패: ${_lcEsc(e.message)}</span>`); return; }
+  _vcDraft=JSON.parse(JSON.stringify(_vc.draft)); vcRender();
+}
+function _vcEng(n){ return ((_vc&&_vc.engines)||[]).find(e=>e.engine===n)||{}; }
+function _vcSorted(){ return ((_vc&&_vc.engines)||[]).slice().sort((x,y)=>x.engine.localeCompare(y.engine,'en',{sensitivity:'base',numeric:true})); }
+function _vcLive(eng){ const ln=(_vc.aliases||{})[eng]||eng; return (_vc.live_names||[]).includes(ln); }
+function _vcD(s){ return s&&s.length===8?s.slice(0,4)+'-'+s.slice(4,6)+'-'+s.slice(6):(s||''); }
+function vcRender(){
+  if(!_vc) return;
+  const V=_vc, D=_vcDraft;
+  const inp='background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:3px 5px';
+  const opts=sel=>_vcSorted().map(e=>`<option value="${_lcEsc(e.engine)}"${e.engine===sel?' selected':''}>${_lcEsc(e.engine)} — ${_lcEsc(e.title)}</option>`).join('');
+  const card=p=>{
+    const P=D[p], tot=P.strategies.reduce((t,s)=>t+(Number(s.slots)||0),0), isAI=p==='ai';
+    const rows=P.strategies.map((s,i)=>{ const e=_vcEng(s.engine), live=_vcLive(s.engine);
+      return `<tr>
+        <td style="white-space:nowrap">${i+1}
+          <button class="runbtn" style="padding:0 6px" onclick="vcMove('${p}',${i},-1)">▲</button>
+          <button class="runbtn" style="padding:0 6px" onclick="vcMove('${p}',${i},1)">▼</button></td>
+        <td><select style="${inp};max-width:330px" onchange="vcSet('${p}',${i},'engine',this.value)">${opts(s.engine)}</select>
+          <div style="font-size:11px;color:${live?'#64748b':'#38bdf8'}">${live?'모의계좌 신호를 그대로 씀':'가상 전용 신호를 매일 18:31 새로 만듦(주문 없음)'}</div>
+          ${e.note?`<div style="color:#fbbf24;font-size:11px;max-width:340px">⚠ ${_lcEsc(e.note)}</div>`:''}
+          ${(!isAI&&P.strength_version==='v2')?((V.v2_models||{})[s.engine]?`<div style="color:#64748b;font-size:11px">v2 모델: ${_lcEsc(V.v2_models[s.engine].trained)} · 학습 ${V.v2_models[s.engine].n}건</div>`
+            :'<div style="color:#fbbf24;font-size:11px">v2 모델 없음 — 저장하면 학습(1~3분), 그 전엔 v1 점수로 대체</div>'):''}</td>
+        <td><input type="number" min="1" max="10" step="1" value="${s.slots}" style="${inp};width:52px" onchange="vcSet('${p}',${i},'slots',this.value)"></td>
+        <td style="text-align:center"><input type="checkbox" ${s.exempt?'checked':''} onchange="vcSet('${p}',${i},'exempt',this.checked)" title="체크하면 기준과 상관없이 후보(후보가 많으면 순위 높은 순)"></td>
+        <td><input type="number" step="1" min="-50" max="-1" placeholder="없음" value="${s.stop==null?'':s.stop}" style="${inp};width:64px" onchange="vcSet('${p}',${i},'stop',this.value)"></td>
+        <td><input type="number" step="1" min="1" max="300" placeholder="없음" value="${s.take==null?'':s.take}" style="${inp};width:64px" onchange="vcSet('${p}',${i},'take',this.value)"></td>
+        <td style="color:#94a3b8">${e.holding??s.holding}일</td>
+        <td><button class="runbtn" style="padding:0 7px" onclick="vcDel('${p}',${i})">✕</button></td></tr>`; }).join('');
+    const thr=isAI
+      ? `<label style="font-size:13px;color:#cbd5e1" title="AI 확률(meta 모델 big-win 확률, 0~1) 이 값 이상만 삼. 비우면 기준 없이 확률 높은 순">AI 확률 기준 ≥
+           <input type="number" min="0" max="1" step="0.01" placeholder="없음" value="${P.min_score==null?'':P.min_score}" style="${inp};width:68px" onchange="vcSetP('${p}','min_score',this.value)"></label>`
+      : `<label style="font-size:13px;color:#cbd5e1" title="강도 점수(0~10) 이 값 이상만 삼. 비우면 기준 없이 강도 높은 순">강도 기준 ≥
+           <input type="number" min="0" max="10" step="0.1" placeholder="없음" value="${P.min_score==null?'':P.min_score}" style="${inp};width:62px" onchange="vcSetP('${p}','min_score',this.value)"></label>
+         <select style="${inp};font-size:12px" onchange="vcSetP('${p}','strength_version',this.value)">
+           <option value="v1"${(P.strength_version||'v1')==='v1'?' selected':''}>강도 v1(공통)</option>
+           <option value="v2"${P.strength_version==='v2'?' selected':''}>강도 v2(전략별)</option></select>`;
+    return `<div style="flex:1;min-width:560px;background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:10px 12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+        <b style="font-size:14px">${isAI?'🤖':'💪'} ${_lcEsc(V.labels[p])} <span style="font-size:11px;color:#64748b;font-weight:400">${isAI?'AI 확률 높은 순':'강도 높은 순'}</span></b>
+        ${thr}
+        <span style="font-size:12px;color:${tot===V.slots_total?'#10b981':'#ef4444'}">슬롯 합 ${tot}/${V.slots_total}</span></div>
+      <table style="font-size:12px;margin-top:6px;width:100%"><thead><tr><th>순서</th><th>전략</th><th>슬롯</th>
+        <th title="기준과 상관없이 후보">${isAI?'AI 기준 면제':'강도 면제'}</th><th title="매일 종가로 판정 → 그 종가에 청산">손절 %</th><th title="매일 종가로 판정 → 그 종가에 청산">익절 %</th><th>보유</th><th></th></tr></thead>
+        <tbody>${rows}</tbody></table>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
+        ${P.strategies.length<V.max_strategies?`<button class="runbtn" onclick="vcAdd('${p}')">+ 전략 추가</button>`:`<span style="font-size:11px;color:#64748b">전략은 최대 ${V.max_strategies}개</span>`}
+        <span style="font-size:11px;color:#64748b">순서는 표시용 — 같은 날 후보는 ${isAI?'AI 확률':'강도'} 높은 순으로 담고, 전략마다 슬롯 수까지</span></div></div>`;
+  };
+  const now=V.active, pend=V.pending;
+  const nowTxt=!now?`종전 규칙 — ${_lcEsc(V.legacy_now)}`:now.legacy?`종전 규칙 — ${_lcEsc(now.desc)}`:`${_vcD(now.effective)} 신호부터 적용 중인 설정(저장 ${_lcEsc(now.saved||'')})`;
+  const hist=(V.history||[]).map(h=>`<div>· <b>${_vcD(h.effective)==='0000-00-00'?'처음':_vcD(h.effective)+' 신호부터'}</b> ${_lcEsc(h.desc)}</div>`).join('');
+  setHtml('vc-strength', `<div style="font-size:12px;color:#94a3b8;margin-bottom:8px">
+      지금: <b style="color:#e2e8f0">${nowTxt}</b>${pend?` · <span style="color:#38bdf8">예약: ${_vcD(pend.effective)} 신호부터 새 설정</span>`:''}
+      ${V.fallback?` <span style="color:#ef4444">⚠ ${_lcEsc(V.fallback)}</span>`:''}
+      · 저장하면 <b>${_vcD(V.effective)} 신호부터</b> 적용(그 전 기록·이미 산 종목은 그대로)</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">${card('ai')}${card('strength')}</div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap">
+      <button class="runbtn" style="background:#2563eb;color:#fff" onclick="vcSave()">💾 변경 확인 후 저장</button>
+      <button class="runbtn" onclick="vcLoad()">↺ 현재 설정 다시 불러오기</button>
+      <span id="vc-msg" style="font-size:12px;color:#94a3b8"></span></div>
+    <details style="margin-top:8px"><summary style="cursor:pointer;font-size:12px;color:#94a3b8">설정 이력(적용 신호일별)</summary>
+      <div style="font-size:12px;color:#cbd5e1;margin-top:4px;line-height:1.7">${hist||'<span style="color:#64748b">아직 없음 — 지금은 종전 규칙</span>'}</div></details>
+    <div style="font-size:11px;color:#64748b;margin-top:6px">가상매매는 주문이 없는 장부 시뮬입니다(신호일 종가 진입·왕복 0.33%) · 실제 모의계좌 설정은 🏦 모의계좌 탭 · 모의계좌에 없는 전략의 AI 확률은 그 전략으로 학습되지 않은 모델 값이라 참고용</div>`);
+}
+function vcSet(p,i,k,v){
+  const s=_vcDraft[p].strategies[i];
+  if(k==='slots') s.slots=parseInt(v||'0',10)||0;
+  else if(k==='exempt') s.exempt=!!v;
+  else if(k==='stop'||k==='take') s[k]=(v===''||v==null)?null:Number(v);
+  else if(k==='engine'){ s.engine=v; const e=_vcEng(v); s.holding=e.holding; }
+  vcRender();
+}
+function vcSetP(p,k,v){ _vcDraft[p][k]=(k==='min_score')?((v===''||v==null)?null:Number(v)):v; vcRender(); }
+function vcMove(p,i,d){ const S=_vcDraft[p].strategies, j=i+d; if(j<0||j>=S.length) return; [S[i],S[j]]=[S[j],S[i]]; vcRender(); }
+function vcDel(p,i){ const S=_vcDraft[p].strategies; if(S.length<=1){ alert('전략은 최소 1개'); return; } S.splice(i,1); vcRender(); }
+function vcAdd(p){
+  const S=_vcDraft[p].strategies, used=new Set(S.map(s=>s.engine));
+  const e=_vcSorted().find(x=>!used.has(x.engine)); if(!e) return;
+  S.push({engine:e.engine,slots:1,exempt:false,stop:null,take:null,holding:e.holding}); vcRender();
+}
+async function vcSave(){
+  const post=async(url,extra)=>{ const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Action':'1'},
+      body:JSON.stringify(Object.assign({portfolios:_vcDraft},extra||{}))}); let d={}; try{ d=await r.json(); }catch(e){ d={ok:false,msg:'응답 해석 실패 ('+r.status+')'}; } return d; };
+  const msg=h=>setHtml('vc-msg',h);
+  const pv=await post('/api/virtual_config/preview');
+  if(!pv.ok){ alert('저장할 수 없습니다:\\n- '+(pv.errors||[pv.msg]).join('\\n- ')); return; }
+  if(!(pv.changes||[]).length){ alert('바뀐 내용이 없습니다'); return; }
+  if(!confirm('[1/2] AI·강도 가상매매 설정을 이렇게 바꿉니다:\\n\\n- '+pv.changes.join('\\n- ')+'\\n\\n적용: '+pv.effective+'\\n\\n계속할까요?')) return;
+  if(!confirm('[2/2] 정말로 적용할까요?\\n\\n실제 모의계좌(키움·KIS) 매매는 바뀌지 않습니다.')) return;
+  const d=await post('/api/virtual_config',{confirm:2});
+  if(d.ok){ await vcLoad(); }
+  msg(d.ok?`<span style="color:#10b981">✓ ${_lcEsc(d.msg)}</span>`:`<span style="color:#ef4444">${_lcEsc(d.msg||'저장 실패')}</span>`);
+}
+
 // ══ 2026-10-19 ① 섹션 접기/펴기(모든 탭) ② 전략 이름 마우스오버 설명(모든 탭) ══
 // 저장 키 = 탭 + (섹션 id 또는 탭 안 순번) — 제목 글자는 데이터 로딩 후 바뀌는 칸이 있어 키로 안 쓴다
 function _secKey(sec){ const tab=sec.closest('.tab-content');
@@ -4835,7 +5042,7 @@ function _stratTipInit(){
     cur.classList.remove('strat-hot'); cur=null; box.style.display='none';
   });
 }
-window.addEventListener('load',()=>{ try{ _secInit(); }catch(e){} try{ _stratTipInit(); }catch(e){} try{ lcLoad(); }catch(e){} });
+window.addEventListener('load',()=>{ try{ _secInit(); }catch(e){} try{ _stratTipInit(); }catch(e){} try{ lcLoad(); }catch(e){} try{ vcLoad(); }catch(e){} });
 window.addEventListener('load',()=>{
   load();
   initTableSort();

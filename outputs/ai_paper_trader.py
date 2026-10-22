@@ -16,6 +16,12 @@ ai_paper_trader.py — AI/강도 '가상매매 실행' (순수 장부 시뮬 —
   비용 = 왕복 0.33%(슬리피지 0.15×2 + 수수료 0.015×2). 익절/손절 없음(선별 효과만 분리).
   예산 = 남은현금/남은빈슬롯(라이브와 동일 균등분배), 동일종목 중복보유 스킵.
 
+[2026-10-22 §68] 전략 설정(virtual_config) — 강도매매 탭에서 두 포트폴리오마다 전략·칸·기준·면제·손절·익절을 고름.
+  설정은 '적용 신호일'별 이력 → 그날 유효한 설정으로 그날 신호를 처리(바꾸기 전 기록은 종전 규칙 그대로).
+  설정 항목이 있는 날: 고른 전략 신호만 · 전략별 칸 상한 · 기준(AI 확률/강도) 미만 제외(면제 전략은 통과)
+  · 손절/익절은 매일 종가로 판정해 그 종가에 청산(장부 시뮬은 종가만 씀) · 보유일은 산 날의 설정.
+  모의계좌가 안 쓰는 전략의 신호는 virtual_signal.py 가 db/virtual_signals.csv 에 만든다.
+
 출력: db/ai_paper_result.json (대시보드 강도매매 탭 '가상매매 실행' 패널이 읽음)
 수동 실행: python ai_paper_trader.py
 """
@@ -48,7 +54,7 @@ STRENGTH_LOG = "./db/signal_strength_log.csv"
 def load_signals():
     """키움+KIS 신호(START 이후) + 강도로그(score_ic/ai_prob) 병합."""
     frames = []
-    for f in ("paper_signals.csv", "kis_paper_signals.csv"):
+    for f in ("paper_signals.csv", "kis_paper_signals.csv", "db/virtual_signals.csv"):
         if os.path.exists(f):
             d = pd.read_csv(f, dtype={"code": str})
             frames.append(d)
@@ -58,6 +64,7 @@ def load_signals():
     s["signal_date"] = s["signal_date"].astype(str).str.replace("-", "")
     s = s[s["signal_date"] >= START].copy()
     s["code"] = s["code"].astype(str).str.zfill(6)
+    s = s.drop_duplicates(["signal_date", "code", "strategy"], keep="first")   # 가상 신호와 계좌 신호가 겹치면 계좌 것
     s["holding_days"] = pd.to_numeric(s["holding_days"], errors="coerce").fillna(20).astype(int)
     s["entry_price_close"] = pd.to_numeric(s["entry_price_close"], errors="coerce")
     s = s[s["entry_price_close"] > 0].dropna(subset=["entry_price_close"])
@@ -65,15 +72,18 @@ def load_signals():
         sl = pd.read_csv(STRENGTH_LOG, dtype={"code": str})
         sl["signal_date"] = sl["signal_date"].astype(str).str.replace("-", "")
         sl["code"] = sl["code"].astype(str).str.zfill(6)
-        sl = sl[["signal_date", "code", "strategy", "score_ic", "ai_prob"]] \
+        if "score_v2" not in sl.columns:
+            sl["score_v2"] = None
+        sl = sl[["signal_date", "code", "strategy", "score_ic", "ai_prob", "score_v2"]] \
             .drop_duplicates(["signal_date", "code", "strategy"], keep="last")
         s = s.merge(sl, on=["signal_date", "code", "strategy"], how="left")
     except Exception as e:
         print(f"[warn] 강도로그 병합 실패: {e}")
         s["score_ic"] = None
         s["ai_prob"] = None
-    s["score_ic"] = pd.to_numeric(s["score_ic"], errors="coerce")
-    s["ai_prob"] = pd.to_numeric(s["ai_prob"], errors="coerce")
+        s["score_v2"] = None
+    for c in ("score_ic", "ai_prob", "score_v2"):
+        s[c] = pd.to_numeric(s[c], errors="coerce")
     return s
 
 
@@ -101,10 +111,23 @@ def _px(closes, d, code):
     return float(v) if v is not None and v == v and v > 0 else None
 
 
-def simulate(sig, cal_all, cal, closes, rank_col, min_score=None):
+def _port_cfg(history, port, d):
+    """그 신호일의 포트폴리오 설정 → (None=종전 규칙, legacy 항목) 또는 (설정 dict, None)."""
+    if not history:
+        return None, None
+    import virtual_config as VC
+    e = VC.entry_for(history, d)
+    if e is None or e.get("legacy"):
+        return None, e
+    return e["portfolios"][port], None
+
+
+def simulate(sig, cal_all, cal, closes, rank_col, min_score=None, history=None, port=None, legacy_timeline=None):
     """rank_col(ai_prob | score_ic) 내림차순 슬롯 채움 시뮬 → 결과 dict.
 
-    min_score: 이 값 미만 신호는 슬롯이 비어도 미진입(현금 보유) — 라이브 필터 재현용.
+    min_score: 이 값 미만 신호는 슬롯이 비어도 미진입(현금 보유) — 라이브 필터 재현용(종전 규칙).
+    history/port: 가상매매 설정 이력(virtual_config) — 설정이 있는 신호일은 그 설정(전략·칸·기준·면제·손절·익절)으로.
+    legacy_timeline: 종전 규칙 구간의 강도 기준·면제를 '그날 모의계좌가 쓰던 값'으로(virtual_config.live_rules_timeline).
     """
     idx = {d: i for i, d in enumerate(cal_all)}
     cash = float(CAPITAL0)
@@ -122,6 +145,24 @@ def simulate(sig, cal_all, cal, closes, rank_col, min_score=None):
         # 고정)되던 것. 이제 거래 재개 첫 종가에 청산된다.
         for code in list(positions):
             p = positions[code]
+            # [2026-10-22] 설정의 손절·익절 — 산 다음 거래일부터 매일 종가로 판정, 그 종가에 청산
+            if cur_i < p["exit_idx"] and (p.get("stop") is not None or p.get("take") is not None) \
+                    and d > p["entry_date"]:
+                x = _px(closes, d, code)
+                if x:
+                    r_ = x / p["entry_px"] - 1
+                    why = ("손절" if p.get("stop") is not None and r_ <= p["stop"] / 100 else
+                           "익절" if p.get("take") is not None and r_ >= p["take"] / 100 else None)
+                    if why:
+                        net = r_ * 100 - COST_PCT
+                        proceeds = p["invest"] * (1 + net / 100)
+                        cash += proceeds
+                        trades.append({"code": code, "name": p["name"], "strategy": p["strategy"],
+                                       "entry_date": p["entry_date"], "exit_date": d,
+                                       "net_pct": round(net, 2), "pnl": int(proceeds - p["invest"]),
+                                       "score": p["score"], "reason": why})
+                        del positions[code]
+                        continue
             if cur_i < p["exit_idx"]:
                 continue
             x = None
@@ -138,19 +179,35 @@ def simulate(sig, cal_all, cal, closes, rank_col, min_score=None):
             trades.append({"code": code, "name": p["name"], "strategy": p["strategy"],
                            "entry_date": p["entry_date"], "exit_date": exit_d,
                            "net_pct": round(net, 2), "pnl": int(proceeds - p["invest"]),
-                           "score": p["score"]})
+                           "score": p["score"], "reason": "만기"})
             del positions[code]
 
         # 2) 신규 진입 — 당일 신호 rank_col 내림차순(라이브처럼 남은현금/남은빈슬롯 균등)
         g = by_date.get(d)
+        pc, legacy_e = _port_cfg(history, port, d)
+        if g is not None and pc is not None:
+            cash_box = [cash]
+            _enter_configured(g, pc, port, d, cal_all, positions, cash_box)
+            cash = cash_box[0]
+            g = None
         if g is not None:
-            if min_score is not None:
+            ms_ = min_score
+            ex_ = STRENGTH_EXEMPT
+            if legacy_timeline:                          # 그날 모의계좌가 실제로 쓰던 기준·면제(§68)
+                import virtual_config as VC
+                ms_t, ex_t = VC.legacy_rules(legacy_timeline, d)
+                ms_ = ms_t if min_score is not None else None
+                ex_ = set(ex_t)
+            elif legacy_e is not None:                   # 설정 이력의 '종전 규칙'(첫 저장 때 고정한 값)
+                ms_ = legacy_e.get("legacy_min_strength") if min_score is not None else None
+                ex_ = set(legacy_e.get("legacy_exempt") or [])
+            if ms_ is not None:
                 # 라이브 필터 재현(2026-07-12 수정): 키움은 '기록 없는' 신호를 통과시킨다
                 # (fail-open — 로거 장애가 매수 전면 중단으로 번지지 않게). 기존 시뮬은
                 # notna 로 무기록을 전부 제외(fail-closed)해 방향이 라이브와 반대였음.
                 # 무기록은 통과시키되 정렬 맨 뒤(NaN last) — 라이브의 tv순 폴백 근사.
-                cand = g[(g[rank_col].isna()) | (g[rank_col] >= min_score)
-                         | (g["strategy"].isin(STRENGTH_EXEMPT))]
+                cand = g[(g[rank_col].isna()) | (g[rank_col] >= ms_)
+                         | (g["strategy"].isin(ex_))]
                 cand = cand.sort_values(rank_col, ascending=False, na_position="last")
             else:
                 # ai 포트는 ai_prob 자체가 비교 대상 지표라 무기록 제외(기존 유지)
@@ -239,6 +296,62 @@ def simulate(sig, cal_all, cal, closes, rank_col, min_score=None):
     }
 
 
+def _enter_configured(g, pc, port, d, cal_all, positions, cash_box):
+    """설정 항목이 있는 날의 진입 — 고른 전략만, 기준(면제 통과), 순위 높은 순, 전략별 칸 상한·전체 10칸."""
+    import live_config as LC
+    rows = {LC.live_name(s["engine"]): s for s in pc["strategies"]}
+    c = g[g["strategy"].isin(rows)].copy()
+    if c.empty:
+        return
+    if port == "ai":
+        c["_rk"] = c["ai_prob"]
+    elif pc.get("strength_version") == "v2":
+        c["_rk"] = c["score_v2"].where(c["score_v2"].notna(), c["score_ic"])   # v2 모델 없으면 v1 점수(라이브와 같음)
+    else:
+        c["_rk"] = c["score_ic"]
+    ex = c["strategy"].map(lambda x: bool(rows[x].get("exempt")))
+    thr = pc.get("min_score")
+    above = c["_rk"].notna() if thr is None else (c["_rk"] >= thr)
+    if port == "ai":        # AI 확률이 없으면 비교 불가 → 제외(면제 전략만 통과)
+        ok = (c["_rk"].notna() & above) | ex
+    else:                   # 강도는 종전처럼 무기록 통과(정렬 맨 뒤)
+        ok = c["_rk"].isna() | above | ex
+    c = c[ok].sort_values("_rk", ascending=False, na_position="last")
+    for _, r in c.iterrows():
+        free = SLOTS - len(positions)
+        if free <= 0:
+            break
+        code, st = r["code"], r["strategy"]
+        if code in positions:
+            continue
+        row = rows[st]
+        if sum(1 for p in positions.values() if p["strategy"] == st) >= int(row["slots"]):
+            continue
+        invest = cash_box[0] / free
+        if invest < 10_000:
+            continue
+        ei = bisect.bisect_right(cal_all, d)
+        _sc = float(r["_rk"]) if pd.notna(r["_rk"]) else None
+        positions[code] = {"name": str(r.get("name", "")), "strategy": st, "entry_date": d,
+                           "entry_px": float(r["entry_price_close"]), "invest": invest,
+                           "exit_idx": ei + int(row["holding"]) - 1,
+                           "score": round(_sc, 4) if _sc is not None else None,
+                           "stop": row.get("stop"), "take": row.get("take")}
+        cash_box[0] -= invest
+
+
+def _config_view(history):
+    """결과 JSON 에 넣을 설정 요약(포트폴리오별 지금 적용 중·예약)."""
+    import virtual_config as VC
+    if not history:
+        return None
+    today = pd.Timestamp.now().strftime("%Y%m%d")
+    act = VC.entry_for(history, today)
+    pend = sorted([e for e in history if e["effective"] > today], key=lambda e: e["effective"])
+    return {"active_effective": act["effective"] if act else None, "active_legacy": bool(act and act.get("legacy")),
+            "pending_effective": pend[-1]["effective"] if pend else None}
+
+
 def main():
     sig = load_signals()
     if sig.empty:
@@ -249,14 +362,23 @@ def main():
         print("[ai_paper] 가격 데이터 없음 — 종료")
         return
     print(f"[ai_paper] 신호 {len(sig)}건({START}~) / 거래일 {len(cal)}일 시뮬")
+    import virtual_config as VC
+    hist = VC.load().get("history") or None          # 없으면 종전 규칙(설정 기능 고장 시에도 종전대로)
+    try:
+        tl = VC.live_rules_timeline()
+    except Exception as e:
+        print(f"[warn] 모의계좌 설정 이력 복원 실패 — 지금 값으로 과거 계산: {e}")
+        tl = None
     out = {
         "updated": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
         "start": START, "capital0": CAPITAL0, "slots": SLOTS, "cost_pct": COST_PCT,
+        "config": _config_view(hist),
         "portfolios": {
-            "ai":       simulate(sig, cal_all, cal, closes, "ai_prob"),
-            # min_score 는 kiwoom_trader.MIN_STRENGTH_SCORE 와 동기 유지(라이브 룰 쌍둥이)
+            "ai":       simulate(sig, cal_all, cal, closes, "ai_prob", history=hist, port="ai", legacy_timeline=tl),
+            # min_score 는 kiwoom_trader.MIN_STRENGTH_SCORE 와 동기 유지(라이브 룰 쌍둥이) — 설정 이력이 생기면 '종전 규칙' 구간만
             "strength": simulate(sig, cal_all, cal, closes, "score_ic",
-                                 min_score=_LC.account("kiwoom")["min_strength"]),
+                                 min_score=_LC.account("kiwoom")["min_strength"], history=hist, port="strength",
+                                 legacy_timeline=tl),
         },
     }
     os.makedirs("./db", exist_ok=True)

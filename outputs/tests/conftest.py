@@ -32,6 +32,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # 무관하게 '기본값(현행 구성)'으로 돌아야 한다(트레이더 상수는 import 시점에 설정을 읽으므로 가장 먼저 지정).
 import tempfile as _tempfile
 os.environ["LIVE_CONFIG_PATH"] = os.path.join(_tempfile.mkdtemp(prefix="lc_test_"), "live_config.json")
+# [2026-10-22] 가상매매 설정(db/virtual_config.json)도 같은 이유로 테스트 전용 임시 경로
+os.environ["VIRTUAL_CONFIG_PATH"] = os.path.join(_tempfile.mkdtemp(prefix="vc_test_"), "virtual_config.json")
 
 _sent = []
 

@@ -273,9 +273,11 @@ def test_live_config_save_guards(dash, cfgpath, monkeypatch):
 
 def test_dashboard_has_config_panels_and_two_confirms():
     src = open(os.path.join(OUTPUTS, "integrated_dashboard_server.py"), encoding="utf-8").read()
-    assert 'id="lc-mock"' in src and 'id="lc-strength"' in src
+    # [2026-10-22 §68] 강도매매 탭은 AI·강도 가상매매 설정(vc-strength) — 모의계좌 설정은 모의계좌 탭에만
+    assert 'id="lc-mock"' in src and 'id="vc-strength"' in src and 'id="lc-strength"' not in src
     assert "confirm('[1/2]" in src and "confirm('[2/2]" in src and "{confirm:2}" in src
-    assert "lcLoad(); }catch(e){}" in src
+    assert "lcLoad(); }catch(e){}" in src and "vcLoad(); }catch(e){}" in src
+    assert src.count("{confirm:2}") >= 2, "가상매매 설정도 두 번 확인"
 
 
 # ── 백테스트 손절·익절 ──

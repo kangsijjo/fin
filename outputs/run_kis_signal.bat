@@ -42,6 +42,10 @@ REM    alert and signals still run (exit code ignored on purpose).
 set "EC=!ERRORLEVEL!"
 echo [%date% %time%] KIS signal done. ExitCode=!EC! >> "%LOGFILE%"
 
+REM -- [2026-10-22] signals for virtual-only strategies (virtual_config; never used for orders) --
+!PYEXE! -u virtual_signal.py >> "%LOGFILE%" 2>&1
+echo [%date% %time%] virtual_signal done. ExitCode=!ERRORLEVEL! >> "%LOGFILE%"
+
 REM -- AI/strength virtual portfolios (ledger sim, deterministic recompute; both signal sets ready by 18:31) --
 !PYEXE! -u ai_paper_trader.py >> "%LOGFILE%" 2>&1
 echo [%date% %time%] ai_paper done. ExitCode=!ERRORLEVEL! >> "%LOGFILE%"
