@@ -1077,7 +1077,8 @@ def _live_tables(acct):
         labels[ln] = _LIVE_BASE_LABEL.get(ln) or d.get("title") or ln
         ent = _LIVE_BASE_ENTRY.get(ln) or " + ".join(d.get("buy") or []) or ln
         entries[ln] = ent + (" · 강도 필터 면제(강도순 정렬만)" if ln in A["exempt"]
-                             else f" + 강도(score_ic) ≥ {A['min_strength']:g}")
+                             else f" + 강도 ≥ {A['min_strength_by'].get(ln, A['min_strength']):g}"
+                                  + ("(전략별)" if A['min_strength_by'].get(ln, A['min_strength']) != A['min_strength'] else ""))
         holds[ln] = A["holding"][ln]
         st, tk = A["stop"].get(ln), A["take"].get(ln)
         stops[ln] = round(st * 100) if st is not None else ""
@@ -2534,7 +2535,8 @@ def _lc_from_request(b):
                 return float(v)
             e = str(x.get("engine", ""))
             rows.append({"engine": e, "slots": int(x.get("slots") or 0), "exempt": bool(x.get("exempt")),
-                         "stop": num(x.get("stop")), "take": num(x.get("take")), "holding": hold.get(e, 20)})
+                         "stop": num(x.get("stop")), "take": num(x.get("take")), "holding": hold.get(e, 20),
+                         "min_strength": num(x.get("min_strength"))})      # [§71] 전략별 강도 기준(비우면 계좌 기본)
         new["accounts"][a] = {"min_strength": float(A.get("min_strength", 5.7)),
                               "strength_version": str(A.get("strength_version") or "v1"), "strategies": rows}
     return new
@@ -4792,6 +4794,7 @@ function lcRender(){
             :'<div style="color:#fbbf24;font-size:11px">v2 모델 없음 — 저장하면 학습(1~3분), 그 전엔 v1 점수로 대체</div>'):''}</td>
         <td><input type="number" min="1" max="10" step="1" value="${s.slots}" style="${inp};width:52px" onchange="lcSet('${a}',${i},'slots',this.value)"></td>
         <td style="text-align:center"><input type="checkbox" ${s.exempt?'checked':''} onchange="lcSet('${a}',${i},'exempt',this.checked)" title="체크하면 강도 기준과 상관없이 삼(후보가 많으면 강도 높은 순)"></td>
+        <td>${s.exempt?'<span style="color:#64748b;font-size:11px">면제</span>':`<input type="number" min="0" max="10" step="0.1" placeholder="기본 ${A.min_strength}" value="${s.min_strength==null?'':s.min_strength}" style="${inp};width:70px${s.min_strength!=null?';border-color:#38bdf8':''}" title="이 전략만의 강도 기준 — 비우면 계좌 기본값(${A.min_strength})" onchange="lcSet('${a}',${i},'min_strength',this.value)">`}</td>
         <td><input type="number" step="1" min="-50" max="-1" placeholder="없음" value="${s.stop==null?'':s.stop}" style="${inp};width:64px" onchange="lcSet('${a}',${i},'stop',this.value)"></td>
         <td><input type="number" step="1" min="1" max="300" placeholder="없음" value="${s.take==null?'':s.take}" style="${inp};width:64px" onchange="lcSet('${a}',${i},'take',this.value)"></td>
         <td style="color:#94a3b8">${e.holding??s.holding}일</td>
@@ -4801,14 +4804,14 @@ function lcRender(){
     return `<div style="flex:1;min-width:560px;background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:10px 12px">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
         <b style="font-size:14px">${_lcEsc(L.config.accounts[a].label)}</b>
-        <label style="font-size:13px;color:#cbd5e1">강도 기준 ≥
+        <label style="font-size:13px;color:#cbd5e1" title="전략별 칸을 비운 전략에 쓰는 기본값">기본 강도 기준 ≥
           <input type="number" min="0" max="10" step="0.1" value="${A.min_strength}" style="${inp};width:62px" onchange="lcSetAcc('${a}','min_strength',this.value)"></label>
         <select style="${inp};font-size:12px" title="v1: 라이브 6전략 공통 가중치(종전) / v2: 전략마다 자기 과거 매매로 학습(방향이 해마다 유지된 지표만·시장 지표 제외, §62). v2 권장 기준 5.5" onchange="lcSetAcc('${a}','strength_version',this.value)">
           <option value="v1"${(A.strength_version||'v1')==='v1'?' selected':''}>강도 v1(공통)</option>
           <option value="v2"${A.strength_version==='v2'?' selected':''}>강도 v2(전략별)</option></select>
         <span style="font-size:12px;color:${tot===L.slots_total?'#10b981':'#ef4444'}">슬롯 합 ${tot}/${L.slots_total}</span></div>
       <table style="font-size:12px;margin-top:6px;width:100%"><thead><tr><th>순서</th><th>전략</th><th>슬롯</th>
-        <th title="강도 기준과 상관없이 삼">강도 면제</th><th title="${_lcEsc(stopSem)}">손절 %</th><th title="${_lcEsc(takeSem)}">익절 %</th><th>보유</th><th></th></tr></thead>
+        <th title="강도 기준과 상관없이 삼">강도 면제</th><th title="전략마다 다른 강도 기준 — 비우면 위의 계좌 기본값">강도 기준</th><th title="${_lcEsc(stopSem)}">손절 %</th><th title="${_lcEsc(takeSem)}">익절 %</th><th>보유</th><th></th></tr></thead>
         <tbody>${rows}</tbody></table>
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
         ${A.strategies.length<L.max_strategies?`<button class="runbtn" onclick="lcAdd('${a}')">+ 전략 추가</button>`:'<span style="font-size:11px;color:#64748b">전략은 최대 4개</span>'}
@@ -4834,8 +4837,8 @@ function _lcMsg(h){ _LC_BOX.forEach(id=>setHtml('lc-msg-'+id,h)); }
 function lcSet(a,i,k,v){
   const s=_lcDraft[a].strategies[i];
   if(k==='slots') s.slots=parseInt(v||'0',10)||0;
-  else if(k==='exempt') s.exempt=!!v;
-  else if(k==='stop'||k==='take') s[k]=(v===''||v==null)?null:Number(v);
+  else if(k==='exempt'){ s.exempt=!!v; if(s.exempt) s.min_strength=null; }   // 면제면 전략별 기준은 의미 없음
+  else if(k==='stop'||k==='take'||k==='min_strength') s[k]=(v===''||v==null)?null:Number(v);
   else if(k==='engine'){ s.engine=v; const e=_lcEng(v); s.holding=e.holding; }
   lcRender();
 }
@@ -4845,7 +4848,7 @@ function lcDel(a,i){ const S=_lcDraft[a].strategies; if(S.length<=1){ alert('전
 function lcAdd(a){
   const S=_lcDraft[a].strategies, used=new Set(S.map(s=>s.engine));
   const e=_lcSorted().find(x=>!used.has(x.engine)); if(!e) return;
-  S.push({engine:e.engine,slots:1,exempt:false,stop:null,take:null,holding:e.holding}); lcRender();
+  S.push({engine:e.engine,slots:1,exempt:false,stop:null,take:null,min_strength:null,holding:e.holding}); lcRender();
 }
 async function lcSave(){
   const post=async(url,extra)=>{ const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Action':'1'},
@@ -4893,14 +4896,15 @@ function vcRender(){
             :'<div style="color:#fbbf24;font-size:11px">v2 모델 없음 — 저장하면 학습(1~3분), 그 전엔 v1 점수로 대체</div>'):''}</td>
         <td><input type="number" min="1" max="10" step="1" value="${s.slots}" style="${inp};width:52px" onchange="vcSet('${p}',${i},'slots',this.value)"></td>
         <td style="text-align:center"><input type="checkbox" ${s.exempt?'checked':''} onchange="vcSet('${p}',${i},'exempt',this.checked)" title="체크하면 기준과 상관없이 후보(후보가 많으면 순위 높은 순)"></td>
+        <td>${s.exempt?'<span style="color:#64748b;font-size:11px">면제</span>':`<input type="number" min="0" max="${isAI?1:10}" step="${isAI?0.01:0.1}" placeholder="${P.min_score==null?'기본 없음':'기본 '+P.min_score}" value="${s.min_score==null?'':s.min_score}" style="${inp};width:70px${s.min_score!=null?';border-color:#38bdf8':''}" title="이 전략만의 기준 — 비우면 위의 기본 기준" onchange="vcSet('${p}',${i},'min_score',this.value)">`}</td>
         <td><input type="number" step="1" min="-50" max="-1" placeholder="없음" value="${s.stop==null?'':s.stop}" style="${inp};width:64px" onchange="vcSet('${p}',${i},'stop',this.value)"></td>
         <td><input type="number" step="1" min="1" max="300" placeholder="없음" value="${s.take==null?'':s.take}" style="${inp};width:64px" onchange="vcSet('${p}',${i},'take',this.value)"></td>
         <td style="color:#94a3b8">${e.holding??s.holding}일</td>
         <td><button class="runbtn" style="padding:0 7px" onclick="vcDel('${p}',${i})">✕</button></td></tr>`; }).join('');
     const thr=isAI
-      ? `<label style="font-size:13px;color:#cbd5e1" title="AI 확률(meta 모델 big-win 확률, 0~1) 이 값 이상만 삼. 비우면 기준 없이 확률 높은 순">AI 확률 기준 ≥
+      ? `<label style="font-size:13px;color:#cbd5e1" title="AI 확률(meta 모델 big-win 확률, 0~1) 이 값 이상만 삼. 비우면 기준 없이 확률 높은 순">기본 AI 확률 기준 ≥
            <input type="number" min="0" max="1" step="0.01" placeholder="없음" value="${P.min_score==null?'':P.min_score}" style="${inp};width:68px" onchange="vcSetP('${p}','min_score',this.value)"></label>`
-      : `<label style="font-size:13px;color:#cbd5e1" title="강도 점수(0~10) 이 값 이상만 삼. 비우면 기준 없이 강도 높은 순">강도 기준 ≥
+      : `<label style="font-size:13px;color:#cbd5e1" title="강도 점수(0~10) 이 값 이상만 삼. 비우면 기준 없이 강도 높은 순">기본 강도 기준 ≥
            <input type="number" min="0" max="10" step="0.1" placeholder="없음" value="${P.min_score==null?'':P.min_score}" style="${inp};width:62px" onchange="vcSetP('${p}','min_score',this.value)"></label>
          <select style="${inp};font-size:12px" onchange="vcSetP('${p}','strength_version',this.value)">
            <option value="v1"${(P.strength_version||'v1')==='v1'?' selected':''}>강도 v1(공통)</option>
@@ -4911,7 +4915,7 @@ function vcRender(){
         ${thr}
         <span style="font-size:12px;color:${tot===V.slots_total?'#10b981':'#ef4444'}">슬롯 합 ${tot}/${V.slots_total}</span></div>
       <table style="font-size:12px;margin-top:6px;width:100%"><thead><tr><th>순서</th><th>전략</th><th>슬롯</th>
-        <th title="기준과 상관없이 후보">${isAI?'AI 기준 면제':'강도 면제'}</th><th title="매일 종가로 판정 → 그 종가에 청산">손절 %</th><th title="매일 종가로 판정 → 그 종가에 청산">익절 %</th><th>보유</th><th></th></tr></thead>
+        <th title="기준과 상관없이 후보">${isAI?'AI 기준 면제':'강도 면제'}</th><th title="전략마다 다른 기준 — 비우면 위의 기본 기준">${isAI?'AI 기준':'강도 기준'}</th><th title="매일 종가로 판정 → 그 종가에 청산">손절 %</th><th title="매일 종가로 판정 → 그 종가에 청산">익절 %</th><th>보유</th><th></th></tr></thead>
         <tbody>${rows}</tbody></table>
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
         ${P.strategies.length<V.max_strategies?`<button class="runbtn" onclick="vcAdd('${p}')">+ 전략 추가</button>`:`<span style="font-size:11px;color:#64748b">전략은 최대 ${V.max_strategies}개</span>`}
@@ -4936,8 +4940,8 @@ function vcRender(){
 function vcSet(p,i,k,v){
   const s=_vcDraft[p].strategies[i];
   if(k==='slots') s.slots=parseInt(v||'0',10)||0;
-  else if(k==='exempt') s.exempt=!!v;
-  else if(k==='stop'||k==='take') s[k]=(v===''||v==null)?null:Number(v);
+  else if(k==='exempt'){ s.exempt=!!v; if(s.exempt) s.min_score=null; }
+  else if(k==='stop'||k==='take'||k==='min_score') s[k]=(v===''||v==null)?null:Number(v);
   else if(k==='engine'){ s.engine=v; const e=_vcEng(v); s.holding=e.holding; }
   vcRender();
 }
@@ -4947,7 +4951,7 @@ function vcDel(p,i){ const S=_vcDraft[p].strategies; if(S.length<=1){ alert('전
 function vcAdd(p){
   const S=_vcDraft[p].strategies, used=new Set(S.map(s=>s.engine));
   const e=_vcSorted().find(x=>!used.has(x.engine)); if(!e) return;
-  S.push({engine:e.engine,slots:1,exempt:false,stop:null,take:null,holding:e.holding}); vcRender();
+  S.push({engine:e.engine,slots:1,exempt:false,stop:null,take:null,min_score:null,holding:e.holding}); vcRender();
 }
 async function vcSave(){
   const post=async(url,extra)=>{ const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Action':'1'},

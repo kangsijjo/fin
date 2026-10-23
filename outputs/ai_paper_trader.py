@@ -193,11 +193,13 @@ def simulate(sig, cal_all, cal, closes, rank_col, min_score=None, history=None, 
         if g is not None:
             ms_ = min_score
             ex_ = STRENGTH_EXEMPT
+            by_ = {}
             if legacy_timeline:                          # 그날 모의계좌가 실제로 쓰던 기준·면제(§68)
                 import virtual_config as VC
                 ms_t, ex_t = VC.legacy_rules(legacy_timeline, d)
                 ms_ = ms_t if min_score is not None else None
                 ex_ = set(ex_t)
+                by_ = VC.legacy_by(legacy_timeline, d) if min_score is not None else {}
             elif legacy_e is not None:                   # 설정 이력의 '종전 규칙'(첫 저장 때 고정한 값)
                 ms_ = legacy_e.get("legacy_min_strength") if min_score is not None else None
                 ex_ = set(legacy_e.get("legacy_exempt") or [])
@@ -206,7 +208,8 @@ def simulate(sig, cal_all, cal, closes, rank_col, min_score=None, history=None, 
                 # (fail-open — 로거 장애가 매수 전면 중단으로 번지지 않게). 기존 시뮬은
                 # notna 로 무기록을 전부 제외(fail-closed)해 방향이 라이브와 반대였음.
                 # 무기록은 통과시키되 정렬 맨 뒤(NaN last) — 라이브의 tv순 폴백 근사.
-                cand = g[(g[rank_col].isna()) | (g[rank_col] >= ms_)
+                th_ = g["strategy"].map(lambda x: by_.get(x, ms_))          # [§71] 그날 계좌의 전략별 기준
+                cand = g[(g[rank_col].isna()) | (g[rank_col] >= th_)
                          | (g["strategy"].isin(ex_))]
                 cand = cand.sort_values(rank_col, ascending=False, na_position="last")
             else:
@@ -311,7 +314,10 @@ def _enter_configured(g, pc, port, d, cal_all, positions, cash_box):
         c["_rk"] = c["score_ic"]
     ex = c["strategy"].map(lambda x: bool(rows[x].get("exempt")))
     thr = pc.get("min_score")
-    above = c["_rk"].notna() if thr is None else (c["_rk"] >= thr)
+    # [§71] 전략별 기준(행 min_score) — 비우면 포트폴리오 기준, 그것도 비우면 기준 없음
+    th = pd.to_numeric(c["strategy"].map(
+        lambda x: rows[x].get("min_score") if rows[x].get("min_score") is not None else thr), errors="coerce")
+    above = c["_rk"].notna() & (th.isna() | (c["_rk"] >= th.fillna(-1e9)))
     if port == "ai":        # AI 확률이 없으면 비교 불가 → 제외(면제 전략만 통과)
         ok = (c["_rk"].notna() & above) | ex
     else:                   # 강도는 종전처럼 무기록 통과(정렬 맨 뒤)

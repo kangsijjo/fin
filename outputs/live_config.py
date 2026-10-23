@@ -8,6 +8,8 @@ live_config.py — 모의매매 전략 설정(계좌별 전략·슬롯·강도·
     파일이 없거나 깨졌으면 **현행 기본값**(아래 DEFAULT) — 설정 기능이 고장 나도 매매는 종전대로.
 
 단위: JSON 의 stop/take 는 **퍼센트**(예 -15, 50). 트레이더용 접근자는 비율(-0.15, 0.50)로 돌려준다.
+전략별 강도 기준(2026-10-23 §71): 전략 행의 min_strength(0~10)가 있으면 그 전략은 그 값, 비우면(None) 계좌 기본값.
+      트레이더는 account()["min_strength_by"][라이브이름] 로 읽는다(면제 전략은 기준과 무관).
 이름: 설정은 백테스트 엔진 이름(engine)으로 저장, 신호 CSV·원장엔 라이브 이름(live)을 쓴다
       (기존 두 전략만 별칭: star_high_52w_20_filt→high_52w_filt, star_high_500d_20→high_500d_filt).
 청산 규칙 누적(exit_rules): 전략을 빼도 그 전략으로 산 보유분은 만기까지 남는다 → 그 보유분의 손절·익절이
@@ -119,6 +121,9 @@ def validate(cfg, engine_names=None):
                 errs.append(f"{lab}: {e} 보유일 1~120")
             if not isinstance(s.get("exempt"), bool):
                 errs.append(f"{lab}: {e} 강도 면제 값 오류")
+            sm = s.get("min_strength")
+            if sm is not None and (not isinstance(sm, (int, float)) or isinstance(sm, bool) or not 0 <= sm <= 10):
+                errs.append(f"{lab}: {e} 전략별 강도 기준은 0~10 또는 비움")
         if tot != SLOTS_TOTAL:
             errs.append(f"{lab}: 슬롯 합이 {tot} — {SLOTS_TOTAL} 이어야 합니다")
     return errs
@@ -152,7 +157,8 @@ def account(acct, cfg=None):
     rows = A["strategies"]
     out = {"min_strength": float(A["min_strength"]), "rows": rows,
            "strength_version": A.get("strength_version", "v1"),
-           "slots": {}, "priority": [], "exempt": set(), "stop": {}, "take": {}, "holding": {}, "engine": {}}
+           "slots": {}, "priority": [], "exempt": set(), "stop": {}, "take": {}, "holding": {}, "engine": {},
+           "min_strength_by": {}}
     # 누적 규칙 먼저(옛 보유분), 그 위에 현재 규칙
     for ln, r in (cfg.get("exit_rules") or {}).items():
         if r.get("stop") is not None:
@@ -167,6 +173,8 @@ def account(acct, cfg=None):
         out["priority"].append(ln)
         out["engine"][ln] = s["engine"]
         out["holding"][ln] = int(s["holding"])
+        sm = s.get("min_strength")
+        out["min_strength_by"][ln] = float(sm) if sm is not None else out["min_strength"]   # [§71] 전략별 강도 기준
         if s.get("exempt"):
             out["exempt"].add(ln)
         out["stop"].pop(ln, None)
@@ -225,6 +233,7 @@ def diff(old, new):
             if e not in om:
                 s = nm[e]
                 out.append(f"{lab} + {e} ({s['slots']}슬롯{', 강도 면제' if s['exempt'] else ''}"
+                           f"{', 강도 기준 ' + format(s['min_strength'], 'g') if s.get('min_strength') is not None else ''}"
                            f"{', 손절 ' + format(s['stop'], 'g') + '%' if s['stop'] is not None else ''}"
                            f"{', 익절 +' + format(s['take'], 'g') + '%' if s['take'] is not None else ''})")
         for e in om:
@@ -232,8 +241,8 @@ def diff(old, new):
                 out.append(f"{lab} − {e} (보유분은 만기까지 그대로)")
         for e in nm:
             if e in om:
-                ch = [f"{k} {_fmt(om[e].get(k))}→{_fmt(nm[e].get(k))}"
-                      for k in ("slots", "exempt", "stop", "take") if om[e].get(k) != nm[e].get(k)]
+                ch = [f"{ {'min_strength': '강도기준'}.get(k, k)} {_fmt(om[e].get(k))}→{_fmt(nm[e].get(k))}"
+                      for k in ("slots", "exempt", "stop", "take", "min_strength") if om[e].get(k) != nm[e].get(k)]
                 if ch:
                     out.append(f"{lab} {e}: " + ", ".join(ch))
     return out
@@ -253,7 +262,8 @@ def save(new, note="", engine_names=None):
     cfg = {"version": 1, "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "note": note or "",
            "accounts": {a: {"min_strength": float(new["accounts"][a]["min_strength"]),
                             "strength_version": new["accounts"][a].get("strength_version", "v1"),
-                            "strategies": [{k: s.get(k) for k in ("engine", "slots", "exempt", "stop", "take", "holding")}
+                            "strategies": [{k: s.get(k) for k in ("engine", "slots", "exempt", "stop", "take", "holding",
+                                                                  "min_strength")}
                                            for s in new["accounts"][a]["strategies"]]}
                         for a in ACCOUNTS}}
     rules = dict(old.get("exit_rules") or {})

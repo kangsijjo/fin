@@ -223,6 +223,12 @@ CIRCUIT_BREAKER_PCT = -40.0
 # 매매가 전면 중단되는 것을 막기 위함(이 경로로는 6 미만도 통과 가능).
 MIN_STRENGTH_SCORE = _ACC["min_strength"]     # 기본 5.7
 STRENGTH_VERSION = _ACC["strength_version"]   # [2026-10-22] v1(공통) / v2(전략별) — 기본 v1
+# [2026-10-23 §71] 전략별 강도 기준(대시보드에서 전략마다 고름, 비우면 계좌 기본값 MIN_STRENGTH_SCORE)
+STRENGTH_TH = dict(_ACC["min_strength_by"])
+
+
+def _th(strat):
+    return STRENGTH_TH.get(strat, MIN_STRENGTH_SCORE)
 
 
 def _strength_gate(strat, sc):
@@ -231,9 +237,10 @@ def _strength_gate(strat, sc):
         return True, (f"강도 면제({sc:.2f})" if sc is not None else "강도 면제(무기록)")
     if sc is None:
         return False, "강도 확인 불가(재계산 실패) → 차단"
-    if sc < MIN_STRENGTH_SCORE:
-        return False, f"강도 {sc:.2f} < {MIN_STRENGTH_SCORE}"
-    return True, f"강도 {sc:.2f} ≥ {MIN_STRENGTH_SCORE}"
+    th = _th(strat)
+    if sc < th:
+        return False, f"강도 {sc:.2f} < {th:g}"
+    return True, f"강도 {sc:.2f} ≥ {th:g}"
 
 
 # ------------------------------------------------------------
@@ -838,8 +845,8 @@ def cmd_buy():
         n_weak = sum(1 for s in sigs
                      if str(s.get("strategy", "")) not in STRENGTH_EXEMPT
                      and strength.get((str(s.get("code", "")).zfill(6),
-                                       str(s.get("strategy", ""))), 99) < MIN_STRENGTH_SCORE)
-        print(f"[buy] 강도 필터: score_ic < {MIN_STRENGTH_SCORE} 스킵 예정 {n_weak}건 / 기록 {len(strength)}건"
+                                       str(s.get("strategy", ""))), 99) < _th(str(s.get("strategy", ""))))
+        print(f"[buy] 강도 필터: 강도 < 기준({MIN_STRENGTH_SCORE:g}, 전략별 {STRENGTH_TH}) 스킵 예정 {n_weak}건 / 기록 {len(strength)}건"
               f" (면제: {', '.join(sorted(STRENGTH_EXEMPT))})")
     else:
         print("[buy] 강도 기록 없음 — 재확인 단계에서 재계산 시도")

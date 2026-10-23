@@ -268,7 +268,7 @@ def test_live_config_save_guards(dash, cfgpath, monkeypatch):
     saved = json.loads(cfgpath.read_text(encoding="utf-8"))
     assert saved["accounts"]["kiwoom"]["strategies"][0]["holding"] == 15, "보유일은 화면 값이 아니라 엔진 값"
     assert dash._live_tables("kiwoom")[0] == {"gc_20_60": 10}
-    assert "강도(score_ic) ≥ 6" in dash._live_tables("kiwoom")[3]["gc_20_60"]
+    assert "강도 ≥ 6" in dash._live_tables("kiwoom")[3]["gc_20_60"]
 
 
 def test_dashboard_has_config_panels_and_two_confirms():

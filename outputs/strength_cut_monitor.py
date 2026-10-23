@@ -51,6 +51,7 @@ DAILY = "./macro_data/daily"
 import live_config as _LC
 _KW, _KI = _LC.account("kiwoom"), _LC.account("kis")
 CUR_TH = {"kiwoom": _KW["min_strength"], "kis": _KI["min_strength"]}
+CUR_TH_BY = {"kiwoom": dict(_KW["min_strength_by"]), "kis": dict(_KI["min_strength_by"])}   # [§71] 전략별 기준
 CUTS_40 = {"high_52w_filt": 3.14, "rsi_reversal": 6.65, "rsi_vol": 5.99,
            "h52w_for3d_mkt": 3.53, "for_high20_mkt": 3.75, "gc_for3d": 4.47}
 CUTS_50 = {"high_52w_filt": 2.94, "rsi_reversal": 6.40, "rsi_vol": 5.69,
@@ -65,7 +66,11 @@ HOLD = {**_KW["holding"], **_KI["holding"]}
 STOP = {**_KW["stop"], **_KI["stop"]}
 TAKE = {**_KW["take"], **_KI["take"]}
 EXEMPT = _KW["exempt"] | _KI["exempt"]          # = kis ∪ kiwoom STRENGTH_EXEMPT
-COST = 0.245            # 수수료+세금+슬리피지 (DEFAULT_COSTS.total_pct)
+# [2026-10-23] 비용 = 백테스트 엔진과 같은 함수(매도 연도의 실제 거래세 + 수수료·슬리피지 왕복, §64). 종전 0.245 고정.
+def COST_AT(exit_date):
+    from strategy_engine import DEFAULT_COSTS
+    from strategies._swing_base import trade_cost_pct
+    return trade_cost_pct(DEFAULT_COSTS, exit_date)
 
 
 def load_panel(since):
@@ -112,13 +117,13 @@ def exit_of(panel, code, entry_date, strat):
     last = i + hold - 1
     for j in range(i, min(last, len(dates) - 1) + 1):
         if sp is not None and lo[j] <= sp:
-            return ep, (min(sp, op[j]) / ep - 1) * 100 - COST, "손절", dates[j], True
+            return ep, (min(sp, op[j]) / ep - 1) * 100 - COST_AT(dates[j]), "손절", dates[j], True
         if tp is not None and hi[j] >= tp:
-            return ep, (max(tp, op[j]) / ep - 1) * 100 - COST, "익절", dates[j], True
+            return ep, (max(tp, op[j]) / ep - 1) * 100 - COST_AT(dates[j]), "익절", dates[j], True
     if last < len(dates):                       # 만기 도달
-        return ep, (cl[last] / ep - 1) * 100 - COST, "만기", dates[last], True
+        return ep, (cl[last] / ep - 1) * 100 - COST_AT(dates[last]), "만기", dates[last], True
     # 아직 보유 중 — 마지막 종가로 평가
-    return ep, (cl[-1] / ep - 1) * 100 - COST, "보유중", dates[-1], False
+    return ep, (cl[-1] / ep - 1) * 100 - COST_AT(dates[-1]), "보유중", dates[-1], False
 
 
 def simulate(sig, panel, tdates, cuts, rule):
@@ -147,7 +152,7 @@ def simulate(sig, panel, tdates, cuts, rule):
             for strat in PRIORITY[acct]:
                 cand = d2[d2["strategy"] == strat].sort_values("sc", ascending=False)
                 for r in cand.itertuples():
-                    th = CUR_TH[acct] if cuts is None else cuts.get(strat)
+                    th = CUR_TH_BY[acct].get(strat, CUR_TH[acct]) if cuts is None else cuts.get(strat)
                     if strat not in EXEMPT and (th is None or r.sc < th):
                         continue
                     if r.code in held:
