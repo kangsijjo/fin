@@ -4870,7 +4870,7 @@ function lcRender(){
         <th title="강도 기준과 상관없이 삼">강도 면제</th><th title="전략마다 다른 강도 기준 — 비우면 위의 계좌 기본값">강도 기준</th><th title="${_lcEsc(stopSem)}">손절 %</th><th title="${_lcEsc(takeSem)}">익절 %</th><th>보유</th><th></th></tr></thead>
         <tbody>${rows}</tbody></table>
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
-        ${A.strategies.length<L.max_strategies?`<button class="runbtn" onclick="lcAdd('${a}')">+ 전략 추가</button>`:'<span style="font-size:11px;color:#64748b">전략은 최대 4개</span>'}
+        ${A.strategies.length<L.max_strategies?`<button class="runbtn" onclick="lcAdd('${a}')">+ 전략 추가</button>`:`<span style="font-size:11px;color:#64748b">전략은 최대 ${L.max_strategies}개</span>`}
         <span style="font-size:11px;color:#64748b">손절: ${_lcEsc(stopSem)} · 익절: ${_lcEsc(takeSem)} · 보유일은 전략 정의대로</span></div></div>`;
   };
   const hist=(L.history||[]).slice(0,5).map(h=>`<div>· <b>${_lcEsc(h.time)}</b> ${_lcEsc((h.changes||[]).join(' / ')||'변경 없음')}</div>`).join('');

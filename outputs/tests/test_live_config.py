@@ -64,7 +64,9 @@ def test_validate_rules():
     assert "두 번" in errs and "슬롯 합이 9" in errs
     errs = " | ".join(LC.validate(_cfg_with([row("a", 10, stop=-60, take=0.5)], ms=11)))
     assert "손절" in errs and "익절" in errs and "강도 기준" in errs
-    assert "1~4개" in " ".join(LC.validate(_cfg_with([row(f"s{i}", 2) for i in range(5)])))
+    n = LC.MAX_STRATEGIES                                   # [2026-10-26] 4→5 — 한도는 설정값을 따른다
+    assert LC.validate(_cfg_with([row(f"s{i}", 2) for i in range(5)])) == [], "5개(칸 2씩=10) 허용"
+    assert f"1~{n}개" in " ".join(LC.validate(_cfg_with([row(f"s{i}", 1) for i in range(n + 1)])))
     assert "알 수 없는" in " ".join(LC.validate(_cfg_with([row("nope", 10)]), engine_names={"rsi_reversal"}))
 
 

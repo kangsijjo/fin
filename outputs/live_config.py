@@ -24,7 +24,7 @@ from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SLOTS_TOTAL = 10
-MAX_STRATEGIES = 4
+MAX_STRATEGIES = 5          # [2026-10-26] 4→5 (사용자 요청)
 ACCOUNTS = ("kiwoom", "kis")
 ACCOUNT_LABEL = {"kiwoom": "키움 안C", "kis": "KIS 안D"}
 ALIAS = {"star_high_52w_20_filt": "high_52w_filt", "star_high_500d_20": "high_500d_filt"}   # engine → live
