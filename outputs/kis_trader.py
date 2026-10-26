@@ -98,6 +98,13 @@ STRATEGY_STOP = dict(_ACC["stop"])           # 기본: -0.15 / -0.10 / -0.26 (+ 
 # [2026-10-21] 익절 — 손절과 같은 방식(전일 종가 판정 → 다음날 09:01 시가 매도). 기본은 없음.
 STRATEGY_TAKE = dict(_ACC["take"])
 
+
+def _stop_txt(strat):
+    """[2026-10-26] 손절 없는 전략(설정에서 비움)도 안전하게 표시 — 종전 STRATEGY_STOP[strat] 은 KeyError 로
+    매수 루프·잔고 출력이 통째로 죽었다(10-26 stoch_os20_mkt 추가 후 KisTraderAM/PM rc=1)."""
+    v = STRATEGY_STOP.get(strat)
+    return "stop 없음" if v is None else f"stop {v * 100:.0f}%"
+
 # 강도 필터(2026-07-21 신설, 사용자 결정) — score_ic(0~10)가 이 값 미만이면 매수 스킵.
 # 종전 KIS 는 강도로 '정렬만' 하고 차단은 안 해(표본 축적 우선) 6 미만도 전량 매수 후보였음
 # — 실제로 7월 KIS 신호 14건 중 6.0 이상은 1건뿐이라 대부분이 6 미만 체결(보유 092730
@@ -1047,9 +1054,8 @@ def cmd_status():
     print(f"[평가손익] {_sm.get('eval_pnl', 0):,} 원  (매입합계 {_sm.get('purchase_amt', 0):,})")
     print(f"[보유 종목] {len(positions)} / {MAX_CONCURRENT} 슬롯")
     for strat in STRATEGY_PRIORITY:
-        stop_pct = STRATEGY_STOP[strat]
         print(f"  {strat}: {slot_used[strat]}/{STRATEGY_MAX_SLOTS[strat]}"
-              f"  (stop {stop_pct*100:.0f}%)")
+              f"  ({_stop_txt(strat)})")
     for code, p in positions.items():
         pos_info = kis_pos.get(code, {})
         entry_px = pos_info.get("entry_px", 0)
@@ -1384,7 +1390,7 @@ def cmd_buy():
         if avail <= 0:
             continue
         strat_sigs = sigs_by_strat.get(strat, [])
-        print(f"\n  [{strat}] 빈슬롯 {avail}개  후보 {len(strat_sigs)}건  stop {STRATEGY_STOP[strat]*100:.0f}%")
+        print(f"\n  [{strat}] 빈슬롯 {avail}개  후보 {len(strat_sigs)}건  {_stop_txt(strat)}")
 
         placed_this = 0
         for sig in strat_sigs:

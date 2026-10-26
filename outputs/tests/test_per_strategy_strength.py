@@ -69,3 +69,18 @@ def test_legacy_by_follows_timeline():
     assert VC.legacy_by(tl, "20261021") == {"a": 5.7}
     assert VC.legacy_by(tl, "20261023") == {"a": 4.0}
     assert VC.legacy_rules(tl, "20261023") == (5.0, [])
+
+
+def test_kis_trader_handles_strategy_without_stop(monkeypatch):
+    """[2026-10-26 실사고] KIS 에 손절 없는 전략(stoch_os20_mkt)을 넣자 STRATEGY_STOP[strat] KeyError 로
+    09:00 매수 루프와 15:21 잔고 출력이 죽었다(rc=1 ×3, 워치독 경보). 손절 없음은 정상 설정이다."""
+    import os
+    import kis_trader as kx
+    monkeypatch.setattr(kx, "STRATEGY_STOP", {"a": -0.15})
+    assert kx._stop_txt("a") == "stop -15%"
+    assert kx._stop_txt("no_stop_strategy") == "stop 없음"
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for f in ("kis_trader.py", "kiwoom_trader.py"):
+        src = open(os.path.join(here, f), encoding="utf-8").read()
+        code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith(("#", '"""')) and "종전 STRATEGY_STOP" not in l)
+        assert "STRATEGY_STOP[strat]" not in code and "STRATEGY_TAKE[strat]" not in code, f
