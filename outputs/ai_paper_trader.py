@@ -322,6 +322,13 @@ def _enter_configured(g, pc, port, d, cal_all, positions, cash_box):
         ok = (c["_rk"].notna() & above) | ex
     else:                   # 강도는 종전처럼 무기록 통과(정렬 맨 뒤)
         ok = c["_rk"].isna() | above | ex
+    pool = pc.get("slot_mode") == "pool"
+    if pool and port != "ai":    # [§75] 칸 없음: 전략마다 점수 척도가 달라 '그 전략 안 순위(백분위)'로 비교
+        import strength_model as SM
+        ver = pc.get("strength_version", "v1")
+        c["_rk"] = [SM.rank_pct(rows[st]["engine"], st, v if v == v else None, ver)
+                    for st, v in zip(c["strategy"], c["_rk"])]
+        c["_rk"] = pd.to_numeric(c["_rk"], errors="coerce")
     c = c[ok].sort_values("_rk", ascending=False, na_position="last")
     for _, r in c.iterrows():
         free = SLOTS - len(positions)
@@ -331,7 +338,7 @@ def _enter_configured(g, pc, port, d, cal_all, positions, cash_box):
         if code in positions:
             continue
         row = rows[st]
-        if sum(1 for p in positions.values() if p["strategy"] == st) >= int(row["slots"]):
+        if not pool and sum(1 for p in positions.values() if p["strategy"] == st) >= int(row["slots"]):
             continue
         invest = cash_box[0] / free
         if invest < 10_000:

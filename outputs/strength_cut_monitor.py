@@ -61,6 +61,9 @@ RULES = {"현행5.7": None, "상위40%": CUTS_40, "상위50%": CUTS_50}
 # 라이브 구성 (kiwoom_trader / kis_trader 상수와 일치해야 한다)
 # [2026-10-18] 키움 rsi 2종 → high_500d_filt 6슬롯(설명서 §56). 강도 면제 전략은 임계와 무관하게 매수.
 CAPS = {"kiwoom": dict(_KW["slots"]), "kis": dict(_KI["slots"])}
+for _a, _A in (("kiwoom", _KW), ("kis", _KI)):        # [§75] 칸 없음 모드: 전략별 상한 대신 전체 10(근사 — 전략 순서는 그대로)
+    if _A.get("slot_mode") == "pool":
+        CAPS[_a] = {k: 10 for k in CAPS[_a]}
 PRIORITY = {"kiwoom": list(_KW["priority"]), "kis": list(_KI["priority"])}
 HOLD = {**_KW["holding"], **_KI["holding"]}
 STOP = {**_KW["stop"], **_KI["stop"]}

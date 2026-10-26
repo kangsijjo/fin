@@ -231,6 +231,28 @@ def _th(strat):
     return STRENGTH_TH.get(strat, MIN_STRENGTH_SCORE)
 
 
+# [2026-10-26 §75] 칸 방식 — "slots"(전략별 칸) | "pool"(칸 없음: 조건 넘은 신호를 전체 MAX_CONCURRENT 까지,
+# 같은 날 후보는 전략 안 순위(그 전략 과거 강도 중 상위 몇 %) 높은 순). 대시보드 '모의매매 전략 설정'에서 고름.
+SLOT_MODE = _ACC.get("slot_mode", "slots")
+
+
+def _pool_order(cands, strength):
+    """칸 없음 모드: 여러 전략 후보를 한 줄로 — 전략 안 순위(백분위) 높은 순, 점수 없는 후보(면제·무기록)는 맨 뒤."""
+    import strength_model as _SM
+    import live_config as _LCm
+
+    def key(sig):
+        st = str(sig.get("strategy", ""))
+        sc = strength.get((str(sig.get("code", "")).zfill(6), st))
+        try:
+            p = _SM.rank_pct(_LCm.engine_name(st), st, sc, STRENGTH_VERSION)
+        except Exception:
+            p = None if sc is None else float(sc) * 10
+        return (p is None, -(p or 0.0))
+    return sorted(cands, key=key)
+
+
+
 def _strength_gate(strat, sc):
     """주문 직전 강도 게이트 → (통과여부, 사유). 면제 전략은 강도와 무관하게 통과(kis_trader 와 동일 규약)."""
     if strat in STRENGTH_EXEMPT:
@@ -876,11 +898,17 @@ def cmd_buy():
                   for k in STRATEGY_MAX_SLOTS}
     # 전체 가용 슬롯 = 총 슬롯 상한 - 현재 사용(현 전략 + 레거시)
     total_avail = max(0, sum(slot_avail.values()) - legacy_used)
+    if SLOT_MODE == "pool":                      # 칸 없음: 전략 구분 없이 전체 상한까지(보유 전부 포함)
+        total_avail = max(0, MAX_CONCURRENT - len(pos))
 
     print(f"[buy] 오늘 신호 {len(sigs)}건  예수금 {dep:,}원")
-    print(f"  전략별 슬롯: "
-          + " / ".join(f"{k}={slot_used[k]}/{STRATEGY_MAX_SLOTS[k]}"
-                       for k in STRATEGY_PRIORITY))
+    if SLOT_MODE == "pool":
+        print(f"  칸 방식: 칸 없음 — 보유 {len(pos)}/{MAX_CONCURRENT}, 빈 칸 {total_avail}개 (전략별 보유 "
+              + " / ".join(f"{k}={slot_used[k]}" for k in STRATEGY_PRIORITY) + ")")
+    else:
+        print(f"  전략별 슬롯: "
+              + " / ".join(f"{k}={slot_used[k]}/{STRATEGY_MAX_SLOTS[k]}"
+                           for k in STRATEGY_PRIORITY))
     if total_avail <= 0:
         print("[buy] 모든 슬롯 가득 — 주문 없음")
         return
@@ -933,17 +961,22 @@ def cmd_buy():
     # 드문 국면이라 '안 사는 것'과 '못 사는 것'이 겉으로 구분되지 않아 더 위험하다.
     buy_failures = []      # [(code, name, msg)]
 
-    for strat in STRATEGY_PRIORITY:
+    if SLOT_MODE == "pool":   # [§75] 한 줄로: 전략 안 순위 높은 순, 전체 빈 칸까지
+        _plan = [(None, _pool_order([s for k in STRATEGY_PRIORITY for s in sigs_by_strat.get(k, [])], strength),
+                  total_avail)]
+    else:
+        _plan = [(k, sigs_by_strat.get(k, []), slot_avail[k]) for k in STRATEGY_PRIORITY]
+    for _grp, strat_sigs, avail in _plan:
         if n_placed >= total_avail:   # 전역 동시보유 상한(레거시 반영) 도달 — 과다매수 방지(2026-06-29)
             break
-        avail = slot_avail[strat]
         if avail <= 0:
             continue
-        strat_sigs = sigs_by_strat.get(strat, [])
-        print(f"\n  [{strat}] 빈슬롯 {avail}개  후보 {len(strat_sigs)}건")
+        print(f"\n  [{_grp or '칸 없음'}] 빈{'슬롯' if _grp else ' 칸'} {avail}개  후보 {len(strat_sigs)}건"
+              + ("" if _grp else "(전략 안 순위 높은 순)"))
 
         placed_this_strat = 0
         for sig in strat_sigs:
+            strat = _grp or str(sig.get("strategy", ""))
             # 전략별 빈슬롯 OR 전역 가용슬롯(레거시 반영) 중 먼저 소진되면 중단
             if placed_this_strat >= avail or n_placed >= total_avail:
                 break
@@ -971,7 +1004,7 @@ def cmd_buy():
             # 잔여 빈 슬롯 수로 예산 균등 분배 (각 전략의 실제 배정 수 반영)
             # placed_per_strat[k] 가 이미 현재 전략 포함 모든 배정 수를 추적하므로
             # placed_this_strat 이중 차감 불필요 (버그 수정 2026-06-18)
-            total_slots_remaining = sum(
+            total_slots_remaining = (total_avail - n_placed) if _grp is None else sum(
                 max(0, slot_avail[k] - placed_per_strat[k])
                 for k in STRATEGY_PRIORITY
             )

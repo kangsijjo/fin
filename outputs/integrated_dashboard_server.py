@@ -437,6 +437,8 @@ def get_health():
 def _kw_slot_conf():
     import live_config as LC
     A = LC.account("kiwoom")
+    if A.get("slot_mode") == "pool":                 # [§75] 칸 없음 — 전략별 상한 없음(전체 10)
+        return {k: LC.SLOTS_TOTAL for k in A["priority"]}, list(A["priority"])
     return dict(A["slots"]), list(A["priority"])
 
 
@@ -1071,6 +1073,8 @@ def _live_tables(acct):
     A = LC.account(acct)
     base = _STRAT_BASE_INFO()
     slots = {ln: A["slots"][ln] for ln in A["priority"]}
+    if A.get("slot_mode") == "pool":                 # [§75] 칸 없음 — 전략마다 전체 10칸까지 쓸 수 있음(표시용)
+        slots = {ln: LC.SLOTS_TOTAL for ln in A["priority"]}
     labels, holds, entries, exits, stops = {}, {}, {}, {}, {}
     for ln in A["priority"]:
         d = base.get(ln) or {}
@@ -2488,6 +2492,7 @@ def _lc_view(cfg):
     for a in LC.ACCOUNTS:
         A = cfg["accounts"][a]
         view["accounts"][a] = {"label": LC.ACCOUNT_LABEL[a], "min_strength": A["min_strength"],
+                               "slot_mode": A.get("slot_mode", "slots"),
                                "strength_version": A.get("strength_version", "v1"),
                                "strategies": [dict(x, live=LC.live_name(x["engine"])) for x in A["strategies"]]}
     return view
@@ -2538,6 +2543,7 @@ def _lc_from_request(b):
                          "stop": num(x.get("stop")), "take": num(x.get("take")), "holding": hold.get(e, 20),
                          "min_strength": num(x.get("min_strength"))})      # [§71] 전략별 강도 기준(비우면 계좌 기본)
         new["accounts"][a] = {"min_strength": float(A.get("min_strength", 5.7)),
+                              "slot_mode": str(A.get("slot_mode") or "slots"),
                               "strength_version": str(A.get("strength_version") or "v1"), "strategies": rows}
     return new
 
@@ -2558,7 +2564,12 @@ def api_live_config_preview():
     changes = [] if errs else LC.diff(cur, new)
     locked, why = LC.is_locked()
     regen = LC.needs_regen()
-    return jsonify({"ok": not errs, "errors": errs, "changes": changes, "locked": locked, "lock_msg": why,
+    try:
+        ov = [w["msg"] for w in _ov_check({a: [s["engine"] for s in new["accounts"][a]["strategies"]] for a in LC.ACCOUNTS})["warnings"]
+              if w["level"] == "warn"]
+    except Exception:
+        ov = []
+    return jsonify({"ok": not errs, "errors": errs, "changes": changes, "locked": locked, "lock_msg": why, "overlap": ov,
                     "effective": ("저장 즉시 오늘 신호를 새 설정으로 다시 만듭니다 → 다음 거래일 09:00 매수부터 새 방식"
                                   if regen else "오늘 18:30 정기 신호부터 새 설정 → 다음 거래일 09:00 매수부터 새 방식")})
 
@@ -2680,7 +2691,12 @@ def api_virtual_config_preview():
     if not errs:
         prev = VC.entry_for(VC.load().get("history") or [], eff)
         changes = VC.diff(None if (prev is None or prev.get("legacy")) else prev["portfolios"], new)
-    return jsonify({"ok": not errs, "errors": errs, "changes": changes, "effective": _vc_effective_msg(eff)})
+    try:
+        ov = [w["msg"] for w in _ov_check({p: [s["engine"] for s in new[p]["strategies"]] for p in VC.PORTFOLIOS})["warnings"]
+              if set(w["places"]) & set(VC.PORTFOLIOS)]
+    except Exception:
+        ov = []
+    return jsonify({"ok": not errs, "errors": errs, "changes": changes, "effective": _vc_effective_msg(eff), "overlap": ov})
 
 
 @app.route("/api/virtual_config", methods=["POST"])
@@ -2719,6 +2735,43 @@ def api_virtual_config_save():
     except Exception:
         pass
     return jsonify({"ok": True, "msg": msg, "changes": changes})
+
+
+# ══ 2026-10-23 전략 겹침 경고(§72) — 모의계좌·AI·강도 가상 설정 화면 공통. 표 = db/strategy_overlap.json(주간 갱신) ══
+def _ov_saved_places():
+    """저장된 설정 기준 4곳의 전략(엔진 이름) — 화면에서 한쪽만 편집 중일 때 다른 쪽 값으로 씀."""
+    import live_config as LC
+    import virtual_config as VC
+    cfg = LC.load()
+    out = {a: [s["engine"] for s in cfg["accounts"][a]["strategies"]] for a in LC.ACCOUNTS}
+    act, pend = VC.state()
+    e = pend or act
+    if e and not e.get("legacy"):
+        for p in VC.PORTFOLIOS:
+            out[p] = [s["engine"] for s in e["portfolios"][p]["strategies"]]
+    return out
+
+
+def _ov_check(places):
+    import strategy_overlap as SO
+    m = SO.load()
+    full = _ov_saved_places()
+    full.update({k: list(v) for k, v in (places or {}).items() if k in SO.PLACES and isinstance(v, list)})
+    return {"warnings": SO.warnings(full, m) if m else [], "available": bool(m),
+            "generated": (m or {}).get("generated"), "window": (m or {}).get("window")}
+
+
+@app.route("/api/strategy_overlap/check")
+def api_strategy_overlap_check():
+    """읽기 전용 — places(JSON: {kiwoom|kis|ai|strength: [엔진…]})에 없는 곳은 저장된 설정으로 채워 겹침 경고를 돌려준다."""
+    try:
+        places = json.loads(request.args.get("places") or "{}")
+    except Exception:
+        places = {}
+    try:
+        return jsonify({"ok": True, **_ov_check(places)})
+    except Exception as e:
+        return jsonify({"ok": False, "warnings": [], "available": False, "msg": str(e)[:200]})
 
 
 @app.route("/api/pbt/jobs")
@@ -4792,7 +4845,7 @@ function lcRender(){
           ${e.note?`<div style="color:#fbbf24;font-size:11px;max-width:340px">⚠ ${_lcEsc(e.note)}</div>`:''}
           ${A.strength_version==='v2'?((L.v2_models||{})[s.engine]?`<div style="color:#64748b;font-size:11px">v2 모델: ${_lcEsc(L.v2_models[s.engine].trained)} · 학습 ${L.v2_models[s.engine].n}건 · 지표 ${L.v2_models[s.engine].n_ic}개</div>`
             :'<div style="color:#fbbf24;font-size:11px">v2 모델 없음 — 저장하면 학습(1~3분), 그 전엔 v1 점수로 대체</div>'):''}</td>
-        <td><input type="number" min="1" max="10" step="1" value="${s.slots}" style="${inp};width:52px" onchange="lcSet('${a}',${i},'slots',this.value)"></td>
+        <td>${A.slot_mode==='pool'?'<span style="color:#64748b;font-size:11px" title="칸 없음 모드 — 전략별 칸 수는 쓰지 않음">공유</span>':`<input type="number" min="1" max="10" step="1" value="${s.slots}" style="${inp};width:52px" onchange="lcSet('${a}',${i},'slots',this.value)">`}</td>
         <td style="text-align:center"><input type="checkbox" ${s.exempt?'checked':''} onchange="lcSet('${a}',${i},'exempt',this.checked)" title="체크하면 강도 기준과 상관없이 삼(후보가 많으면 강도 높은 순)"></td>
         <td>${s.exempt?'<span style="color:#64748b;font-size:11px">면제</span>':`<input type="number" min="0" max="10" step="0.1" placeholder="기본 ${A.min_strength}" value="${s.min_strength==null?'':s.min_strength}" style="${inp};width:70px${s.min_strength!=null?';border-color:#38bdf8':''}" title="이 전략만의 강도 기준 — 비우면 계좌 기본값(${A.min_strength})" onchange="lcSet('${a}',${i},'min_strength',this.value)">`}</td>
         <td><input type="number" step="1" min="-50" max="-1" placeholder="없음" value="${s.stop==null?'':s.stop}" style="${inp};width:64px" onchange="lcSet('${a}',${i},'stop',this.value)"></td>
@@ -4809,7 +4862,10 @@ function lcRender(){
         <select style="${inp};font-size:12px" title="v1: 라이브 6전략 공통 가중치(종전) / v2: 전략마다 자기 과거 매매로 학습(방향이 해마다 유지된 지표만·시장 지표 제외, §62). v2 권장 기준 5.5" onchange="lcSetAcc('${a}','strength_version',this.value)">
           <option value="v1"${(A.strength_version||'v1')==='v1'?' selected':''}>강도 v1(공통)</option>
           <option value="v2"${A.strength_version==='v2'?' selected':''}>강도 v2(전략별)</option></select>
-        <span style="font-size:12px;color:${tot===L.slots_total?'#10b981':'#ef4444'}">슬롯 합 ${tot}/${L.slots_total}</span></div>
+        <select style="${inp};font-size:12px" title="전략별 칸: 전략마다 칸 수를 나눠 줌(위 순서대로 채움) / 칸 없음: 고른 전략 중 조건을 넘은 신호를 전체 10종목까지, 같은 날 후보는 전략 안 순위(그 전략 과거 강도 중 상위 몇 %) 높은 순 — 백테스트(§74)에선 신호가 많은 전략이 칸을 먼저 차지해 대체로 불리했음" onchange="lcSetAcc('${a}','slot_mode',this.value)">
+          <option value="slots"${(A.slot_mode||'slots')==='slots'?' selected':''}>전략별 칸</option>
+          <option value="pool"${A.slot_mode==='pool'?' selected':''}>칸 없음(전체 10종목)</option></select>
+        ${A.slot_mode==='pool'?`<span style="font-size:12px;color:#38bdf8">칸 없음 · 전체 ${L.slots_total}종목</span>`:`<span style="font-size:12px;color:${tot===L.slots_total?'#10b981':'#ef4444'}">슬롯 합 ${tot}/${L.slots_total}</span>`}</div>
       <table style="font-size:12px;margin-top:6px;width:100%"><thead><tr><th>순서</th><th>전략</th><th>슬롯</th>
         <th title="강도 기준과 상관없이 삼">강도 면제</th><th title="전략마다 다른 강도 기준 — 비우면 위의 계좌 기본값">강도 기준</th><th title="${_lcEsc(stopSem)}">손절 %</th><th title="${_lcEsc(takeSem)}">익절 %</th><th>보유</th><th></th></tr></thead>
         <tbody>${rows}</tbody></table>
@@ -4824,6 +4880,7 @@ function lcRender(){
       ${L.regen_running?' · <span style="color:#38bdf8">신호 다시 만드는 중…</span>':''}</div>
     ${L.locked?`<div style="padding:6px 10px;border-radius:6px;background:rgba(239,68,68,.08);border:1px solid #7f1d1d;color:#fca5a5;font-size:12px;margin-bottom:8px">🔒 ${_lcEsc(L.lock_msg)}</div>`:''}
     <div style="display:flex;gap:10px;flex-wrap:wrap">${card('kiwoom')}${card('kis')}</div>
+    <div id="lc-ov" style="margin-top:8px">${_ovHtml.lc}</div>
     <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap">
       <button class="runbtn" style="background:#2563eb;color:#fff;${L.locked?'opacity:.5':''}" ${L.locked?'disabled':''} onclick="lcSave()">💾 변경 확인 후 저장</button>
       <button class="runbtn" onclick="lcLoad()">↺ 현재 설정 다시 불러오기</button>
@@ -4832,6 +4889,7 @@ function lcRender(){
       <div style="font-size:12px;color:#cbd5e1;margin-top:4px;line-height:1.7">${hist||'<span style="color:#64748b">아직 없음</span>'}</div></details>
     <div style="font-size:11px;color:#64748b;margin-top:6px">빠진 전략으로 이미 산 종목은 원래 보유일·손절·익절대로 만기까지 갑니다 · 거래일 08:30~15:40 은 잠금 · 바꿀 때 두 번 확인합니다 · 백테스트 탭 '기간 백테스트'로 먼저 확인해 보세요</div>`;
   _LC_BOX.forEach(id=>setHtml(id,html.replace('id="lc-msg"',`id="lc-msg-${id}"`)));
+  ovRefresh();
 }
 function _lcMsg(h){ _LC_BOX.forEach(id=>setHtml('lc-msg-'+id,h)); }
 function lcSet(a,i,k,v){
@@ -4858,7 +4916,8 @@ async function lcSave(){
   if(pv.locked){ alert(pv.lock_msg); return; }
   if(!(pv.changes||[]).length){ alert('바뀐 내용이 없습니다'); return; }
   // ① 첫 번째 확인 — 무엇이 바뀌는지
-  if(!confirm('[1/2] 모의매매 전략을 이렇게 바꿉니다:\\n\\n- '+pv.changes.join('\\n- ')+'\\n\\n적용 시점: '+pv.effective+'\\n\\n계속할까요?')) return;
+  const _ovTxt=(pv.overlap||[]).length?'\\n\\n⚠ 겹침 경고:\\n- '+pv.overlap.join('\\n- '):'';
+  if(!confirm('[1/2] 모의매매 전략을 이렇게 바꿉니다:\\n\\n- '+pv.changes.join('\\n- ')+_ovTxt+'\\n\\n적용 시점: '+pv.effective+'\\n\\n계속할까요?')) return;
   // ② 두 번째 확인 — 정말로
   if(!confirm('[2/2] 정말로 적용할까요?\\n\\n다음 거래일 09:00 매수부터 이 방식으로 매매합니다.\\n되돌리려면 다시 바꿔야 합니다.')) return;
   const d=await post('/api/live_config',{confirm:2});
@@ -4894,7 +4953,7 @@ function vcRender(){
           ${e.note?`<div style="color:#fbbf24;font-size:11px;max-width:340px">⚠ ${_lcEsc(e.note)}</div>`:''}
           ${(!isAI&&P.strength_version==='v2')?((V.v2_models||{})[s.engine]?`<div style="color:#64748b;font-size:11px">v2 모델: ${_lcEsc(V.v2_models[s.engine].trained)} · 학습 ${V.v2_models[s.engine].n}건</div>`
             :'<div style="color:#fbbf24;font-size:11px">v2 모델 없음 — 저장하면 학습(1~3분), 그 전엔 v1 점수로 대체</div>'):''}</td>
-        <td><input type="number" min="1" max="10" step="1" value="${s.slots}" style="${inp};width:52px" onchange="vcSet('${p}',${i},'slots',this.value)"></td>
+        <td>${P.slot_mode==='pool'?'<span style="color:#64748b;font-size:11px" title="칸 없음 모드 — 전략별 칸 수는 쓰지 않음">공유</span>':`<input type="number" min="1" max="10" step="1" value="${s.slots}" style="${inp};width:52px" onchange="vcSet('${p}',${i},'slots',this.value)">`}</td>
         <td style="text-align:center"><input type="checkbox" ${s.exempt?'checked':''} onchange="vcSet('${p}',${i},'exempt',this.checked)" title="체크하면 기준과 상관없이 후보(후보가 많으면 순위 높은 순)"></td>
         <td>${s.exempt?'<span style="color:#64748b;font-size:11px">면제</span>':`<input type="number" min="0" max="${isAI?1:10}" step="${isAI?0.01:0.1}" placeholder="${P.min_score==null?'기본 없음':'기본 '+P.min_score}" value="${s.min_score==null?'':s.min_score}" style="${inp};width:70px${s.min_score!=null?';border-color:#38bdf8':''}" title="이 전략만의 기준 — 비우면 위의 기본 기준" onchange="vcSet('${p}',${i},'min_score',this.value)">`}</td>
         <td><input type="number" step="1" min="-50" max="-1" placeholder="없음" value="${s.stop==null?'':s.stop}" style="${inp};width:64px" onchange="vcSet('${p}',${i},'stop',this.value)"></td>
@@ -4913,7 +4972,10 @@ function vcRender(){
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
         <b style="font-size:14px">${isAI?'🤖':'💪'} ${_lcEsc(V.labels[p])} <span style="font-size:11px;color:#64748b;font-weight:400">${isAI?'AI 확률 높은 순':'강도 높은 순'}</span></b>
         ${thr}
-        <span style="font-size:12px;color:${tot===V.slots_total?'#10b981':'#ef4444'}">슬롯 합 ${tot}/${V.slots_total}</span></div>
+        <select style="${inp};font-size:12px" title="전략별 칸 / 칸 없음(조건 넘은 신호를 전체 10종목까지, 같은 날 후보는 ${isAI?'AI 확률':'전략 안 순위(강도 백분위)'} 높은 순)" onchange="vcSetP('${p}','slot_mode',this.value)">
+          <option value="slots"${(P.slot_mode||'slots')==='slots'?' selected':''}>전략별 칸</option>
+          <option value="pool"${P.slot_mode==='pool'?' selected':''}>칸 없음(전체 10종목)</option></select>
+        ${P.slot_mode==='pool'?`<span style="font-size:12px;color:#38bdf8">칸 없음 · 전체 ${V.slots_total}종목</span>`:`<span style="font-size:12px;color:${tot===V.slots_total?'#10b981':'#ef4444'}">슬롯 합 ${tot}/${V.slots_total}</span>`}</div>
       <table style="font-size:12px;margin-top:6px;width:100%"><thead><tr><th>순서</th><th>전략</th><th>슬롯</th>
         <th title="기준과 상관없이 후보">${isAI?'AI 기준 면제':'강도 면제'}</th><th title="전략마다 다른 기준 — 비우면 위의 기본 기준">${isAI?'AI 기준':'강도 기준'}</th><th title="매일 종가로 판정 → 그 종가에 청산">손절 %</th><th title="매일 종가로 판정 → 그 종가에 청산">익절 %</th><th>보유</th><th></th></tr></thead>
         <tbody>${rows}</tbody></table>
@@ -4929,6 +4991,7 @@ function vcRender(){
       ${V.fallback?` <span style="color:#ef4444">⚠ ${_lcEsc(V.fallback)}</span>`:''}
       · 저장하면 <b>${_vcD(V.effective)} 신호부터</b> 적용(그 전 기록·이미 산 종목은 그대로)</div>
     <div style="display:flex;gap:10px;flex-wrap:wrap">${card('ai')}${card('strength')}</div>
+    <div id="vc-ov" style="margin-top:8px">${_ovHtml.vc}</div>
     <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap">
       <button class="runbtn" style="background:#2563eb;color:#fff" onclick="vcSave()">💾 변경 확인 후 저장</button>
       <button class="runbtn" onclick="vcLoad()">↺ 현재 설정 다시 불러오기</button>
@@ -4936,6 +4999,29 @@ function vcRender(){
     <details style="margin-top:8px"><summary style="cursor:pointer;font-size:12px;color:#94a3b8">설정 이력(적용 신호일별)</summary>
       <div style="font-size:12px;color:#cbd5e1;margin-top:4px;line-height:1.7">${hist||'<span style="color:#64748b">아직 없음 — 지금은 종전 규칙</span>'}</div></details>
     <div style="font-size:11px;color:#64748b;margin-top:6px">가상매매는 주문이 없는 장부 시뮬입니다(신호일 종가 진입·왕복 0.33%) · 실제 모의계좌 설정은 🏦 모의계좌 탭 · 모의계좌에 없는 전략의 AI 확률은 그 전략으로 학습되지 않은 모델 값이라 참고용</div>`);
+  ovRefresh();
+}
+// ══ 2026-10-23 전략 겹침 경고(§72) — 모의계좌·가상매매 편집 중인 값으로 바로 점검(서버 표: db/strategy_overlap.json) ══
+let _ovT=null; const _ovHtml={lc:'',vc:''};
+function ovRefresh(){ clearTimeout(_ovT); _ovT=setTimeout(_ovRun,250); }
+async function _ovRun(){
+  const places={};
+  if(typeof _lcDraft!=='undefined'&&_lcDraft){ ['kiwoom','kis'].forEach(a=>{ if(_lcDraft[a]) places[a]=_lcDraft[a].strategies.map(s=>s.engine); }); }
+  if(typeof _vcDraft!=='undefined'&&_vcDraft){ ['ai','strength'].forEach(p=>{ if(_vcDraft[p]) places[p]=_vcDraft[p].strategies.map(s=>s.engine); }); }
+  let d; try{ d=await fetch('/api/strategy_overlap/check?places='+encodeURIComponent(JSON.stringify(places))).then(r=>r.json()); }catch(e){ return; }
+  const box=keys=>{
+    if(!d.available) return '<div style="font-size:12px;color:#64748b">겹침 표가 아직 없습니다 — 주간 AI 파이프라인이 만들거나 python strategy_overlap.py 로 만듭니다</div>';
+    const ws=(d.warnings||[]).filter(w=>(w.places||[]).some(p=>keys.includes(p)));
+    const basis=`기준: 최근 3년(${_vcD((d.window||[])[0])}~${_vcD((d.window||[])[1])}) 백테스트 신호 · 같은 날 같은 종목 50%↑ = 겹침 · 표 갱신 ${_lcEsc(d.generated||'')}`;
+    if(!ws.length) return `<div style="padding:6px 10px;border-radius:6px;background:rgba(16,185,129,.07);border:1px solid #065f46;color:#6ee7b7;font-size:12px">✓ 겹치는 전략 없음 <span style="color:#64748b">· ${basis}</span></div>`;
+    const nW=ws.filter(w=>w.level==='warn').length;
+    return `<div style="padding:7px 10px;border-radius:6px;background:${nW?'rgba(251,191,36,.07)':'rgba(96,165,250,.06)'};border:1px solid ${nW?'#78350f':'#1e3a5f'};font-size:12px;line-height:1.7">
+      <b style="color:${nW?'#fbbf24':'#93c5fd'}">${nW?'⚠':'ℹ'} 전략 겹침 점검 — 경고 ${nW}건 · 참고 ${ws.length-nW}건</b>
+      ${ws.map(w=>`<div style="color:${w.level==='warn'?'#fcd34d':'#94a3b8'}">${w.level==='warn'?'⚠':'ℹ'} ${_lcEsc(w.msg)}</div>`).join('')}
+      <div style="color:#64748b;font-size:11px">${basis} · 저장은 막지 않습니다(판단은 직접)</div></div>`;
+  };
+  _ovHtml.lc=box(['kiwoom','kis']); _ovHtml.vc=box(['ai','strength']);
+  setHtml('lc-ov',_ovHtml.lc); setHtml('vc-ov',_ovHtml.vc);
 }
 function vcSet(p,i,k,v){
   const s=_vcDraft[p].strategies[i];
@@ -4960,7 +5046,8 @@ async function vcSave(){
   const pv=await post('/api/virtual_config/preview');
   if(!pv.ok){ alert('저장할 수 없습니다:\\n- '+(pv.errors||[pv.msg]).join('\\n- ')); return; }
   if(!(pv.changes||[]).length){ alert('바뀐 내용이 없습니다'); return; }
-  if(!confirm('[1/2] AI·강도 가상매매 설정을 이렇게 바꿉니다:\\n\\n- '+pv.changes.join('\\n- ')+'\\n\\n적용: '+pv.effective+'\\n\\n계속할까요?')) return;
+  const _ovTxt=(pv.overlap||[]).length?'\\n\\n⚠ 겹침:\\n- '+pv.overlap.join('\\n- '):'';
+  if(!confirm('[1/2] AI·강도 가상매매 설정을 이렇게 바꿉니다:\\n\\n- '+pv.changes.join('\\n- ')+_ovTxt+'\\n\\n적용: '+pv.effective+'\\n\\n계속할까요?')) return;
   if(!confirm('[2/2] 정말로 적용할까요?\\n\\n실제 모의계좌(키움·KIS) 매매는 바뀌지 않습니다.')) return;
   const d=await post('/api/virtual_config',{confirm:2});
   if(d.ok){ await vcLoad(); }

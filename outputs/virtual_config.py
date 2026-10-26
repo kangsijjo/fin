@@ -183,6 +183,8 @@ def validate(ports, engine_names=None):
             errs.append(f"{lab}: 기준은 0~{hi} 또는 비움")
         if P.get("strength_version", "v1") not in ("v1", "v2"):
             errs.append(f"{lab}: 강도 방식은 v1/v2")
+        if P.get("slot_mode", "slots") not in ("slots", "pool"):
+            errs.append(f"{lab}: 칸 방식은 slots/pool")
         S = P.get("strategies")
         if not isinstance(S, list) or not 1 <= len(S) <= MAX_STRATEGIES:
             errs.append(f"{lab}: 전략은 1~{MAX_STRATEGIES}개")
@@ -216,7 +218,7 @@ def validate(ports, engine_names=None):
             sm = s.get("min_score")
             if sm is not None and (not isinstance(sm, (int, float)) or isinstance(sm, bool) or not 0 <= sm <= hi):
                 errs.append(f"{lab}: {e} 전략별 기준은 0~{hi} 또는 비움")
-        if tot != SLOTS_TOTAL:
+        if tot != SLOTS_TOTAL and P.get("slot_mode", "slots") == "slots":   # [§75] 칸 없음이면 전략별 칸 수는 안 씀
             errs.append(f"{lab}: 슬롯 합이 {tot} — {SLOTS_TOTAL} 이어야 합니다")
     return errs
 
@@ -244,6 +246,9 @@ def diff(old, new):
             continue
         if o.get("min_score") != n.get("min_score"):
             out.append(f"{lab} 기준 {_fmt(o.get('min_score'))} → {_fmt(n.get('min_score'))}")
+        if o.get("slot_mode", "slots") != n.get("slot_mode", "slots"):
+            _m = {"slots": "전략별 칸", "pool": "칸 없음(전체 10종목)"}
+            out.append(f"{lab} 칸 방식 {_m[o.get('slot_mode', 'slots')]} → {_m[n.get('slot_mode', 'slots')]}")
         if p == "strength" and o.get("strength_version", "v1") != n.get("strength_version", "v1"):
             out.append(f"{lab} 강도 방식 {o.get('strength_version', 'v1')} → {n.get('strength_version', 'v1')}")
         om = {s["engine"]: s for s in o["strategies"]}
@@ -278,7 +283,8 @@ def clean(ports, holding_map=None):
             rows.append({"engine": e, "slots": int(x.get("slots") or 0), "exempt": bool(x.get("exempt")),
                          "stop": num(x.get("stop")), "take": num(x.get("take")), "min_score": num(x.get("min_score")),
                          "holding": int((holding_map or {}).get(e, x.get("holding") or 20))})
-        out[p] = {"min_score": ms, "strength_version": str(P.get("strength_version") or "v1"), "strategies": rows}
+        out[p] = {"min_score": ms, "strength_version": str(P.get("strength_version") or "v1"),
+                  "slot_mode": str(P.get("slot_mode") or "slots"), "strategies": rows}
     return out
 
 

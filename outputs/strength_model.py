@@ -130,6 +130,64 @@ def score(engine, feats):
     return None if v != v else round(float(v), 2)
 
 
+_PCT_CACHE = {}
+
+
+def _v1_ref(live_name):
+    """v1 점수(score_ic)의 그 전략 과거 분포 — 신호 강도 기록(db/signal_strength_log.csv)에서."""
+    key = ("v1", live_name)
+    if key in _PCT_CACHE:
+        return _PCT_CACHE[key]
+    ref = None
+    try:
+        L = pd.read_csv(os.path.join(HERE, "db", "signal_strength_log.csv"), usecols=["strategy", "score_ic"],
+                        encoding="utf-8-sig")
+        v = pd.to_numeric(L.loc[L["strategy"] == live_name, "score_ic"], errors="coerce").dropna().to_numpy(float)
+        if len(v) >= 50:
+            ref = np.quantile(v, np.linspace(0, 1, 101))
+    except Exception:
+        ref = None
+    _PCT_CACHE[key] = ref
+    return ref
+
+
+def _v2_ref(engine):
+    """v2 점수의 그 전략 분포 — 모델 파일의 score_ref, 없으면(옛 모델) 학습 표본을 채점해 만든다(프로세스 안 캐시)."""
+    m = load_model(engine)
+    if not m:
+        return None
+    if m.get("score_ref"):
+        return np.asarray(m["score_ref"], float)
+    key = ("v2", engine, m.get("trained"))
+    if key in _PCT_CACHE:
+        return _PCT_CACHE[key]
+    ref = None
+    try:
+        T = pd.read_pickle(train_path(engine))
+        sc = score_frame(T, m)
+        sc = sc[~np.isnan(sc)]
+        if len(sc) >= 50:
+            ref = np.quantile(sc, np.linspace(0, 1, 101))
+    except Exception:
+        ref = None
+    _PCT_CACHE[key] = ref
+    return ref
+
+
+def rank_pct(engine, live_name, score, version="v1"):
+    """[§75] '칸 없음' 모드의 후보 순서용 — 그 점수가 **그 전략 과거 점수 중 상위 몇 %쯤**인지(0~100, 클수록 강함).
+    전략마다 점수 척도가 달라(v2 는 전략별 학습) 원점수끼리 비교하면 점수가 후하게 나오는 전략이 칸을 다 차지한다.
+    분포를 모르면 원점수×10(0~10 → 0~100)으로 근사. 점수가 없으면 None."""
+    if score is None or score != score:
+        return None
+    ref = _v2_ref(engine) if version == "v2" else None
+    if ref is None:
+        ref = _v1_ref(live_name)
+    if ref is None:
+        return float(score) * 10.0
+    return float(np.interp(float(score), ref, np.linspace(0, 100, len(ref))))
+
+
 def build_train_table(engine, df, log=print):
     """엔진 백테스트(전체 기간) → 매매 + 신호일 피처 20개(strength_backtest, 학습 정의와 100% 일치 검증)."""
     import strategy_engine as E
@@ -166,6 +224,13 @@ def train(engines, df=None, log=print):
                 continue
             m.update(engine=e, version=VERSION, trained=datetime.now().strftime("%Y-%m-%d %H:%M"),
                      data_max=str(df["date"].max()))
+            try:                                   # [§75] 점수 분포(101분위) — '칸 없음' 모드의 전략 간 비교(백분위)용
+                sc = score_frame(T, m)
+                sc = sc[~np.isnan(sc)]
+                if len(sc) >= 50:
+                    m["score_ref"] = np.quantile(sc, np.linspace(0, 1, 101)).round(4).tolist()
+            except Exception:
+                pass
             tmp = model_path(e) + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(m, f, ensure_ascii=False)

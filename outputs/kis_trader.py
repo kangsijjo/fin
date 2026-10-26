@@ -124,6 +124,28 @@ STRENGTH_TH = dict(_ACC["min_strength_by"])
 def _th(strat):
     return STRENGTH_TH.get(strat, MIN_STRENGTH_SCORE)
 
+
+# [2026-10-26 §75] 칸 방식 — "slots"(전략별 칸) | "pool"(칸 없음: 조건 넘은 신호를 전체 MAX_CONCURRENT 까지,
+# 같은 날 후보는 전략 안 순위(그 전략 과거 강도 중 상위 몇 %) 높은 순). 대시보드 '모의매매 전략 설정'에서 고름.
+SLOT_MODE = _ACC.get("slot_mode", "slots")
+
+
+def _pool_order(cands, strength):
+    """칸 없음 모드: 여러 전략 후보를 한 줄로 — 전략 안 순위(백분위) 높은 순, 점수 없는 후보(면제·무기록)는 맨 뒤."""
+    import strength_model as _SM
+    import live_config as _LCm
+
+    def key(sig):
+        st = str(sig.get("strategy", ""))
+        sc = strength.get((str(sig.get("code", "")).zfill(6), st))
+        try:
+            p = _SM.rank_pct(_LCm.engine_name(st), st, sc, STRENGTH_VERSION)
+        except Exception:
+            p = None if sc is None else float(sc) * 10
+        return (p is None, -(p or 0.0))
+    return sorted(cands, key=key)
+
+
 # [2026-10-15 사용자 결정] 강도 필터 면제 전략 — 신호 전량 매수 후보(정렬은 강도순 유지, 무기록이면 tv순).
 # 근거(§48): gc_for3d 는 강도가 높을수록 오히려 나빴다(워크포워드 900건: 필터없음 +0.36% /
 # ≥4.0 −0.80% / ≥5.7 −5.50%). 강도점수가 역추세(RSI 저) 선호라 추세형 골든크로스와 맞지 않는다.
@@ -1307,6 +1329,8 @@ def cmd_buy():
     slot_avail = {k: max(0, STRATEGY_MAX_SLOTS[k] - slot_used[k])
                   for k in STRATEGY_MAX_SLOTS}
     total_avail = max(0, sum(slot_avail.values()) - legacy_used)
+    if SLOT_MODE == "pool":                      # 칸 없음: 전략 구분 없이 전체 상한까지(보유 전부 포함)
+        total_avail = max(0, MAX_CONCURRENT - len(positions))
 
     # 매수 예산 — 주문가능금액(가수도정산 포함) 우선(2026-07-07).
     # daily 는 09:01 에 매도 후 매수하는데, 매도대금(D+2 정산대기)은 dnca_tot_amt
@@ -1331,9 +1355,13 @@ def cmd_buy():
     _orderable = _to_int((getattr(client, "last_summary", {}) or {}).get("orderable", 0))
     buy_budget = _orderable if _orderable > 0 else deposit
     print(f"[buy] 오늘 신호 {len(sigs)}건  예수금 {deposit:,}원  주문가능 {buy_budget:,}원")
-    print("  전략별 슬롯: "
-          + " / ".join(f"{k}={slot_used[k]}/{STRATEGY_MAX_SLOTS[k]}"
-                       for k in STRATEGY_PRIORITY))
+    if SLOT_MODE == "pool":
+        print(f"  칸 방식: 칸 없음 — 보유 {len(positions)}/{MAX_CONCURRENT}, 빈 칸 {total_avail}개 (전략별 보유 "
+              + " / ".join(f"{k}={slot_used[k]}" for k in STRATEGY_PRIORITY) + ")")
+    else:
+        print("  전략별 슬롯: "
+              + " / ".join(f"{k}={slot_used[k]}/{STRATEGY_MAX_SLOTS[k]}"
+                           for k in STRATEGY_PRIORITY))
     if total_avail <= 0:
         print("[buy] 모든 슬롯 가득 — 주문 없음")
         return
@@ -1383,17 +1411,24 @@ def cmd_buy():
     # '개인공매도이수전용 계좌'로 뚫렸다). 문구와 무관하게 '시도 전부 실패'를 잡는다.
     buy_failures = []      # [(code, name, msg)]
 
-    for strat in STRATEGY_PRIORITY:
+    if SLOT_MODE == "pool":   # [§75] 한 줄로: 전략 안 순위 높은 순, 전체 빈 칸까지
+        _plan = [(None, _pool_order([s for k in STRATEGY_PRIORITY for s in sigs_by_strat.get(k, [])], strength),
+                  total_avail)]
+    else:
+        _plan = [(k, sigs_by_strat.get(k, []), slot_avail[k]) for k in STRATEGY_PRIORITY]
+    for _grp, strat_sigs, avail in _plan:
         if n_placed >= total_avail:   # 전역 동시보유 상한(레거시 반영) 도달 — 과다매수 방지(2026-06-29)
             break
-        avail = slot_avail[strat]
         if avail <= 0:
             continue
-        strat_sigs = sigs_by_strat.get(strat, [])
-        print(f"\n  [{strat}] 빈슬롯 {avail}개  후보 {len(strat_sigs)}건  {_stop_txt(strat)}")
+        if _grp is None:
+            print(f"\n  [칸 없음] 빈 칸 {avail}개  후보 {len(strat_sigs)}건(전략 안 순위 높은 순)")
+        else:
+            print(f"\n  [{_grp}] 빈슬롯 {avail}개  후보 {len(strat_sigs)}건  {_stop_txt(_grp)}")
 
         placed_this = 0
         for sig in strat_sigs:
+            strat = _grp or str(sig.get("strategy", ""))
             # 전략별 빈슬롯 OR 전역 가용슬롯(레거시 반영) 중 먼저 소진되면 중단
             if placed_this >= avail or n_placed >= total_avail:
                 break
@@ -1419,7 +1454,7 @@ def cmd_buy():
 
             # placed_per_strat[k] 가 이미 현재 전략 포함 모든 배정 수를 추적하므로
             # placed_this 이중 차감 불필요 (버그 수정 2026-06-18)
-            total_rem = sum(
+            total_rem = (total_avail - n_placed) if _grp is None else sum(
                 max(0, slot_avail[k] - placed_per_strat[k])
                 for k in STRATEGY_PRIORITY
             )

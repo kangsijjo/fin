@@ -8,6 +8,8 @@ live_config.py — 모의매매 전략 설정(계좌별 전략·슬롯·강도·
     파일이 없거나 깨졌으면 **현행 기본값**(아래 DEFAULT) — 설정 기능이 고장 나도 매매는 종전대로.
 
 단위: JSON 의 stop/take 는 **퍼센트**(예 -15, 50). 트레이더용 접근자는 비율(-0.15, 0.50)로 돌려준다.
+칸 방식(2026-10-26 §75): 계좌의 slot_mode = "slots"(전략별 칸, 기본) | "pool"(칸 없음 — 고른 전략의 신호 중 조건을 넘은
+      것을 전체 10종목까지, 같은 날 후보는 전략 안 순위(강도 백분위) 높은 순). pool 이면 전략별 slots 값은 쓰지 않는다.
 전략별 강도 기준(2026-10-23 §71): 전략 행의 min_strength(0~10)가 있으면 그 전략은 그 값, 비우면(None) 계좌 기본값.
       트레이더는 account()["min_strength_by"][라이브이름] 로 읽는다(면제 전략은 기준과 무관).
 이름: 설정은 백테스트 엔진 이름(engine)으로 저장, 신호 CSV·원장엔 라이브 이름(live)을 쓴다
@@ -26,6 +28,7 @@ MAX_STRATEGIES = 4
 ACCOUNTS = ("kiwoom", "kis")
 ACCOUNT_LABEL = {"kiwoom": "키움 안C", "kis": "KIS 안D"}
 ALIAS = {"star_high_52w_20_filt": "high_52w_filt", "star_high_500d_20": "high_500d_filt"}   # engine → live
+SLOT_MODES = {"slots": "전략별 칸", "pool": "칸 없음(전체 10종목, 전략 안 순위 높은 순)"}
 STRENGTH_VERSIONS = {"v1": "공통(라이브 6전략 풀 학습, 종전)", "v2": "전략별(그 전략 자신의 과거 매매로 학습, §62)"}
 LOCK_WINDOW = ("0830", "1540")      # 거래일 이 시간엔 변경 금지(장전 예열·매수·손절·만기매도가 도는 구간)
 SIGNAL_TIME = "1825"                # 이 시각 이후(또는 휴장일)에 바꾸면 오늘 신호를 새 설정으로 다시 만든다
@@ -91,6 +94,8 @@ def validate(cfg, engine_names=None):
             errs.append(f"{lab}: 강도 기준은 0~10")
         if A.get("strength_version", "v1") not in STRENGTH_VERSIONS:
             errs.append(f"{lab}: 강도 방식은 v1/v2")
+        if A.get("slot_mode", "slots") not in SLOT_MODES:
+            errs.append(f"{lab}: 칸 방식은 slots/pool")
         S = A.get("strategies")
         if not isinstance(S, list) or not 1 <= len(S) <= MAX_STRATEGIES:
             errs.append(f"{lab}: 전략은 1~{MAX_STRATEGIES}개")
@@ -124,7 +129,7 @@ def validate(cfg, engine_names=None):
             sm = s.get("min_strength")
             if sm is not None and (not isinstance(sm, (int, float)) or isinstance(sm, bool) or not 0 <= sm <= 10):
                 errs.append(f"{lab}: {e} 전략별 강도 기준은 0~10 또는 비움")
-        if tot != SLOTS_TOTAL:
+        if tot != SLOTS_TOTAL and A.get("slot_mode", "slots") == "slots":     # 칸 없음이면 전략별 칸 수는 안 씀
             errs.append(f"{lab}: 슬롯 합이 {tot} — {SLOTS_TOTAL} 이어야 합니다")
     return errs
 
@@ -157,6 +162,7 @@ def account(acct, cfg=None):
     rows = A["strategies"]
     out = {"min_strength": float(A["min_strength"]), "rows": rows,
            "strength_version": A.get("strength_version", "v1"),
+           "slot_mode": A.get("slot_mode", "slots"),
            "slots": {}, "priority": [], "exempt": set(), "stop": {}, "take": {}, "holding": {}, "engine": {},
            "min_strength_by": {}}
     # 누적 규칙 먼저(옛 보유분), 그 위에 현재 규칙
@@ -224,6 +230,8 @@ def diff(old, new):
         o, n = old["accounts"][a], new["accounts"][a]
         if o["min_strength"] != n["min_strength"]:
             out.append(f"{lab} 강도 기준 {o['min_strength']:g} → {n['min_strength']:g}")
+        if o.get("slot_mode", "slots") != n.get("slot_mode", "slots"):
+            out.append(f"{lab} 칸 방식 {SLOT_MODES[o.get('slot_mode', 'slots')]} → {SLOT_MODES[n.get('slot_mode', 'slots')]}")
         if o.get("strength_version", "v1") != n.get("strength_version", "v1"):
             out.append(f"{lab} 강도 방식 {o.get('strength_version', 'v1')} → {n.get('strength_version', 'v1')}"
                        f" ({STRENGTH_VERSIONS.get(n.get('strength_version', 'v1'), '')})")
@@ -262,6 +270,7 @@ def save(new, note="", engine_names=None):
     cfg = {"version": 1, "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "note": note or "",
            "accounts": {a: {"min_strength": float(new["accounts"][a]["min_strength"]),
                             "strength_version": new["accounts"][a].get("strength_version", "v1"),
+                            "slot_mode": new["accounts"][a].get("slot_mode", "slots"),
                             "strategies": [{k: s.get(k) for k in ("engine", "slots", "exempt", "stop", "take", "holding",
                                                                   "min_strength")}
                                            for s in new["accounts"][a]["strategies"]]}
