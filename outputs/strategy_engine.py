@@ -46,7 +46,12 @@ from strategies.high52w_credit_decrease import High52wCreditDecreaseStrategy
 from strategies.supply_reversal        import SupplyReversalStrategy, SupplyRatioStrategy, SupplyCrossoverStrategy
 from strategies.daily_loader       import load_macro_daily
 
-DEFAULT_COSTS = {"fee_pct": 0.015, "tax_pct": 0.18, "slip_pct": 0.05, "total_pct": 0.245}
+# [2026-10-23] 비용 현실화 — 종전 0.245%(수수료·슬리피지를 한쪽만, 거래세 0.18% 고정)는 왕복 비용을 ~0.09%p 낮게 잡았다.
+# 왕복 = 수수료 0.015%×2 + 슬리피지 0.05%×2 + 매도 연도의 코스닥 증권거래세(2026년 0.20%, §64).
+# total_pct 는 tax_by_year 를 모르는 옛 코드용 2026 기준값(= ai_paper_trader COST_PCT 0.33 과 같음).
+DEFAULT_COSTS = {"fee_pct": 0.015, "slip_pct": 0.05, "tax_pct": 0.20, "total_pct": 0.33,
+                 "tax_by_year": {"2018": 0.30, "2019": 0.25, "2020": 0.25, "2021": 0.23, "2022": 0.23,
+                                 "2023": 0.20, "2024": 0.18, "2025": 0.15, "2026": 0.20}}
 MKT = True
 
 ALL_STRATEGIES = [
@@ -250,6 +255,23 @@ LIVE_MAP = {
 }
 
 
+def live_map():
+    """[2026-10-27 §79] '지금' 모의계좌(키움·KIS)에서 운용 중인 전략 → '키움 high_500d_filt · KIS …'.
+    LIVE_MAP(위)은 10-18 구성으로 고정된 옛 표라, 대시보드에서 전략을 바꾼 뒤엔 ★ 표시가 틀렸다 → 설정에서 읽는다.
+    설정을 못 읽으면 LIVE_MAP 으로 대체."""
+    try:
+        import live_config as LC
+        cfg = LC.load()
+        out = {}
+        for a, lab in (("kiwoom", "키움"), ("kis", "KIS")):
+            for s in cfg["accounts"][a]["strategies"]:
+                t = f"{lab} {LC.live_name(s['engine'])}"
+                out[s["engine"]] = (out[s["engine"]] + " · " + t) if s["engine"] in out else t
+        return out
+    except Exception:
+        return dict(LIVE_MAP)
+
+
 def run_full(strategies, df_all, oos_years=2.0, log=print):
     """[2026-10-12] 전 전략 과거 백테스트 — **진짜 지표**(자본곡선, 10슬롯, 일별 MTM) + 최근 N년 표본외.
 
@@ -263,6 +285,7 @@ def run_full(strategies, df_all, oos_years=2.0, log=print):
     import gc
     import time
     from capital_simulator import simulate_capital, build_price_lookup
+    _LM = live_map()          # [§79] 지금 설정 기준 ★
     # 메모리: 일봉(≈0.8GB) + 전체 가격조회표(≈0.45GB) + 백테스트 작업복사본이 겹치면 3GB 환경에서
     # OOM(ma_ribbon_new 실측). → 조회표는 '백테스트가 끝난 뒤, 그 전략이 산 종목만'으로 만들고
     # 시뮬 직후 해제한다. 달력(trading_dates)은 전체 기준 1회.
@@ -282,7 +305,7 @@ def run_full(strategies, df_all, oos_years=2.0, log=print):
             trades = strat.backtest(df_all.copy(), DEFAULT_COSTS) or []
         except Exception as e:
             log(f"  > {strat.name}: ERROR {e}")
-            rows.append({"strategy": strat.name, "live": LIVE_MAP.get(strat.name, ""),
+            rows.append({"strategy": strat.name, "live": _LM.get(strat.name, ""),
                          "n_trades": 0, "error": str(e)[:120]})
             continue
         gc.collect()                                   # 백테스트 작업복사본 해제 후 조회표 생성
@@ -298,7 +321,7 @@ def run_full(strategies, df_all, oos_years=2.0, log=print):
         del pm
         gc.collect()
         rows.append({
-            "strategy": strat.name, "live": LIVE_MAP.get(strat.name, ""),
+            "strategy": strat.name, "live": _LM.get(strat.name, ""),
             "n_trades": st["n_trades"] or 0, "annual_trades": st["annual_trades"],
             "avg_hold": st["avg_hold"], "avg_net": st["avg_net"], "win_rate": st["win_rate"],
             "profit_factor": st["profit_factor"],

@@ -2365,9 +2365,17 @@ def api_pbt_meta():
     import period_backtest as P
     import strategy_engine as E
     cal = P.trading_calendar()
-    live = getattr(E, "LIVE_MAP", {})
+    live = E.live_map()                    # [§79] 지금 설정 기준(종전: 10-18 고정 표라 전략을 바꾸면 ★ 가 틀렸다)
+    try:
+        import virtual_config as VC
+        _use = VC.strategy_usage()
+        uses = {k: VC.usage_text(v) for k, v in _use.items()}
+        vuses = {k: VC.usage_text(v, "virtual") for k, v in _use.items()}
+    except Exception:
+        uses, vuses = {}, {}
     import strategy_explain as X
-    strategies = [{"name": s.name, "live": live.get(s.name, ""), "warmup": P.warmup_days(s),
+    strategies = [{"name": s.name, "live": live.get(s.name, ""), "uses": uses.get(s.name, ""),
+                   "virtual": vuses.get(s.name, ""), "warmup": P.warmup_days(s),
                    "needs": [P._AUX_LABEL[k] for k in P.aux_needs(s)],
                    "desc": X.explain(s)} for s in E.ALL_STRATEGIES]
     top10 = []
@@ -2429,10 +2437,25 @@ def build_strategy_info():
         for n, k in slots.items():
             if n not in info:
                 info[n] = {"title": n, "buy": [], "sell": [], "data": [], "caution": []}
-            info[n]["live"] = {"account": lab, "slots": k, "label": labels.get(n, n),
-                               "entry": entries.get(n, ""), "exit": exits.get(n, ""),
-                               "stop": stops.get(n) if stops.get(n) != "" else None}
+            L = {"account": lab, "slots": k, "label": labels.get(n, n),
+                 "entry": entries.get(n, ""), "exit": exits.get(n, ""),
+                 "stop": stops.get(n) if stops.get(n) != "" else None}
+            info[n].setdefault("live", L)           # 첫 계좌(하위호환)
+            info[n].setdefault("lives", []).append(L)   # [§79] 두 계좌 모두 운용이면 둘 다
             info[n].pop("retired", None)            # 다시 운용하면 '운용 종료' 표시는 뗀다
+    # [2026-10-27 §79] 어디에 쓰이는지 전부(모의계좌 + AI·강도 가상) — 엔진 이름·라이브 이름 둘 다에 붙인다
+    try:
+        import virtual_config as VC
+        for eng, uses in VC.strategy_usage().items():
+            for key in {eng, LC.live_name(eng)}:
+                if key not in info:
+                    info[key] = {"title": key, "buy": [], "sell": [], "data": [], "caution": []}
+                info[key]["uses"] = uses
+                if key != LC.live_name(eng) and info.get(LC.live_name(eng), {}).get("lives"):
+                    info[key]["lives"] = info[LC.live_name(eng)]["lives"]
+                    info[key]["live"] = info[LC.live_name(eng)]["live"]
+    except Exception:
+        pass
     return info
 
 
@@ -4142,7 +4165,7 @@ function pbtExplain(name){
   m.innerHTML=`<div style="width:min(620px,92vw);max-height:86vh;overflow:auto;background:#111827;border:1px solid #334155;border-radius:12px;padding:18px 20px;color:#e2e8f0;font-size:13px;line-height:1.7">
     <div style="display:flex;justify-content:space-between;align-items:start;gap:10px">
       <div><div style="font-size:16px;font-weight:700">${s.live?'<span style="color:#fbbf24">★ </span>':''}${_pbtEsc(d.title||name)}</div>
-      <div style="color:#64748b;font-size:12px">${_pbtEsc(name)}${s.live?' · 모의매매 운용 중: '+_pbtEsc(s.live):''}</div></div>
+      <div style="color:#64748b;font-size:12px">${_pbtEsc(name)}${s.uses?' · 지금 사용 중: '+_pbtEsc(s.uses):''}</div></div>
       <button class="runbtn" onclick="document.getElementById('pbt-modal').style.display='none'">닫기 ✕</button></div>
     ${d.idea?`<div style="margin-top:10px;padding:8px 10px;background:rgba(37,99,235,.12);border-left:3px solid #2563eb;border-radius:4px">💡 ${_pbtEsc(d.idea)}</div>`:''}
     <div style="margin-top:10px"><b style="color:#10b981">살 때 — 아래를 모두 만족하는 날</b><ul style="margin:4px 0 0 18px">${li(d.buy)}</ul></div>
@@ -4170,9 +4193,9 @@ async function pbtInit(){
     setTxt('pbt-range', `가격 데이터 ${_pbtD(d[0])} ~ ${e}`);
   }
   setHtml('pbt-list', (_pbtMeta.strategies||[]).map(s=>{
-    const tip=`과거 ${s.warmup}거래일 필요`+(s.needs.length?` · 필요 데이터: ${s.needs.join(', ')}`:'')+(s.live?` · 라이브: ${s.live}`:'');
+    const tip=`과거 ${s.warmup}거래일 필요`+(s.needs.length?` · 필요 데이터: ${s.needs.join(', ')}`:'')+(s.uses?` · 지금 사용 중: ${s.uses}`:'');
     return `<label title="${_pbtEsc(tip)}" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:${s.live?'#fbbf24':'#cbd5e1'}">
-      <input type="checkbox" value="${_pbtEsc(s.name)}" onchange="_pbtCount()"> ${s.live?'★ ':''}${_pbtEsc(s.name)}
+      <input type="checkbox" value="${_pbtEsc(s.name)}" onchange="_pbtCount()"> ${s.live?'★ ':''}${s.virtual?'🧪 ':''}${_pbtEsc(s.name)}
       <span onclick="event.preventDefault();event.stopPropagation();pbtExplain('${_pbtEsc(s.name)}')" style="color:#60a5fa;cursor:pointer" title="전략 설명">ⓘ</span></label>`;}).join(''));
   setTxt('pbt-live-btn', `★ 라이브 ${((_pbtMeta.presets||{}).live||[]).length}개`);
   pbtSel('live');
@@ -4207,6 +4230,13 @@ function _pbtWarnMeaning(m){
   if(/멈춰 있습니다/.test(m)) return '최근 구간은 신호가 없어 현금 — 수집 버튼으로 채운 뒤 다시 계산 권장';
   if(/데이터가 없습니다/.test(m)) return '필요한 보조 데이터가 없어 이 전략 결과는 거의 의미 없음';
   return '';
+}
+// [2026-10-27 §79] 전략이 지금 어디 쓰이는지 표시 — ★ 모의계좌(키움·KIS, 실제 주문) / 🧪 AI·강도 가상매매(주문 없음)
+function _pbtBadge(x){
+  if(!x||!(x.live||x.virtual)) return '';
+  const t='지금 사용 중: '+(x.uses||x.live)+((x.live||'').includes('·')?' — ⚠ 키움·KIS 두 계좌가 같은 종목을 동시에 삼':'');
+  return (x.live?`<span class="pbt-tip" data-tip="${_pbtEsc('★ 모의계좌 운용 중|'+t)}" style="color:#fbbf24">★</span>`:'')
+       + (x.virtual?`<span class="pbt-tip" data-tip="${_pbtEsc('🧪 가상매매에서 사용 중(주문 없음)|'+t)}" style="font-size:11px">🧪</span>`:'')+' ';
 }
 function _pbtWarnHtml(ws, head){
   if(!ws||!ws.length) return head?`<div style="padding:8px 12px;border-radius:8px;background:rgba(16,185,129,.08);border:1px solid #065f46;color:#6ee7b7;font-size:13px">✓ ${head} — 데이터 부족 없음</div>`:'';
@@ -4404,9 +4434,10 @@ function pbtRender(d){
     return ` <span class="pbt-tip" data-tip="${_pbtEsc([head,...lines].join('|').replace(/"/g,"'"))}" style="color:${col};cursor:help">${ic}</span>`; };
   // ★ 는 '지금' 운용 중인 전략 기준(작업 파일의 live 는 실행 당시 값이라 교체 후엔 틀릴 수 있다)
   const _live=n=>{ const x=((_pbtMeta&&_pbtMeta.strategies)||[]).find(z=>z.name===n); return x?x.live:''; };
+  const _star=n=>_pbtBadge(((_pbtMeta&&_pbtMeta.strategies)||[]).find(z=>z.name===n));
   const row=(r,isM)=>`<tr${r.strength_min!=null?' style="background:#0b1220;font-size:12px"':(!isM&&_live(r.strategy)?' style="background:rgba(251,191,36,0.06)"':'')}${isM?' style="background:#111827;font-style:italic"':''}>
     <td style="font-weight:500">${r.strength_min!=null?`<span style="color:#64748b;padding-left:14px">└ 강도 ≥${r.strength_min}</span> <span style="color:#64748b;font-size:11px" title="이 전략 신호 중 강도 기준을 넘은 비율">(통과 ${r.pass_pct??'-'}%)</span>${_wMark([...(wmap['S:'+r.base]||[]),...(wmap[r.strategy]||[])])}`:
-      `${!isM&&_live(r.strategy)?'<span style="color:#fbbf24">★ </span>':''}${isM?_pbtEsc(r.name):`<a href="javascript:void(0)" onclick="pbtExplain('${_pbtEsc(r.strategy)}')" style="color:#93c5fd;text-decoration:underline dotted" title="눌러서 전략 설명 보기">${_pbtEsc(r.strategy)}</a>`}`}${r.strength_min==null?_wMark(wmap[r.strategy]):''}${r.error?` <span style="color:#ef4444" title="${_pbtEsc(r.error)}">오류</span>`:''}</td>
+      `${!isM?_star(r.strategy):''}${isM?_pbtEsc(r.name):`<a href="javascript:void(0)" onclick="pbtExplain('${_pbtEsc(r.strategy)}')" style="color:#93c5fd;text-decoration:underline dotted" title="눌러서 전략 설명 보기">${_pbtEsc(r.strategy)}</a>`}`}${r.strength_min==null?_wMark(wmap[r.strategy]):''}${r.error?` <span style="color:#ef4444" title="${_pbtEsc(r.error)}">오류</span>`:''}</td>
     <td class="r" style="color:#94a3b8">${isM?'-':(r.n_trades??'-')}${!isM&&r.n_open?`<span style="font-size:10px" title="기간 안에 신호가 났지만 종료일 뒤에 청산되는 매매 — 신호 평균·승률에서 제외, 자본곡선에선 실제로 보유 중인 것만 종료일 종가로 평가"> (미완료 ${r.n_open})</span>`:''}</td>
     <td class="r">${isM||r.win==null?'-':r.win.toFixed(1)+'%'}</td>
     <td class="r ${c(r.avg_net)}">${isM?'-':f(r.avg_net)}</td>
@@ -5165,14 +5196,17 @@ function _stratTipInit(){
     const hit=_stratFind(e.target); if(!hit){ return; }
     const [el,name]=hit; if(cur===el&&box.style.display==='block') return;
     cur=el; el.classList.add('strat-hot');
-    const d=_STRAT[name]||{}, L=d.live;
+    const d=_STRAT[name]||{}, L=d.live, LS=d.lives||(L?[L]:[]), VU=(d.uses||[]).filter(u=>u.kind==='virtual');
     box.innerHTML=`<div style="font-weight:700;font-size:13px">${esc(d.title||name)}</div>
       <div style="color:#64748b">${esc(name)}${d.engine&&d.engine!==name?' · 백테스트 이름 '+esc(d.engine):''}</div>
       ${d.retired?`<div style="color:#fbbf24;margin-top:4px">⏹ ${esc(d.retired)}</div>`:''}
       ${d.idea?`<div style="margin-top:6px;color:#cbd5e1">💡 ${esc(d.idea)}</div>`:''}
-      ${L?`<div style="margin-top:6px;padding:5px 8px;background:rgba(251,191,36,.08);border-left:3px solid #fbbf24;border-radius:4px">
+      ${LS.length>1?`<div style="margin-top:6px;color:#fbbf24">⚠ 키움·KIS 두 계좌에서 모두 운용 — 같은 종목을 두 계좌가 동시에 삽니다</div>`:''}
+      ${VU.length?`<div style="margin-top:6px;padding:4px 8px;background:rgba(56,189,248,.08);border-left:3px solid #38bdf8;border-radius:4px">
+        🧪 <b>가상매매에서도 사용</b>: ${VU.map(u=>esc(u.label)+' '+esc(u.slots)+(typeof u.slots==='number'?'칸':'')+(u.pending?'(예약)':'')).join(' · ')} <span style="color:#64748b">(주문 없음)</span></div>`:''}
+      ${L?LS.map(L=>`<div style="margin-top:6px;padding:5px 8px;background:rgba(251,191,36,.08);border-left:3px solid #fbbf24;border-radius:4px">
         <b>★ 지금 모의매매(${esc(L.account)}) · ${L.slots}슬롯</b><br><span style="color:#cbd5e1">사는 조건: ${esc(L.entry)}</span><br>
-        <span style="color:#cbd5e1">파는 조건: ${esc(L.exit)}</span></div>`:
+        <span style="color:#cbd5e1">파는 조건: ${esc(L.exit)}</span></div>`).join(''):
         `${(d.buy||[]).length?`<div style="margin-top:6px"><b style="color:#10b981">살 때</b><ul style="margin:2px 0 0 16px">${li(d.buy)}</ul></div>`:''}
          ${(d.sell||[]).length?`<div><b style="color:#f87171">팔 때</b><ul style="margin:2px 0 0 16px">${li(d.sell)}</ul></div>`:''}`}
       ${(d.caution||[]).length?`<div style="margin-top:4px;color:#fcd34d">⚠ ${esc(d.caution[0])}</div>`:''}`;

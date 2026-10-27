@@ -332,6 +332,39 @@ def state(today=None):
     return active, (sorted(pending, key=lambda e: e["effective"])[-1] if pending else None)
 
 
+def strategy_usage(today=None):
+    """[§79] 전략(엔진 이름)이 지금 어디에 쓰이는지 → {엔진: [{place, label, kind, slots, live}]}.
+    place: kiwoom|kis(모의계좌, 실제 주문) / ai|strength(가상매매, 주문 없음). 가상은 지금 적용 중 설정(예약분이 있으면 예약분 우선)."""
+    import live_config as LC
+    out = {}
+    cfg = LC.load()
+    for a, lab in (("kiwoom", "키움"), ("kis", "KIS")):
+        A = cfg["accounts"][a]
+        pool = A.get("slot_mode") == "pool"
+        for s in A["strategies"]:
+            out.setdefault(s["engine"], []).append({"place": a, "label": lab, "kind": "mock",
+                                                    "slots": "공유" if pool else int(s["slots"]),
+                                                    "live": LC.live_name(s["engine"])})
+    active, pending = state(today)
+    e = pending or active
+    if e and not e.get("legacy"):
+        for p in PORTFOLIOS:
+            P = e["portfolios"][p]
+            pool = P.get("slot_mode") == "pool"
+            for s in P["strategies"]:
+                out.setdefault(s["engine"], []).append({"place": p, "label": LABEL[p], "kind": "virtual",
+                                                        "slots": "공유" if pool else int(s["slots"]),
+                                                        "live": LC.live_name(s["engine"]),
+                                                        "pending": e is pending})
+    return out
+
+
+def usage_text(uses, kind=None):
+    """사람이 읽는 한 줄: '키움 3칸 · KIS 2칸' (kind 로 mock/virtual 만 고를 수 있음)."""
+    return " · ".join(f"{u['label']} {u['slots']}{'칸' if isinstance(u['slots'], int) else ''}"
+                      for u in uses if kind is None or u["kind"] == kind)
+
+
 def needed_engines(today=None):
     """가상 신호를 만들어야 할 엔진 이름 — 지금 적용 중·예약 설정의 전략 전부(모의계좌 전략도 포함, 호출측에서 뺌)."""
     active, pending = state(today)

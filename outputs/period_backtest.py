@@ -74,7 +74,7 @@ def trading_calendar():
 
 def strategies_by_name():
     import strategy_engine as E
-    return {s.name: s for s in E.ALL_STRATEGIES}, getattr(E, "LIVE_MAP", {})
+    return {s.name: s for s in E.ALL_STRATEGIES}, E.live_map()      # [§79] 지금 설정 기준(종전: 10-18 고정 표)
 
 
 def warmup_days(s) -> int:
