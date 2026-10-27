@@ -2260,15 +2260,17 @@ def api_run(task):
 
     # 스케줄러 재시작
     if task == "scheduler_restart":
-        bat = BASE.parent / "Stock_AI_Project" / "run_scheduler.bat"
+        # [2026-10-27] 종전엔 Stock_AI_Project/run_scheduler.bat 를 그냥 띄워 **돌던 스케줄러는 그대로 두고 하나 더** 켰다
+        # (같은 수집이 두 번, 키움 키 동시 사용). → 부팅 작업과 같은 start_scheduler.bat: 옛 스케줄러를 먼저 끄고 새로 켬.
+        bat = BASE / "start_scheduler.bat"
         if bat.exists():
             try:
-                _sp.Popen(["cmd", "/c", str(bat)], cwd=str(bat.parent),
-                          creationflags=_NO_WIN)
-                return jsonify({"ok": True, "msg": "스케줄러 재시작 명령 전송"})
+                _sp.Popen(["cmd", "/c", str(bat)], cwd=str(BASE), creationflags=_NO_WIN)
+                return jsonify({"ok": True, "msg": "스케줄러 재시작(옛 스케줄러 종료 후 새로 시작) — 진행 중이던 수집이 있으면 끊기고, "
+                                                   "다음 예정 시각부터 다시 돕니다"})
             except Exception as e:
                 return jsonify({"ok": False, "msg": str(e)})
-        return jsonify({"ok": False, "msg": "run_scheduler.bat 없음"})
+        return jsonify({"ok": False, "msg": "start_scheduler.bat 없음"})
 
     if task not in _RUN_TASKS:
         return jsonify({"ok": False, "msg": f"알 수 없는 작업: {task}"}), 400

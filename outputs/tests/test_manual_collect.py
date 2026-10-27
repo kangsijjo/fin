@@ -71,3 +71,13 @@ def test_scheduler_indicator_job_collects_today_prices_first():
     src = open(os.path.join(ROOT, "Stock_AI_Project", "scheduler.py"), encoding="utf-8").read()
     body = src[src.index("def daily_indicators_job"):src.index("def kiwoom_daily_job")]
     assert body.index("run_pipeline('collect')") < body.index("run_pipeline('indicators')")
+
+
+def test_scheduler_restart_stops_old_copy_first():
+    """[2026-10-27] '스케줄러 재시작' 버튼이 돌던 스케줄러를 두고 하나 더 켜던 문제 — 이제 start_scheduler.bat 이 먼저 끈다."""
+    bat = open(os.path.join(HERE, "start_scheduler.bat"), "rb").read().decode("ascii")
+    assert bat.index("Stop-Process") < bat.index('start "StockAI-Scheduler"')
+    assert "run_scheduler.bat" in bat, "재시작 루프도 끈다(안 끄면 30초 뒤 되살림)"
+    src = open(os.path.join(HERE, "integrated_dashboard_server.py"), encoding="utf-8").read()
+    body = src[src.index('if task == "scheduler_restart":'):src.index('if task not in _RUN_TASKS:')]
+    assert "start_scheduler.bat" in body and "run_scheduler.bat\"" not in body
