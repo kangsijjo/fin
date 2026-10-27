@@ -258,13 +258,24 @@ def _korea_stocks_rows(date_iso):
 
 def daily_indicators_job():
     """평일 16:15 — 기술지표(korea_indicators) 전 섹터 재계산(45~90분). 강도 IC 상위 피처(rsi_db·macd_hist_db·bb_pct_db)의 원천.
-    오늘 가격(korea_stocks, 천억이 KIS_Paper 15:50 pykrx_collector 가 넣음)이 들어올 때까지 최대 80분 기다린 뒤 실행
-    → 18:30 신호 전에 끝나는 게 목표. 늦으면 그날 신호는 전일 값(강도 쪽 3거래일 묵음 가드가 그 이상은 버림)."""
+    → 18:30 신호 전에 끝나는 게 목표. 늦으면 그날 신호는 전일 값(강도 쪽 3거래일 묵음 가드가 그 이상은 버림).
+    [2026-10-26 수정] 종전엔 '천억이 KIS_Paper 15:50 pykrx_collector 가 korea_stocks 에 넣는다'고 보고 80분을 기다렸는데,
+    그 쓰기는 2026-06-20 소유권 단일화로 꺼져 있다(pykrx_collector._SYNC_STOCK_DB=False). 오늘 가격은 다음날 06:30
+    daily_data_job 에서야 들어와 **평일 갱신이 매번 '80분 대기 후 생략'**이었다(10-22·10-26 로그). → 먼저 이 시점에
+    주가 수집(main_collector, FDR — 증권사 키 안 씀, 약 20분, 이미 있는 날짜는 건너뜀)을 돌려 오늘 가격을 넣고 지표를 만든다."""
     if not _is_weekday() or _is_krx_holiday():
         return
 
     def work():
         today = datetime.now().strftime('%Y-%m-%d')
+        try:
+            have = _korea_stocks_rows(today)
+        except Exception as e:
+            have = 0
+            log(f"korea_stocks 확인 실패: {e}", level='WARNING')
+        if have < 1000:
+            log("오늘 가격이 아직 없어 주가 수집부터(지표용, main_collector)")
+            run_pipeline('collect')
         for _ in range(16):
             try:
                 if _korea_stocks_rows(today) >= 1000:

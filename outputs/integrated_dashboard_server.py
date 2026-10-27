@@ -391,6 +391,10 @@ def get_freshness():
         ("macro_indicators", "SELECT MAX(date) FROM macro_indicators", 6),
         ("credit_balance",   "SELECT MAX(date) FROM credit_balance", 10),   # 주1회(토) kiwoom_weekly — 한 주 누락 시만 경고
         ("news",             "SELECT MAX(pubDate) FROM news", 6),
+        # [2026-10-26 §77] 워치독은 보는데 대시보드 버튼 깜빡임엔 없던 3개(달력일 기준 — 주말 포함 여유)
+        ("korea_indicators", "SELECT MAX(date) FROM korea_indicators", 5),
+        ("program_trading",  "SELECT MAX(date) FROM program_trading", 5),
+        ("foreign_ratio",    "SELECT MAX(date) FROM foreign_ratio", 6),
     ]
     for name, q, max_days in checks:
         rows = safe_db(q)
@@ -2135,7 +2139,6 @@ _STOCK_AI_DIR = BASE.parent / "Stock_AI_Project"
 _STOCK_AI_PY  = str(_STOCK_AI_DIR / "venv" / "Scripts" / "python.exe")
 if not Path(_STOCK_AI_PY).exists():
     _STOCK_AI_PY = _VENV_PYTHON   # fallback
-_CREDIT_SINCE = (datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d")
 
 _RUN_TASKS = {
     "live_signal":   [_VENV_PYTHON, str(BASE / "live_signal.py")],
@@ -2164,18 +2167,60 @@ _RUN_TASKS = {
     "supply_demand": [_STOCK_AI_PY, "-m", "src.collector.supply_demand"],            # 외국인/기관 수급(KIS)
     "macro":         [_STOCK_AI_PY, "-m", "src.collector.macro"],                    # 거시지표(NASDAQ/VIX/환율)
     "credit":        [_STOCK_AI_PY, "-m", "src.collector.kiwoom_extra",
-                      "--backfill", "--since", _CREDIT_SINCE, "--force"],            # 신용/대차(키움)
+                      "--backfill", "--since", "{SINCE45}", "--force"],              # 신용/대차(키움) — 날짜는 누를 때 계산
                       # --force: 수집기의 '주말 전용' 가드 우회 — 수동 버튼은 사용자가 시점을
                       # 직접 고르는 것이므로 평일에도 동작(2026-07-06). 매매창(09:00~05·15:20~30)
                       # 밖 실행 권장은 버튼 안내 그대로 유지.
     "after_market":  [_VENV_PYTHON, str(BASE / "after_market.py")],                  # 시간외 등락률 → stock.db 누적
+    # ── [2026-10-26 §77] 워치독이 감시하는데 수동 버튼이 없던 데이터 4종(스케줄러와 같은 명령) ──
+    "indicators":    [_STOCK_AI_PY, "run_pipeline.py", "--step", "indicators"],        # 기술지표(korea_indicators) 전 섹터 재계산(45~90분)
+    "program":       [_STOCK_AI_PY, "-m", "src.collector.kiwoom_program",
+                      "--since", "{SINCE30}", "--force"],                            # 프로그램매매(키움 ka90013) 30일 공백
+    "foreign_ratio": [_STOCK_AI_PY, "foreign_ratio_collector.py", "--backfill"],     # 외국인 지분율(KRX) 미수집 날짜
+    "news":          [_STOCK_AI_PY, "-m", "src.processor.news", "historical", "all"],  # 뉴스/공시(DART) 전 섹터
 }
+
+# [2026-10-26 §77] 증권사 API 키를 쓰는 수집 — 매매가 도는 시간(장전 예열·09:00 매수·15:05 손절·15:21 만기)에 누르면
+# 같은 키로 동시에 호출돼 서로 실패한다(10-22 07:14 신용 버튼 → 09:02~09:15 '네트워크 실패' 146건, 키움 토큰 재발급은
+# 트레이더 토큰도 무효로 만들 수 있음). 이 시간엔 버튼을 막고 이유를 알려 준다.
+_BROKER_TASKS = {"backfill", "supply_demand", "credit", "program", "after_market", "recheck"}
+_TRADE_WINDOWS = (("0840", "0925"), ("1500", "1545"))
+
+
+def _trade_window_block(task, now=None):
+    """매매 시간대면 막는 이유 문구, 아니면 ''."""
+    if task not in _BROKER_TASKS:
+        return ""
+    now = now or datetime.now()
+    try:
+        from market_calendar import is_trading_day
+        td = is_trading_day(now)
+    except Exception:
+        td = now.weekday() < 5
+    hm = now.strftime("%H%M")
+    for a, b in _TRADE_WINDOWS:
+        if td and a <= hm < b:
+            return (f"지금({now:%H:%M})은 자동매매가 증권사 API 를 쓰는 시간({a[:2]}:{a[2:]}~{b[:2]}:{b[2:]})이라 "
+                    f"막았습니다 — 같은 키로 동시에 부르면 매매와 수집이 서로 실패합니다. 이 시간이 지난 뒤 다시 누르세요.")
+    return ""
+
+
+def _resolve_cmd(cmd, now=None):
+    """명령 안 날짜 자리표시자를 '누른 시점' 기준으로 채움(종전엔 대시보드 시작 시각으로 고정돼 며칠 켜 두면 밀렸다)."""
+    now = now or datetime.now()
+    rep = {"{SINCE45}": (now - timedelta(days=45)).strftime("%Y-%m-%d"),
+           "{SINCE30}": (now - timedelta(days=30)).strftime("%Y-%m-%d")}
+    return [rep.get(x, x) for x in cmd]
 
 # 작업별 cwd (미지정 시 outputs). Stock_AI 수집기는 프로젝트 루트에서 실행해야 -m 임포트가 됨.
 _RUN_CWD = {
     "supply_demand": str(_STOCK_AI_DIR),
     "macro":         str(_STOCK_AI_DIR),
     "credit":        str(_STOCK_AI_DIR),
+    "indicators":    str(_STOCK_AI_DIR),
+    "program":       str(_STOCK_AI_DIR),
+    "foreign_ratio": str(_STOCK_AI_DIR),
+    "news":          str(_STOCK_AI_DIR),
 }
 
 _RUN_PROCS: dict = {}   # task -> 마지막 Popen. 중복실행 가드용(2026-07-17).
@@ -2227,6 +2272,9 @@ def api_run(task):
 
     if task not in _RUN_TASKS:
         return jsonify({"ok": False, "msg": f"알 수 없는 작업: {task}"}), 400
+    _blk = _trade_window_block(task)
+    if _blk:
+        return jsonify({"ok": False, "msg": _blk}), 423
 
     # ── 중복실행 가드(2026-07-17) ──
     # (a) 같은 작업이 도는 중이면 재시작 금지 — 로그("w") 덮어쓰기·이중실행 방지.
@@ -2250,7 +2298,7 @@ def api_run(task):
         log_dir.mkdir(exist_ok=True)
         logf = open(log_dir / f"run_{task}.log", "w", encoding="utf-8", errors="replace")
         proc = _sp.Popen(
-            _RUN_TASKS[task], cwd=_RUN_CWD.get(task, str(BASE)),
+            _resolve_cmd(_RUN_TASKS[task]), cwd=_RUN_CWD.get(task, str(BASE)),
             stdout=logf, stderr=_sp.STDOUT,
             creationflags=_NO_WIN,
         )
@@ -3454,9 +3502,15 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
         <button class="runbtn" data-fresh="supply_demand" onclick="runTask('supply_demand','수급 수집')">수급</button>
         <button class="runbtn" data-fresh="macro_indicators" onclick="runTask('macro','거시지표 수집')">거시지표</button>
         <button class="runbtn" data-fresh="credit_balance" onclick="runTask('credit','신용/대차 수집')">신용/대차</button>
+        <button class="runbtn" data-fresh="program_trading" onclick="runTask('program','프로그램매매 수집(최근 30일 공백)')">프로그램매매</button>
+        <button class="runbtn" data-fresh="korea_indicators" onclick="runTask('indicators','기술지표 재계산(45~90분)')">기술지표</button>
+        <button class="runbtn" data-fresh="foreign_ratio" onclick="runTask('foreign_ratio','외국인 지분율 수집')">외국인 지분율</button>
+        <button class="runbtn" data-fresh="news" onclick="runTask('news','뉴스/공시 수집')">뉴스/공시</button>
         <button class="runbtn" onclick="runTask('after_market','시간외 등락률 수집')">시간외</button>
         <button class="runbtn" onclick="runTask('recheck','데이터 재검증')">재검증</button>
+        <button class="runbtn" title="백테스트용 보조 데이터(가격·외국인·기관 → 개인 순매수 → 공매도 → 신용) 빈 날만, 끝나면 텔레그램 보고 — 백테스트 탭의 '부족분 한 번에 수집'과 같음" onclick="pbtCollect('all')">보조데이터 부족분</button>
       </div>
+      <div style="color:#64748b;font-size:11px;margin:-2px 0 2px 78px">증권사 키를 쓰는 수집(전체·수급·신용/대차·프로그램매매·시간외·재검증)은 거래일 08:40~09:25·15:00~15:45 엔 막힙니다(자동매매와 키 충돌)</div>
       <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
         <span style="color:#8b949e;font-size:12px;min-width:72px">신호·매매</span>
         <button class="runbtn" data-sig="1" onclick="runTask('live_signal','키움 신호감지')">키움 신호</button>
