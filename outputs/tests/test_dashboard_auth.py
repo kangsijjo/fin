@@ -34,7 +34,12 @@ PW = "unit-test-password-9f2c"
 def dash():
     import integrated_dashboard_server as d
     d.app.config["TESTING"] = True
-    return d
+    # [2026-10-22] 이 파일은 '누가 들어올 수 있나'(before_request 인증)만 본다 — /api/all 의 실제 내용 계산
+    # (전체 데이터 집계, 느린 디스크에선 요청당 ~100초)은 필요 없어 가벼운 응답으로 바꿔 끼운다. 인증 훅은 그대로.
+    orig = d.app.view_functions["api_all"]
+    d.app.view_functions["api_all"] = lambda: d.jsonify({"ok": True})
+    yield d
+    d.app.view_functions["api_all"] = orig
 
 
 @pytest.fixture

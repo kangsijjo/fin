@@ -603,6 +603,12 @@ _TASK_ERR_HINT = {
 }
 
 
+def _on_windows():
+    """작업 스케줄러는 윈도우에만 있다. [2026-10-22] 함수로 뺀 이유: 테스트가 이것만 바꿔 끼워 리눅스(작업 환경)에서도
+    판정 로직(꺼짐·대상 없음·실패 코드·조회 실패 경보)을 검증할 수 있게(실제 조회 _query_scheduled_tasks 는 그대로 윈도우 전용)."""
+    return os.name == "nt"
+
+
 def _query_scheduled_tasks():
     """작업 스케줄러 상태를 로캘 독립적으로 읽는다. → (목록, 오류메시지)."""
     import json as _json
@@ -697,7 +703,7 @@ def check_scheduled_tasks():
     이 점검을 만든 이유가 그대로 사라지기 때문이다.
     """
     out = []
-    if os.name != "nt":
+    if not _on_windows():
         return out
     tasks, err = _query_scheduled_tasks()
     if err:

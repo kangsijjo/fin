@@ -58,8 +58,11 @@ def test_no_hardcoded_fin_root_in_code():
     import glob
     needles = ("C:/fin", "C:" + BS + "fin")
     files = glob.glob(os.path.join(OUTPUTS, "*.py"))
-    files += [p for p in glob.glob(os.path.join(ROOT, "Stock_AI_Project", "**", "*.py"), recursive=True)
-              if "venv" not in p.replace(ROOT, "")]
+    # [2026-10-22] venv(파일 3.7만 개)는 들어가지 않고 건너뜀 — 예전엔 다 훑은 뒤 걸러서 느렸다(결과는 같음)
+    skip = {"venv", ".venv", "__pycache__", "node_modules", ".git"}
+    for dp, dns, fns in os.walk(os.path.join(ROOT, "Stock_AI_Project")):
+        dns[:] = [d for d in dns if d not in skip and "venv" not in d]
+        files += [os.path.join(dp, f) for f in fns if f.endswith(".py")]
     bad = []
     for p in files:
         if os.path.basename(p) == "fin_paths.py" or (os.sep + "tests" + os.sep) in p:
