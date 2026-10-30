@@ -5,6 +5,7 @@ strategy_reco.py — 지금까지 돌린 백테스트를 종합해 '안 고른 �
 근거(사용자 결정: 전부 · 균형)
   ① 기간 백테스트 기록 전부(db/period_bt/pbt_*.json + archive/) — 사용자가 돌린 여러 기간·강도·손절 실험
   ② 주간 전체 백테스트(results/strategy_full_*.csv 최신) — 전체 기간 + 최근 2년(표본 밖)
+  ②' [§88] 강도·손절·익절 탐색(db/setting_sweep.json)의 표본 밖 성적 — '그 해 이전만 보고 고른 설정'으로 했을 때
   ③ (화면 표시) 개선 AI 의 전략별 검증(같은 날 상위 2개 효과), 전략 겹침 표
 점수(균형) — 기록마다 그 실험 안에서의 상대 순위로 매긴다(약세장 기간이면 모두 낮으니 절대값 대신 순위):
   0.35 × CAGR 순위 + 0.25 × 샤프 순위 + 0.20 × MDD 순위(얕을수록 위) + 0.20 × 해마다 플러스였던 비율
@@ -154,7 +155,40 @@ def load_observations(now=None):
             obs += _obs_from_rows(rows, 2.0, 2.0, "주간 최근 2년(표본 밖)", lambda r: base_v)
         except Exception:
             pass
-    return obs, {"n_jobs": n_jobs, "full": full_info}
+    # [§88] 강도·손절·익절 탐색의 '표본 밖' 성적 — 해 Y 를 'Y 이전만 보고 고른 설정'으로 했을 때(강도 v2 기준, 모의계좌 방식)
+    #   설정을 잘 맞추면 좋아지는 전략이 추천에 올라오게. 탐색한 전략끼리 순위.
+    sweep_info = None
+    try:
+        sp = os.getenv("SETTING_SWEEP_PATH") or os.path.join(HERE, "db", "setting_sweep.json")
+        sw = json.load(open(sp, encoding="utf-8"))
+        gen = str(sw.get("generated") or "")
+        try:
+            age = (now - datetime.strptime(gen[:16], "%Y-%m-%d %H:%M")).days
+        except Exception:
+            age = 30
+        rows, nys = [], []
+        for e, v in (sw.get("engines") or {}).items():
+            f = ((v or {}).get("families") or {}).get("v2") or {}
+            oy = f.get("oos_years") or {}
+            if len(oy) < 2:
+                continue
+            rets = [float(x[0]) for x in oy.values()]
+            comp = 1.0
+            for r_ in rets:
+                comp *= 1 + r_ / 100
+            rows.append({"engine": e, "cagr": (comp ** (1 / len(rets)) - 1) * 100,
+                         "mdd": sum(float(x[1]) for x in oy.values()) / len(oy), "sharpe": None,
+                         "yearly": {y: x[0] for y, x in oy.items()}})
+            nys.append(len(oy))
+        if len(rows) >= 2:
+            yrs_ = sum(nys) / len(nys)
+            base_v = json.dumps({"sv": None, "th": None, "stop": None, "take": None}, sort_keys=True)
+            obs += _obs_from_rows(rows, yrs_, min(yrs_, 5.0) * (0.5 ** (max(age, 0) / HALF_LIFE_DAYS)),
+                                  "설정 탐색(표본 밖, 그 해 이전만 보고 고른 설정)", lambda r: base_v)
+            sweep_info = {"generated": gen, "n": len(rows)}
+    except Exception:
+        pass
+    return obs, {"n_jobs": n_jobs, "full": full_info, "sweep": sweep_info}
 
 
 def _agg(os_):

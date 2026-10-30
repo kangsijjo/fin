@@ -612,7 +612,8 @@ def run_job(job, start, end, names, luck, strength=None, stop=None, take=None, e
                 else:
                     train_tables[n] = SM.build_train_table(n, df, log=print)
                     try:            # [§86] 버리지 않고 저장 — 다음 백테스트가 빨라지고 개선 AI 가 이 전략도 배운다
-                        train_tables[n].to_pickle(p)
+                        train_tables[n].to_pickle(p + ".tmp")      # 원자적 교체(동시에 읽는 학습 프로세스가 반쪽 파일을 보지 않게)
+                        os.replace(p + ".tmp", p)
                     except Exception as e_:
                         print(f"[pbt] {n} 학습표 저장 실패(무시): {e_}")
             except Exception as e:

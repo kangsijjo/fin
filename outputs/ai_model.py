@@ -473,7 +473,8 @@ def build_missing(engines, log=print):
     for e in miss:
         try:
             T = SM.build_train_table(e, df, log=log)
-            T.to_pickle(SM.train_path(e))
+            T.to_pickle(SM.train_path(e) + ".tmp")
+            os.replace(SM.train_path(e) + ".tmp", SM.train_path(e))
             done.append(e)
         except Exception as ex:
             log(f"[ai_model] {e} 학습표 생성 실패: {type(ex).__name__}: {str(ex)[:120]}")

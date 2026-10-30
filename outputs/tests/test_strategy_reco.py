@@ -84,7 +84,7 @@ def test_learn_skips_when_known_and_trains_otherwise(tmp_path, monkeypatch):
     assert A.train()["busy"], "다른 학습 중이면 건너뜀"
 
 
-def test_spawn_learn_respects_env_and_needs(monkeypatch):
+def test_spawn_learn_respects_env_and_needs(monkeypatch, tmp_path):
     import period_backtest as P
     import ai_model as A
     import subprocess
@@ -93,6 +93,7 @@ def test_spawn_learn_respects_env_and_needs(monkeypatch):
     monkeypatch.setattr(A, "meta_info", lambda: {"engines": []})
     got = []
     monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: got.append(cmd))
+    monkeypatch.setattr(P, "HERE", str(tmp_path))          # 로그 파일을 진짜 logs/ 에 만들지 않게
     r = P._spawn_learn(["zzz_engine"])
     assert r["started"] and "--learn" in got[0] and got[0][-1] == "zzz_engine"
 
@@ -120,4 +121,4 @@ def test_api_and_ui_wiring(monkeypatch):
     src = open(d.__file__, encoding="utf-8").read()
     assert src.count('class="reco-box"') == 2 and "function lcAddReco" in src and "function vcAddReco" in src
     pb = open(os.path.join(os.path.dirname(d.__file__), "period_backtest.py"), encoding="utf-8").read()
-    assert 'state["ai_learn"] = _spawn_learn(names)' in pb and "train_tables[n].to_pickle(p)" in pb
+    assert 'state["ai_learn"] = _spawn_learn(names)' in pb and "os.replace(p + \".tmp\", p)" in pb

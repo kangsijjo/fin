@@ -2265,6 +2265,7 @@ _RUN_TASKS = {
                       str(BASE.parent / "Stock_AI_Project" / "run_backfill.ps1")],   # Stock_AI 수집기 일괄(자체 cwd/venv)
     "ai_dataset":    [_VENV_PYTHON, str(BASE / "make_trades_history_v3.py")],        # AI 학습 데이터셋 생성
     "ai_train":      [_VENV_PYTHON, str(BASE / "ai_model.py"), "--train"],           # [§85] 개선 AI 재학습(옛 meta_model_v4 는 학습 중단)
+    "setting_sweep": [_VENV_PYTHON, str(BASE / "setting_sweep.py"), "--fine"],       # [§87·88] 강도·손절·익절 촘촘 탐색(1~2시간)
     "ai_pipeline":   ["cmd", "/c", str(BASE / "run_ai_pipeline.bat"), "auto"],       # 주1회 경량 AI 갱신(수집→데이터셋→학습, 게이팅)
     "strategy_lab":  [_VENV_PYTHON, str(BASE / "strategy_lab.py")],                  # 전략 랩 forward 집계
     "strategy_full": [_VENV_PYTHON, str(BASE / "strategy_engine.py"), "--full"],     # 전 전략 과거 백테스트(진짜 지표, 20~30분)
@@ -2336,7 +2337,7 @@ _RUN_CWD = {
 _RUN_PROCS: dict = {}   # task -> 마지막 Popen. 중복실행 가드용(2026-07-17).
 # ai_data/ 산출물(historical_features·trades_history·meta_model)을 공유하는 작업군 —
 # 동시 실행 시 학습이 재작성 중인 파일을 읽는 오염 발생(12:44 실사례) → 상호배제.
-_AI_GROUP = {"ai_dataset", "ai_train", "ai_pipeline"}
+_AI_GROUP = {"ai_dataset", "ai_train", "ai_pipeline", "setting_sweep"}   # [§87] 설정 탐색도 무거워 함께 배타
 
 
 @app.after_request
@@ -2988,7 +2989,9 @@ def _reco_eval():
     try:
         fs = list(_PBT_DIR.glob("pbt_*.json")) + list((_PBT_DIR / "archive").glob("pbt_*.json"))
         full = sorted((BASE / "results").glob("strategy_full_*.csv"))
-        key = (len(fs), max((f.stat().st_mtime for f in fs), default=0), full[-1].name if full else "")
+        swp = BASE / "db" / "setting_sweep.json"                       # [§88] 설정 탐색 결과도 근거
+        key = (len(fs), max((f.stat().st_mtime for f in fs), default=0), full[-1].name if full else "",
+               swp.stat().st_mtime if swp.exists() else 0)
     except Exception:
         key = None
     if key is not None and _RECO_CACHE["key"] == key and _RECO_CACHE["ev"] is not None:
@@ -2996,6 +2999,67 @@ def _reco_eval():
     ev = SR.evaluate()
     _RECO_CACHE.update(key=key, ev=ev)
     return ev
+
+
+_SWEEP_CACHE = {"mt": None, "d": None}
+
+
+def _sweep_data():
+    """[§87] db/setting_sweep.json(주간 강도·손절·익절 탐색) — 파일이 바뀌면 다시 읽음."""
+    p = BASE / "db" / "setting_sweep.json"
+    try:
+        mt = p.stat().st_mtime
+    except OSError:
+        return None
+    if _SWEEP_CACHE["mt"] != mt:
+        try:
+            _SWEEP_CACHE.update(mt=mt, d=json.loads(p.read_text(encoding="utf-8")))
+        except Exception:
+            return _SWEEP_CACHE["d"]
+    return _SWEEP_CACHE["d"]
+
+
+def _place_family():
+    """자리별 강도 방식(저장된 설정 기준): 모의계좌 = 계좌 strength_version, AI 포트 = ai, 강도 포트 = 그 포트 방식."""
+    out = {"ai": "ai", "kiwoom": "v2", "kis": "v2", "strength": "v2"}
+    try:
+        import live_config as LC
+        cfg = LC.load()
+        for a in LC.ACCOUNTS:
+            out[a] = cfg["accounts"][a].get("strength_version") or "v2"
+    except Exception:
+        pass
+    try:
+        import virtual_config as VC
+        act, pend = VC.state()
+        e = pend or act
+        if e and not e.get("legacy"):
+            out["strength"] = e["portfolios"]["strength"].get("strength_version") or "v2"
+    except Exception:
+        pass
+    return out
+
+
+def _sweep_advice(sw, engine, place, fam):
+    """그 전략·자리의 탐색 결과 요약(없으면 None)."""
+    if not sw:
+        return None
+    E_ = (sw.get("engines") or {}).get(engine)
+    if not E_:
+        return {"missing": True}
+    if E_.get("error"):
+        return {"error": E_["error"]}
+    if fam not in ("v2", "ai"):
+        return {"note": f"강도 {fam} 는 탐색하지 않음(v2·AI 만)"}
+    f = (E_.get("families") or {}).get(fam) or {}
+    if f.get("error") or not f.get("best"):
+        return {"error": f.get("error") or "결과 없음", "family": fam}
+    cur = next((c for c in E_.get("current") or [] if c.get("place") == place and c.get("family") == fam), None)
+    return {"family": fam, "status": f.get("status"), "best": f.get("best"), "best_stats": f.get("best_stats"),
+            "base_stats": f.get("base_stats"), "wins": f.get("wins"), "oos_pick": f.get("oos_pick"),
+            "oos_base": f.get("oos_base"), "plateau": f.get("plateau"),
+            "current": ({k: cur.get(k) for k in ("th", "stop", "take")} | {"stats": cur.get("stats")}) if cur else None,
+            "updated": E_.get("updated")}
 
 
 @app.route("/api/strategy_reco")
@@ -3009,19 +3073,26 @@ def api_strategy_reco():
     try:
         ev = _reco_eval()
         names = {e["engine"] for e in _lc_engine_list()}
+        sw, fams = _sweep_data(), _place_family()
         out = {}
         for pl, sel in places.items():
             if pl not in ("kiwoom", "kis", "ai", "strength"):
                 continue
             sel = [x for x in (sel or []) if isinstance(x, str)]
             rec, info = SR.recommend(pl, sel, engines=names, ev=ev)
+            for r in rec:
+                r["advice"] = _sweep_advice(sw, r["engine"], pl, fams.get(pl, "v2"))
             se = []
             for e in sel:
                 a_ = ev[0].get(e)
                 se.append({"engine": e, "score": round(a_["score"] * 100) if a_ else None,
-                           "cagr": round(a_["cagr"], 1) if a_ and a_["cagr"] is not None else None})
-            out[pl] = {"recos": rec, "selected": se}
-        return jsonify({"ok": True, "places": out, "info": ev[1], "min_score": round(SR.MIN_SCORE * 100)})
+                           "cagr": round(a_["cagr"], 1) if a_ and a_["cagr"] is not None else None,
+                           "advice": _sweep_advice(sw, e, pl, fams.get(pl, "v2"))})
+            out[pl] = {"recos": rec, "selected": se, "family": fams.get(pl, "v2")}
+        return jsonify({"ok": True, "places": out, "info": ev[1], "min_score": round(SR.MIN_SCORE * 100),
+                        "sweep": ({"generated": sw.get("generated"), "from_year": sw.get("from_year"), "rule": sw.get("rule"),
+                                   "fine": bool(sw.get("fine"))}
+                                  if sw else None)})
     except Exception as e:
         return jsonify({"ok": False, "msg": f"{type(e).__name__}: {str(e)[:200]}"})
 
@@ -3768,6 +3839,7 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
         <button class="runbtn" onclick="runTask('ai_pipeline','AI 파이프라인(수집→학습)')">AI 파이프라인</button>
         <button class="runbtn" onclick="runTask('ai_dataset','AI 학습 데이터셋')">AI 데이터셋</button>
         <button class="runbtn" title="개선 AI 재학습 + 해마다 검증(수 분) — 평소엔 일요일 AI 파이프라인이 자동" onclick="runTask('ai_train','개선 AI 학습')">AI 학습</button>
+        <button class="runbtn" title="고른 전략 + 추천 전략마다 강도×손절×익절 촘촘 탐색(강도 0.1·손절 1%p·익절 2%p) + 해마다 검증(1~2시간) → 설정 화면 '🎯 권장' — 평소엔 토요일 04:00 자동(StockAI\\SettingSweep)" onclick="runTask('setting_sweep','강도·손절·익절 탐색')">설정 탐색</button>
         <button class="runbtn" onclick="runTask('strategy_lab','전략 랩')">전략 랩</button>
         <button class="runbtn" onclick="runTask('paper_tracker','페이퍼 추적')">페이퍼 추적</button>
         <button class="runbtn" onclick="runTask('preview','장중 예비후보')">장중예비</button>
@@ -5372,8 +5444,12 @@ async function _recoRun(){
       const P=(d.places||{})[pl]||{recos:[],selected:[]}, I=d.info||{};
       const isLc=pl==='kiwoom'||pl==='kis';
       const sg=v=>v==null?'-':((v>=0?'+':'')+Number(v).toFixed(1));
+      const fam=P.family||'v2';
       const rows=(P.recos||[]).map(r=>{
-        const pre=JSON.stringify(r.best?{sv:r.best.sv,th:r.best.th,stop:r.best.stop,take:r.best.take}:{}).replace(/"/g,'&quot;');
+        const A=r.advice;
+        const preO=(A&&A.status==='권장')?{sv:fam,th:A.best.th,stop:A.best.stop,take:A.best.take}
+                  :(A&&A.status==='유지')?{}:(r.best?{sv:r.best.sv,th:r.best.th,stop:r.best.stop,take:r.best.take}:{});
+        const pre=JSON.stringify(preO).replace(/"/g,'&quot;');
         const warn=[...(r.overlap||[]).map(o=>`⚠ ${_lcEsc(o.engine)} 와 같은 날 같은 종목 ${o.same}%`),
                     ...(r.used_elsewhere||[]).map(u=>`ℹ ${_lcEsc(u.label)}에서 사용 중`)];
         const aiTxt=(pl==='ai'||pl==='strength')&&r.ai?` · AI 고르기 효과 ${sg(r.ai.ai)}%p(v2 ${sg(r.ai.v2)})`:'';
@@ -5381,26 +5457,63 @@ async function _recoRun(){
         return `<tr><td style="font-weight:600">${_lcEsc(r.engine)}</td>
           <td class="r" style="font-weight:700;color:${r.score>=80?'#10b981':'#93c5fd'}">${r.score}</td>
           <td style="font-size:11px;color:#cbd5e1">CAGR ${sg(r.cagr)}% · MDD ${r.mdd==null?'-':r.mdd+'%'} · 해 플러스 ${r.pos}% · 근거 ${r.n}건${aiTxt}${aiMiss}
-            ${r.best?`<div style="color:#38bdf8">권장: ${_lcEsc(r.best.text)} (점수 ${r.best.score}, CAGR ${sg(r.best.cagr)}%, ${r.best.n}회)</div>`:''}
+            ${(A&&A.status)?_advHtml(A,fam):(r.best?`<div style="color:#38bdf8">권장(내 백테스트 실험): ${_lcEsc(r.best.text)} (점수 ${r.best.score}, CAGR ${sg(r.best.cagr)}%, ${r.best.n}회)</div>`:'')}
             ${warn.length?`<div style="color:#fcd34d">${warn.join(' · ')}</div>`:''}</td>
           <td><button class="runbtn" style="padding:0 8px" title="편집 중인 초안에 넣기(권장 설정 포함) — 저장은 위 '변경 확인 후 저장'(두 번 확인)" onclick="${isLc?'lcAddReco':'vcAddReco'}('${pl}','${_lcEsc(r.engine)}',this.dataset.pre)" data-pre="${pre}">+ 추가</button></td></tr>`;}).join('');
       const selTxt=(P.selected||[]).map(x=>`${_lcEsc(x.engine)} ${x.score==null?'-':x.score}${x.score!=null&&(x.score<50||(x.cagr!=null&&x.cagr<0))?'<span style="color:#f87171">(약함)</span>':''}`).join(' · ');
+      const selAdv=(P.selected||[]).filter(x=>x.advice&&x.advice.status).map(x=>{
+        const A=x.advice, pre=JSON.stringify({sv:fam,th:A.best.th,stop:A.best.stop,take:A.best.take}).replace(/"/g,'&quot;');
+        const same=A.current&&A.current.th==A.best.th&&A.current.stop==A.best.stop&&A.current.take==A.best.take;
+        return `<tr><td style="font-weight:600;white-space:nowrap">${_lcEsc(x.engine)}</td><td style="font-size:11px">${_advHtml(A,fam)}</td>
+          <td>${A.status==='권장'&&!same?`<button class="runbtn" style="padding:0 8px" title="초안의 그 전략 줄에 권장 강도·손절·익절을 넣음 — 저장은 두 번 확인" onclick="${isLc?'lcApplyAdv':'vcApplyAdv'}('${pl}','${_lcEsc(x.engine)}',this.dataset.pre)" data-pre="${pre}">권장값 적용</button>`:(same?'<span style="color:#10b981;font-size:11px">지금 = 권장</span>':'')}</td></tr>`;}).join('');
+      const sw=d.sweep;
       h=`<details ${rows?'open':''} style="background:rgba(56,189,248,.05);border:1px solid #1e3a5f;border-radius:6px;padding:5px 8px">
         <summary style="cursor:pointer;font-size:12px;color:#93c5fd"><b>💡 추천 전략</b> — 안 고른 전략 중 백테스트 종합 점수 ${d.min_score}↑·CAGR+·해 절반 이상 플러스 ${rows?((P.recos||[]).length+'개'):'— 지금은 조건을 넘는 전략 없음'}</summary>
         ${rows?`<table style="font-size:12px;width:100%;margin-top:4px"><thead><tr><th>전략</th><th class="r" title="0~100, 50=보통. 기록마다 그 실험 안 순위(CAGR 35%·샤프 25%·MDD 20%·해마다 플러스 20%)를 기간·최근성으로 가중 평균">점수</th><th>근거</th><th></th></tr></thead><tbody>${rows}</tbody></table>`:''}
-        <div style="font-size:11px;color:#64748b;margin-top:4px">지금 고른 전략 점수: ${selTxt||'-'}<br>근거: 기간 백테스트 ${I.n_jobs||0}회 + 주간 전체(${_lcEsc(I.full||'없음')}) · 최근·긴 기간일수록 무게↑, 10-24 전 계산 규칙 결과는 절반 · 과거 성적 순위라 운이 섞입니다(검토할 후보이지 보증 아님)</div></details>`;
+        <div style="margin-top:6px;font-size:12px;color:#93c5fd"><b>🎯 지금 고른 전략의 강도·손절·익절</b> <span style="font-size:11px;color:#64748b">${sw?`— ${sw.fine?'주말 촘촘 탐색(강도 0.1·손절 1%p·익절 2%p, 주변 평균으로 고름)':'탐색'} ${_lcEsc(sw.generated||'')} · ${sw.from_year}년~ · 강도 ${fam==='ai'?'AI':fam} 기준`:'— 탐색 결과 없음(토요일 04:00 자동 또는 데이터+로그 탭 [설정 탐색])'}</span></div>
+        ${selAdv?`<table style="font-size:12px;width:100%">${selAdv}</table>`:''}
+        <div style="font-size:11px;color:#64748b;margin-top:4px">지금 고른 전략 점수: ${selTxt||'-'}<br>근거: 기간 백테스트 ${I.n_jobs||0}회 + 주간 전체(${_lcEsc(I.full||'없음')})${I.sweep?` + 설정 탐색 표본 밖 성적(${I.sweep.n}전략)`:''} · 최근·긴 기간일수록 무게↑, 10-24 전 계산 규칙 결과는 절반 · 과거 성적 순위라 운이 섞입니다(검토할 후보이지 보증 아님)</div></details>`;
     }
     _recoHtml[pl]=h;
     document.querySelectorAll(`.reco-box[data-place="${pl}"]`).forEach(el=>{ el.innerHTML=h; });
   });
 }
 function _recoPre(pre){ try{ return JSON.parse(pre||'{}'); }catch(e){ return {}; } }
+// [§87] 강도·손절·익절 탐색 결과 한 줄 — 권장이면 값과 (지금 설정 / 기본) 비교, 유지면 그 이유
+function _advHtml(A,fam){
+  const sg=v=>v==null?'-':((v>=0?'+':'')+Number(v).toFixed(1));
+  const thT=v=>v==null?'강도 기준 없음(순서만)':`강도 ${fam==='ai'?'AI':fam} ≥${v}`;
+  const combo=b=>`${thT(b.th)} · ${b.stop==null?'손절 없음':'손절 '+b.stop+'%'} · ${b.take==null?'익절 없음':'익절 +'+b.take+'%'}`;
+  const st=x=>x?`연 ${sg(x.cagr)}% / 해 MDD ${x.mdd}% / 해 ${x.n_year}건`:'-';
+  const cur=A.current&&A.current.stats?` · 지금 설정(${combo(A.current)}) ${st(A.current.stats)}`:'';
+  const chk=`해마다 검증 ${A.wins}(그 해 이전만 보고 고른 값이 기본보다 나았던 해) · 표본 밖 누적 ${sg(A.oos_pick)}% vs 기본 ${sg(A.oos_base)}%`;
+  if(A.status==='권장')
+    return `<div style="color:#34d399">🎯 권장: <b>${combo(A.best)}</b> → ${st(A.best_stats)} <span style="color:#94a3b8">(기본 ${st(A.base_stats)}${cur})</span><br><span style="color:#64748b">${chk}</span></div>`;
+  return `<div style="color:#94a3b8">🎯 지금 방식 유지 — 바꿔도 나아진다는 근거가 약함 <span style="color:#64748b">(과거 최고: ${combo(A.best)} ${st(A.best_stats)} · 기본 ${st(A.base_stats)}${cur} · ${chk})</span></div>`;
+}
+function _advRow(S,P,isMock){
+  const th=P.th==null?null:Number(P.th);
+  if(th==null){ if(!S.exempt){ if(isMock) S.min_strength=0; else S.min_score=0; } }
+  else { S.exempt=false; if(isMock) S.min_strength=th; else S.min_score=th; }
+  S.stop=P.stop??null; S.take=P.take??null;
+}
+function lcApplyAdv(a,engine,pre){
+  const S=(_lcDraft[a].strategies||[]).find(s=>s.engine===engine); if(!S) return;
+  _advRow(S,_recoPre(pre),true); lcRender();
+  _lcMsg(`<span style="color:#38bdf8">${_lcEsc(engine)} 에 권장 강도·손절·익절을 넣었습니다 — '변경 확인 후 저장'(두 번 확인)</span>`);
+}
+function vcApplyAdv(p,engine,pre){
+  const S=(_vcDraft[p].strategies||[]).find(s=>s.engine===engine); if(!S) return;
+  _advRow(S,_recoPre(pre),false); vcRender();
+  setHtml('vc-msg',`<span style="color:#38bdf8">${_lcEsc(engine)} 에 권장 강도·손절·익절을 넣었습니다 — '변경 확인 후 저장'(두 번 확인)</span>`);
+}
 function lcAddReco(a,engine,pre){
   const A=_lcDraft[a], S=A.strategies, L=_lc;
   if(S.some(s=>s.engine===engine)){ alert('이미 들어 있습니다'); return; }
   if(S.length>=L.max_strategies){ alert(`전략은 최대 ${L.max_strategies}개 — 하나를 빼고 추가하세요`); return; }
   const e=_lcEng(engine), P=_recoPre(pre);
-  const th=(P.th!=null&&P.sv===(A.strength_version||'v2'))?P.th:null;   // 계좌 강도 방식과 같은 실험일 때만 기준을 옮김
+  const same=P.sv===(A.strength_version||'v2');                          // 계좌 강도 방식과 같은 실험일 때만 기준을 옮김
+  const th=same&&P.th!=null?P.th:(same&&('th' in P)&&P.th==null?0:null);  // [§87] 탐색 결과 '기준 없음' = 0(다 통과·순서만)
   S.push({engine:engine,slots:1,exempt:false,stop:P.stop??null,take:P.take??null,min_strength:th,holding:e.holding});
   lcRender(); _lcMsg(`<span style="color:#38bdf8">${_lcEsc(engine)} 를 초안에 넣었습니다 — 슬롯 수를 맞추고 '변경 확인 후 저장'</span>`);
 }
@@ -5410,7 +5523,7 @@ function vcAddReco(p,engine,pre){
   if(S.length>=V.max_strategies){ alert(`전략은 최대 ${V.max_strategies}개 — 하나를 빼고 추가하세요`); return; }
   const e=_vcEng(engine), P=_recoPre(pre);
   const want=p==='ai'?'ai':(Pf.strength_version||'v2');
-  const th=(P.th!=null&&P.sv===want)?P.th:null;
+  const th=P.sv===want?(P.th!=null?P.th:(('th' in P)?0:null)):null;
   S.push({engine:engine,slots:1,exempt:false,stop:P.stop??null,take:P.take??null,min_score:th,holding:e.holding});
   vcRender(); setHtml('vc-msg',`<span style="color:#38bdf8">${_lcEsc(engine)} 를 초안에 넣었습니다 — 슬롯 수를 맞추고 '변경 확인 후 저장'</span>`);
 }
