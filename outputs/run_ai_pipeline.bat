@@ -139,6 +139,16 @@ cd /d "%OUT%"
 if errorlevel 1 ( echo [WARN] strength v2 retrain failed ^(exit !ERRORLEVEL!^) - previous models kept >> "%LOG%" )
 echo [%time%] [7] done.
 
+REM ---- 8 (NOT gated) strategy overlap table for the settings screens (2026-10-23, system doc 72) ----
+REM   strategy_overlap.py --fresh : same-day same-stock signal overlap between all strategies (last 3y)
+REM   -> db\strategy_overlap.json. Failure = warning only (the previous table stays).
+echo [%time%] [8] Strategy overlap table (strategy_overlap --fresh)...
+echo [8] strategy_overlap.py --fresh ... >> "%LOG%"
+cd /d "%OUT%"
+"%PYEXE%" -u strategy_overlap.py --fresh >> "%LOG%" 2>&1
+if errorlevel 1 ( echo [WARN] strategy overlap failed ^(exit !ERRORLEVEL!^) - previous table kept >> "%LOG%" )
+echo [%time%] [8] done.
+
 echo [%date% %time%] AI pipeline DONE >> "%LOG%"
 del "%LOCK%" 2>nul
 Forfiles /P "C:\fin\logs" /M ai_pipeline_*.log /D -60 /C "cmd /c del @file" 2>nul
