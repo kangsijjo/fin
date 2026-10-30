@@ -981,6 +981,49 @@ def _strategy_perf(combined, positions):
     return out
 
 
+def _net_pnl(qty, avg, cur, on=None):
+    """[2026-10-30 §83] 미실현 손익 = 수익금(손해금) − 매매비용(매수 수수료 + 지금 판다면 매도 수수료 + 거래세).
+    요율은 백테스트와 같은 표준값(수수료 0.015%·매도 연도의 코스닥 거래세, 슬리피지 제외 — 실제 가격이라).
+    증권사 화면값은 계좌마다 달라(키움 모의는 자체 수수료 0.35%를 빼서 보여 줌, KIS 는 비용 미차감) 같은 기준으로 다시 계산한다.
+    → {gross, cost, net, pct} (계산 불가면 None)"""
+    try:
+        q, a, c = float(qty or 0), float(avg or 0), float(cur or 0)
+        if q <= 0 or a <= 0 or c <= 0:
+            return None
+        import strategy_engine as E
+        fee = float(E.DEFAULT_COSTS.get("fee_pct", 0.015)) / 100
+        tby = E.DEFAULT_COSTS.get("tax_by_year") or {}
+        tax = float(tby.get(str(on or datetime.now().year)[:4], E.DEFAULT_COSTS.get("tax_pct", 0.20))) / 100
+        buy_amt, sell_amt = q * a, q * c
+        gross = sell_amt - buy_amt
+        cost = buy_amt * fee + sell_amt * (fee + tax)
+        net = gross - cost
+        return {"gross": int(round(gross)), "cost": int(round(cost)), "net": int(round(net)),
+                "pct": round(net / buy_amt * 100, 2)}
+    except Exception:
+        return None
+
+
+def _apply_net_pnl(positions, snapshot):
+    """포지션마다 pnl/pnl_pct 를 비용 차감 값으로 바꾸고(원래 증권사 값은 broker_pnl 로 보존), 잔고 요약에 합계."""
+    tot_g = tot_c = tot_n = 0
+    ok = 0
+    for p in positions:
+        r = _net_pnl(p.get("qty"), p.get("avg_price"), p.get("cur_price"))
+        p["broker_pnl"], p["broker_pnl_pct"] = p.get("pnl"), p.get("pnl_pct")
+        if r is None:
+            p["pnl"], p["pnl_pct"], p["pnl_gross"], p["pnl_cost"] = None, None, None, None
+            continue
+        p["pnl"], p["pnl_pct"], p["pnl_gross"], p["pnl_cost"] = r["net"], r["pct"], r["gross"], r["cost"]
+        tot_g += r["gross"]; tot_c += r["cost"]; tot_n += r["net"]; ok += 1
+    if isinstance(snapshot, dict):
+        snapshot["eval_pnl_net"] = tot_n if ok else None
+        snapshot["eval_pnl_gross"] = tot_g if ok else None
+        snapshot["eval_cost"] = tot_c if ok else None
+        snapshot["eval_pnl_missing"] = len(positions) - ok
+    return positions
+
+
 def get_kiwoom_mock(date_from="", date_to=""):
     out = {"snapshot": {}, "equity": [], "orders": [], "order_total": 0, "positions": []}
     snap_path = KIWOOM_DIR / "snapshot.json"
@@ -997,6 +1040,7 @@ def get_kiwoom_mock(date_from="", date_to=""):
                  "pnl": p.get("pnl", 0), "pnl_pct": p.get("pnl_pct", 0)}
                 for p in out["snapshot"].get("positions", [])
             ]
+            _apply_net_pnl(out["positions"], out["snapshot"])      # [§83] 비용 차감 미실현 손익
         except Exception:
             pass
     eq_path = KIWOOM_DIR / "equity_history.csv"
@@ -1160,6 +1204,7 @@ def get_kis_mock(date_from="", date_to=""):
                 track[str(r["code"]).zfill(6)] = {
                     "strategy": r.get("strategy", ""),
                     "entry_date": str(r.get("signal_date", "")),
+                    "entry_px": float(r.get("entry_px", 0) or 0),
                 }
         except Exception:
             pass
@@ -1174,6 +1219,13 @@ def get_kis_mock(date_from="", date_to=""):
          "entry_date": track.get(str(p.get("code", "")).zfill(6), {}).get("entry_date", "")}
         for p in snap_pos
     ]
+    # [§83] KIS 옛 스냅샷은 매입평균이 0(소수 문자열 변환 버그, kis_trader._to_int 수정) — 원장 진입가로 대체
+    for p in out["positions"]:
+        if not float(p.get("avg_price") or 0):
+            ep = track.get(p["code"], {}).get("entry_px", 0)
+            if ep:
+                p["avg_price"], p["avg_from_ledger"] = ep, True
+    _apply_net_pnl(out["positions"], out["snapshot"])          # [§83] 비용 차감 미실현 손익
     # 주문 로그 (kis_orders_*.csv)
     if KIWOOM_DIR.exists():
         frames = []
@@ -3195,20 +3247,22 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
     <h2>🛠 모의매매 전략 설정 <span style="color:#8b949e;font-size:11px;font-weight:400">— 전략·슬롯·강도·손절·익절을 골라 다음 거래일부터 이 방식으로 매매 (두 번 확인)</span></h2>
     <div id="lc-mock"><span style="color:#64748b;font-size:12px">불러오는 중…</span></div>
   </div>
+  <!-- [2026-10-30 §83] 두 계좌 같은 순서: 잔고 → 슬롯 → 보유 포지션 (→ KIS 손절 모니터) → 매매내역 → 전략별 성과 -->
   <!-- Kiwoom -->
+  <div style="margin:18px 0 6px;padding:6px 12px;border-left:4px solid #38bdf8;background:rgba(56,189,248,.06);color:#e2e8f0;font-weight:700;font-size:15px">🏦 키움 안C</div>
   <div class="section">
     <h2>키움 잔고</h2>
     <div class="stats-row" id="mock-bal"></div>
   </div>
   <div class="section">
-    <h2>&#xD0A4;&#xC6C0; &#xBAA8;&#xC758;&#xD22C;&#xC790; &#xC2AC;&#xB86F;</h2>
+    <h2>키움 슬롯</h2>
     <div class="stats-row" id="mock-slots"></div>
   </div>
   <div class="section">
-    <h2>&#xD0A4;&#xC6C0; &#xBCF4;&#xC720; &#xD3EC;&#xC9C0;&#xC158;</h2>
+    <h2>키움 보유 포지션</h2>
     <table><thead><tr>
       <th>&#xC885;&#xBAA9;</th><th>&#xC804;&#xB7B5;</th><th class="r">강도</th><th class="r">&#xC218;&#xB7C9;</th>
-      <th class="r">&#xD3C9;&#xADE0;&#xB2E8;&#xAC00;</th><th class="r">&#xD604;&#xC7AC;&#xAC00;</th><th class="r">&#xD3C9;&#xAC00;&#xAE08;&#xC561;</th><th class="r">&#xC190;&#xC775;(&#xC6D0;)</th><th class="r">&#xC190;&#xC775;&#xB960;</th><th class="r">&#xC9C4;&#xC785;&#xC77C;</th>
+      <th class="r">&#xD3C9;&#xADE0;&#xB2E8;&#xAC00;</th><th class="r">&#xD604;&#xC7AC;&#xAC00;</th><th class="r">&#xD3C9;&#xAC00;&#xAE08;&#xC561;</th><th class="r" title="수익금(손해금) − 매매비용(매수·매도 수수료 + 거래세)">손익(원·비용 차감)</th><th class="r">손익률</th><th class="r">진입일</th>
     </tr></thead>
     <tbody id="mock-pos"><tr><td colspan="10" style="color:#8b949e;text-align:center">&#xBCF4;&#xC720; &#xD3EC;&#xC9C0;&#xC158; &#xC5C6;&#xC74C;</td></tr></tbody>
     </table>
@@ -3231,9 +3285,23 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
     </table>
   </div>
   <!-- KIS -->
+  <div style="margin:18px 0 6px;padding:6px 12px;border-left:4px solid #38bdf8;background:rgba(56,189,248,.06);color:#e2e8f0;font-weight:700;font-size:15px">🏦 KIS 안D</div>
   <div class="section">
     <h2>KIS 잔고</h2>
     <div class="stats-row" id="kis-bal"></div>
+  </div>
+  <div class="section">
+    <h2>KIS 슬롯</h2>
+    <div class="stats-row" id="kis-slots"></div>
+  </div>
+  <div class="section">
+    <h2>KIS 보유 포지션</h2>
+    <table><thead><tr>
+      <th>&#xC885;&#xBAA9;</th><th>&#xC804;&#xB7B5;</th><th class="r">강도</th><th class="r">&#xC218;&#xB7C9;</th>
+      <th class="r">&#xD3C9;&#xADE0;&#xB2E8;&#xAC00;</th><th class="r">&#xD604;&#xC7AC;&#xAC00;</th><th class="r">&#xD3C9;&#xAC00;&#xAE08;&#xC561;</th><th class="r" title="수익금(손해금) − 매매비용(매수·매도 수수료 + 거래세)">손익(원·비용 차감)</th><th class="r">손익률</th><th class="r">진입일</th>
+    </tr></thead>
+    <tbody id="kis-pos"><tr><td colspan="10" style="color:#8b949e;text-align:center">&#xBCF4;&#xC720; &#xD3EC;&#xC9C0;&#xC158; &#xC5C6;&#xC74C;</td></tr></tbody>
+    </table>
   </div>
   <div class="section">
     <h2>KIS 손절 모니터 <span id="kis-stop-ts" style="color:#8b949e;font-size:11px;font-weight:400"></span></h2>
@@ -3241,19 +3309,6 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
       <th>종목</th><th class="r">현재손익</th><th class="r">손절선</th><th class="r">여유(%p)</th><th>상태</th>
     </tr></thead>
     <tbody id="kis-stop-rows"><tr><td colspan="5" style="color:#8b949e;text-align:center">장중 15분마다 갱신 (보유 없음/장외)</td></tr></tbody>
-    </table>
-  </div>
-  <div class="section">
-    <h2>KIS &#xBAA8;&#xC758;&#xD22C;&#xC790; &#xC2AC;&#xB86F;</h2>
-    <div class="stats-row" id="kis-slots"></div>
-  </div>
-  <div class="section">
-    <h2>KIS &#xBCF4;&#xC720; &#xD3EC;&#xC9C0;&#xC158;</h2>
-    <table><thead><tr>
-      <th>&#xC885;&#xBAA9;</th><th>&#xC804;&#xB7B5;</th><th class="r">강도</th><th class="r">&#xC218;&#xB7C9;</th>
-      <th class="r">&#xD3C9;&#xADE0;&#xB2E8;&#xAC00;</th><th class="r">&#xD604;&#xC7AC;&#xAC00;</th><th class="r">&#xD3C9;&#xAC00;&#xAE08;&#xC561;</th><th class="r">&#xC190;&#xC775;(&#xC6D0;)</th><th class="r">&#xC190;&#xC775;&#xB960;</th><th class="r">&#xC9C4;&#xC785;&#xC77C;</th>
-    </tr></thead>
-    <tbody id="kis-pos"><tr><td colspan="10" style="color:#8b949e;text-align:center">&#xBCF4;&#xC720; &#xD3EC;&#xC9C0;&#xC158; &#xC5C6;&#xC74C;</td></tr></tbody>
     </table>
   </div>
   <div class="section">
@@ -3713,8 +3768,10 @@ function fillBal(elId, snap){
   h+=`<div class="stat"><div class="v" style="font-size:20px">${fmt(snap.deposit)}원</div><div class="l">예수금(정산완료)</div></div>`;
   if(snap.orderable!=null && snap.orderable!==snap.deposit)
     h+=`<div class="stat"><div class="v" style="font-size:20px">${fmt(snap.orderable)}원</div><div class="l">주문가능(D+2)</div></div>`;
-  if(snap.eval_pnl!=null)
-    h+=`<div class="stat"><div class="v ${clr(snap.eval_pnl)}" style="font-size:20px">${fmt(snap.eval_pnl)}원</div><div class="l">평가손익</div></div>`;
+  if(snap.eval_pnl_net!=null)        // [§83] 수익금(손해금) − 매매비용(매수·매도 수수료 + 거래세)
+    h+=`<div class="stat pbt-tip" data-tip="${'미실현 손익(비용 차감)|가격 차이 '+fmt(snap.eval_pnl_gross)+'원 − 매매비용 '+fmt(snap.eval_cost)+'원(매수·매도 수수료 0.015% + 거래세)|증권사 화면 값: '+(snap.eval_pnl!=null?fmt(snap.eval_pnl)+'원':'-')+(snap.eval_pnl_missing?'|매입가를 몰라 뺀 종목 '+snap.eval_pnl_missing+'개':'')}"><div class="v ${clr(snap.eval_pnl_net)}" style="font-size:20px">${fmt(snap.eval_pnl_net)}원</div><div class="l">미실현 손익(비용 차감)</div></div>`;
+  else if(snap.eval_pnl!=null)
+    h+=`<div class="stat"><div class="v ${clr(snap.eval_pnl)}" style="font-size:20px">${fmt(snap.eval_pnl)}원</div><div class="l">평가손익(증권사)</div></div>`;
   h+=`<div class="stat"><div class="v">${npos}</div><div class="l">보유 종목</div></div>`;
   h+=`<div class="stat"><div class="v" style="font-size:14px">${snap.date||''} ${snap.time||''}</div><div class="l">스냅샷 기준</div></div>`;
   el.innerHTML=h;
@@ -3799,8 +3856,8 @@ function fillMock(mock, kis){
        <td class="r">${fmt(r.qty)}</td><td class="r">${fmt(r.avg_price)}</td>
        <td class="r">${fmt(r.cur_price||r.current_price)}</td>
        <td class="r">${fmt(ev)}원</td>
-       <td class="r ${clr(r.pnl)}" style="font-weight:600">${fmt(r.pnl)}원</td>
-       <td class="r ${clr(r.pnl_pct)}" style="font-weight:600">${pct(r.pnl_pct)}</td>
+       <td class="r ${clr(r.pnl)} pbt-tip" data-tip="${'비용 차감 손익|가격 차이 '+fmt(r.pnl_gross)+'원 − 매매비용 '+fmt(r.pnl_cost)+'원'+(r.broker_pnl!=null?'|증권사 화면 값: '+fmt(r.broker_pnl)+'원':'')+(r.avg_from_ledger?'|매입가는 원장 진입가로 대체':'')}" style="font-weight:600">${r.pnl==null?'-':fmt(r.pnl)+'원'}</td>
+       <td class="r ${clr(r.pnl_pct)}" style="font-weight:600">${r.pnl_pct==null?'-':pct(r.pnl_pct)}</td>
        <td class="r" style="font-size:12px;color:#94a3b8">${String(r.entry_date||'').slice(0,10)}</td></tr>`;
     }).join(''):'<tr><td colspan="10" style="color:#9ca3af;text-align:center">보유 포지션 없음</td></tr>');
   }
@@ -3818,8 +3875,8 @@ function fillMock(mock, kis){
        <td class="r">${fmt(r.qty)}</td><td class="r">${fmt(r.avg_price)}</td>
        <td class="r">${fmt(r.cur_price||r.current_price)}</td>
        <td class="r">${fmt(ev)}원</td>
-       <td class="r ${clr(r.pnl)}" style="font-weight:600">${fmt(r.pnl)}원</td>
-       <td class="r ${clr(r.pnl_pct)}" style="font-weight:600">${pct(r.pnl_pct)}</td>
+       <td class="r ${clr(r.pnl)} pbt-tip" data-tip="${'비용 차감 손익|가격 차이 '+fmt(r.pnl_gross)+'원 − 매매비용 '+fmt(r.pnl_cost)+'원'+(r.broker_pnl!=null?'|증권사 화면 값: '+fmt(r.broker_pnl)+'원':'')+(r.avg_from_ledger?'|매입가는 원장 진입가로 대체':'')}" style="font-weight:600">${r.pnl==null?'-':fmt(r.pnl)+'원'}</td>
+       <td class="r ${clr(r.pnl_pct)}" style="font-weight:600">${r.pnl_pct==null?'-':pct(r.pnl_pct)}</td>
        <td class="r" style="font-size:12px;color:#94a3b8">${String(r.entry_date||'').slice(0,10)}</td></tr>`;
     }).join(''):'<tr><td colspan="10" style="color:#9ca3af;text-align:center">보유 포지션 없음</td></tr>');
   }

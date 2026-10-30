@@ -652,10 +652,16 @@ def _alert_buy_failures(failures, n_placed):
 
 
 def _to_int(v, default=0):
+    """[2026-10-30] 소수 문자열('23050.0000')도 정수로 — KIS 잔고의 매입평균(pchs_avg_pric)이 이 형식이라
+    종전 int('23050.0000') 이 실패해 **매입평균이 늘 0** 이었다(스냅샷 손익=평가금액 전체로 표시, 원장 실체결 보정 미작동)."""
+    s = str(v).replace(",", "").replace("+", "").strip()
     try:
-        return int(str(v).replace(",", "").replace("+", "").strip())
+        return int(s)
     except Exception:
-        return default
+        try:
+            return int(round(float(s)))
+        except Exception:
+            return default
 
 
 def _to_float(v, default=0.0):
