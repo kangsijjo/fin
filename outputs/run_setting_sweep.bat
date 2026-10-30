@@ -1,6 +1,6 @@
 @echo off
 REM run_setting_sweep.bat - weekly strength x stop x take FINE setting search (2026-10-30, system doc 88).
-REM   Saturday 04:00 (market closed): coarse grid -> 3 best regions refined (strength 0.1 / stop 1pt / take 2pt),
+REM   Saturday 02:00 (market closed, done before the 07:00 weekend backfill): coarse grid -> 3 best regions refined (strength 0.1 / stop 1pt / take 2pt),
 REM   picked by neighbourhood average + yearly walk-forward check -> db\setting_sweep.json
 REM   (settings screens "target" advice + strategy recommendation evidence). Telegram summary at the end.
 REM   Manual: double-click (shows the log and pauses) or dashboard Data+Logs [setting search].

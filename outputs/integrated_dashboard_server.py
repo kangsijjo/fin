@@ -3839,7 +3839,7 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
         <button class="runbtn" onclick="runTask('ai_pipeline','AI 파이프라인(수집→학습)')">AI 파이프라인</button>
         <button class="runbtn" onclick="runTask('ai_dataset','AI 학습 데이터셋')">AI 데이터셋</button>
         <button class="runbtn" title="개선 AI 재학습 + 해마다 검증(수 분) — 평소엔 일요일 AI 파이프라인이 자동" onclick="runTask('ai_train','개선 AI 학습')">AI 학습</button>
-        <button class="runbtn" title="고른 전략 + 추천 전략마다 강도×손절×익절 촘촘 탐색(강도 0.1·손절 1%p·익절 2%p) + 해마다 검증(1~2시간) → 설정 화면 '🎯 권장' — 평소엔 토요일 04:00 자동(StockAI\\SettingSweep)" onclick="runTask('setting_sweep','강도·손절·익절 탐색')">설정 탐색</button>
+        <button class="runbtn" title="고른 전략 + 추천 전략마다 강도×손절×익절 촘촘 탐색(강도 0.1·손절 1%p·익절 2%p) + 해마다 검증(1~2시간) → 설정 화면 '🎯 권장' — 평소엔 토요일 02:00 자동(StockAI\\SettingSweep)" onclick="runTask('setting_sweep','강도·손절·익절 탐색')">설정 탐색</button>
         <button class="runbtn" onclick="runTask('strategy_lab','전략 랩')">전략 랩</button>
         <button class="runbtn" onclick="runTask('paper_tracker','페이퍼 추적')">페이퍼 추적</button>
         <button class="runbtn" onclick="runTask('preview','장중 예비후보')">장중예비</button>
@@ -5470,7 +5470,7 @@ async function _recoRun(){
       h=`<details ${rows?'open':''} style="background:rgba(56,189,248,.05);border:1px solid #1e3a5f;border-radius:6px;padding:5px 8px">
         <summary style="cursor:pointer;font-size:12px;color:#93c5fd"><b>💡 추천 전략</b> — 안 고른 전략 중 백테스트 종합 점수 ${d.min_score}↑·CAGR+·해 절반 이상 플러스 ${rows?((P.recos||[]).length+'개'):'— 지금은 조건을 넘는 전략 없음'}</summary>
         ${rows?`<table style="font-size:12px;width:100%;margin-top:4px"><thead><tr><th>전략</th><th class="r" title="0~100, 50=보통. 기록마다 그 실험 안 순위(CAGR 35%·샤프 25%·MDD 20%·해마다 플러스 20%)를 기간·최근성으로 가중 평균">점수</th><th>근거</th><th></th></tr></thead><tbody>${rows}</tbody></table>`:''}
-        <div style="margin-top:6px;font-size:12px;color:#93c5fd"><b>🎯 지금 고른 전략의 강도·손절·익절</b> <span style="font-size:11px;color:#64748b">${sw?`— ${sw.fine?'주말 촘촘 탐색(강도 0.1·손절 1%p·익절 2%p, 주변 평균으로 고름)':'탐색'} ${_lcEsc(sw.generated||'')} · ${sw.from_year}년~ · 강도 ${fam==='ai'?'AI':fam} 기준`:'— 탐색 결과 없음(토요일 04:00 자동 또는 데이터+로그 탭 [설정 탐색])'}</span></div>
+        <div style="margin-top:6px;font-size:12px;color:#93c5fd"><b>🎯 지금 고른 전략의 강도·손절·익절</b> <span style="font-size:11px;color:#64748b">${sw?`— ${sw.fine?'주말 촘촘 탐색(강도 0.1·손절 1%p·익절 2%p, 주변 평균으로 고름)':'탐색'} ${_lcEsc(sw.generated||'')} · ${sw.from_year}년~ · 강도 ${fam==='ai'?'AI':fam} 기준`:'— 탐색 결과 없음(토요일 02:00 자동 또는 데이터+로그 탭 [설정 탐색])'}</span></div>
         ${selAdv?`<table style="font-size:12px;width:100%">${selAdv}</table>`:''}
         <div style="font-size:11px;color:#64748b;margin-top:4px">지금 고른 전략 점수: ${selTxt||'-'}<br>근거: 기간 백테스트 ${I.n_jobs||0}회 + 주간 전체(${_lcEsc(I.full||'없음')})${I.sweep?` + 설정 탐색 표본 밖 성적(${I.sweep.n}전략)`:''} · 최근·긴 기간일수록 무게↑, 10-24 전 계산 규칙 결과는 절반 · 과거 성적 순위라 운이 섞입니다(검토할 후보이지 보증 아님)</div></details>`;
     }

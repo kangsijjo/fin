@@ -158,7 +158,7 @@ if errorlevel 1 ( echo [WARN] improved AI retrain failed ^(exit !ERRORLEVEL!^) -
 echo [%time%] [9] done.
 
 REM ---- 10 moved (2026-10-30, system doc 88) ----
-REM   The strength x stop x take setting search now runs on SATURDAY 04:00 as its own task
+REM   The strength x stop x take setting search now runs on SATURDAY 02:00 as its own task
 REM   (StockAI\SettingSweep -> run_setting_sweep.bat, fine grid: strength 0.1 / stop 1pt / take 2pt).
 
 echo [%date% %time%] AI pipeline DONE >> "%LOG%"

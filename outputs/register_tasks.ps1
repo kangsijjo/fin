@@ -264,18 +264,18 @@ try {
         -Action $a15 -Trigger $t15 -Settings $s15 -Principal $principal -Force | Out-Null
     Write-Host "[OK] StockAI\StaleRecover (weekdays 13:00/13:30/14:00, only after a stale-universe skip)" -ForegroundColor Green
 
-    # 16. Weekly fine setting search (2026-10-30, system doc 88): Saturday 04:00 (market closed).
+    # 16. Weekly fine setting search (2026-10-30, system doc 88): Saturday 02:00 (market closed).
     #     strength x stop x take grid -> best regions refined (0.1 / 1%p / 2%p) + yearly walk-forward check.
     Write-Host "[16/16] Registering weekly setting search (Saturday)..."
     $a16 = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_setting_sweep.bat" -Argument "auto"
-    $t16 = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Saturday -At "04:00"
+    $t16 = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Saturday -At "02:00"
     $s16 = New-ScheduledTaskSettingsSet @pw `
                -MultipleInstances IgnoreNew `
                -StartWhenAvailable `
                -ExecutionTimeLimit (New-TimeSpan -Hours 12)
     Register-ScheduledTask -TaskName "StockAI\SettingSweep" `
         -Action $a16 -Trigger $t16 -Settings $s16 -Principal $principal -Force | Out-Null
-    Write-Host "[OK] StockAI\SettingSweep (Saturday 04:00, fine strength/stop/take search)" -ForegroundColor Green
+    Write-Host "[OK] StockAI\SettingSweep (Saturday 02:00, fine strength/stop/take search)" -ForegroundColor Green
 
     Write-Host ""
     Write-Host "=== Registered Tasks ===" -ForegroundColor Cyan
