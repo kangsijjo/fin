@@ -530,7 +530,7 @@ def _with_score(t, sc):
 
 
 def run_job(job, start, end, names, luck, strength=None, stop=None, take=None, exit_mode="close",
-            strength_version="v1"):
+            strength_version="v2"):
     t0 = time.time()
     strength = list(strength or [])
     state = {"job": job, "status": "running", "params": {"start": start, "end": end, "names": names,
@@ -718,7 +718,7 @@ def main():
     ap.add_argument("--stop", type=float, default=None, help="손절 %(음수, 예 -10)")
     ap.add_argument("--take", type=float, default=None, help="익절 %(양수, 예 20)")
     ap.add_argument("--exit-mode", default="close", choices=sorted(EXIT_MODES))
-    ap.add_argument("--strength-version", default="v1", choices=["v1", "v2"], help="강도 방식 v1(공통)/v2(전략별)")
+    ap.add_argument("--strength-version", default="v2", choices=["v1", "v2"], help="강도 방식 v2(전략별, 기본)/v1(공통·예전)")
     a = ap.parse_args()
     names = [n.strip() for n in a.names.split(",") if n.strip()]
     if a.check:

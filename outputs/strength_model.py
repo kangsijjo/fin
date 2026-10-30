@@ -174,7 +174,7 @@ def _v2_ref(engine):
     return ref
 
 
-def rank_pct(engine, live_name, score, version="v1"):
+def rank_pct(engine, live_name, score, version="v2"):
     """[§75] '칸 없음' 모드의 후보 순서용 — 그 점수가 **그 전략 과거 점수 중 상위 몇 %쯤**인지(0~100, 클수록 강함).
     전략마다 점수 척도가 달라(v2 는 전략별 학습) 원점수끼리 비교하면 점수가 후하게 나오는 전략이 칸을 다 차지한다.
     분포를 모르면 원점수×10(0~10 → 0~100)으로 근사. 점수가 없으면 None."""

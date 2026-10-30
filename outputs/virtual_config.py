@@ -164,8 +164,8 @@ def default_portfolios():
         j = max(range(len(rows)), key=lambda k: rows[k]["slots"])
         rows[j]["slots"] -= 1
     ms = float(LC.account("kiwoom", cfg)["min_strength"])
-    return {"ai": {"min_score": None, "strength_version": "v1", "strategies": copy.deepcopy(rows)},
-            "strength": {"min_score": ms, "strength_version": "v1", "strategies": copy.deepcopy(rows)}}
+    return {"ai": {"min_score": None, "strength_version": "v2", "strategies": copy.deepcopy(rows)},
+            "strength": {"min_score": ms, "strength_version": "v2", "strategies": copy.deepcopy(rows)}}
 
 
 def validate(ports, engine_names=None):
@@ -181,7 +181,7 @@ def validate(ports, engine_names=None):
         hi = 1 if p == "ai" else 10
         if ms is not None and (not isinstance(ms, (int, float)) or isinstance(ms, bool) or not 0 <= ms <= hi):
             errs.append(f"{lab}: 기준은 0~{hi} 또는 비움")
-        if P.get("strength_version", "v1") not in ("v1", "v2"):
+        if P.get("strength_version", "v2") not in ("v1", "v2"):
             errs.append(f"{lab}: 강도 방식은 v1/v2")
         if P.get("slot_mode", "slots") not in ("slots", "pool"):
             errs.append(f"{lab}: 칸 방식은 slots/pool")
@@ -249,8 +249,8 @@ def diff(old, new):
         if o.get("slot_mode", "slots") != n.get("slot_mode", "slots"):
             _m = {"slots": "전략별 칸", "pool": "칸 없음(전체 10종목)"}
             out.append(f"{lab} 칸 방식 {_m[o.get('slot_mode', 'slots')]} → {_m[n.get('slot_mode', 'slots')]}")
-        if p == "strength" and o.get("strength_version", "v1") != n.get("strength_version", "v1"):
-            out.append(f"{lab} 강도 방식 {o.get('strength_version', 'v1')} → {n.get('strength_version', 'v1')}")
+        if p == "strength" and o.get("strength_version", "v2") != n.get("strength_version", "v2"):
+            out.append(f"{lab} 강도 방식 {o.get('strength_version', 'v2')} → {n.get('strength_version', 'v2')}")
         om = {s["engine"]: s for s in o["strategies"]}
         nm = {s["engine"]: s for s in n["strategies"]}
         for e in nm:
@@ -283,7 +283,7 @@ def clean(ports, holding_map=None):
             rows.append({"engine": e, "slots": int(x.get("slots") or 0), "exempt": bool(x.get("exempt")),
                          "stop": num(x.get("stop")), "take": num(x.get("take")), "min_score": num(x.get("min_score")),
                          "holding": int((holding_map or {}).get(e, x.get("holding") or 20))})
-        out[p] = {"min_score": ms, "strength_version": str(P.get("strength_version") or "v1"),
+        out[p] = {"min_score": ms, "strength_version": str(P.get("strength_version") or "v2"),
                   "slot_mode": str(P.get("slot_mode") or "slots"), "strategies": rows}
     return out
 

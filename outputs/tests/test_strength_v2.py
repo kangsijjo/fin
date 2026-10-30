@@ -68,13 +68,13 @@ def test_walk_forward_uses_prior_years_only(monkeypatch):
 def test_live_config_strength_version(tmp_path, monkeypatch):
     monkeypatch.setenv("LIVE_CONFIG_PATH", str(tmp_path / "lc.json"))
     import live_config as LC
-    assert LC.account("kiwoom")["strength_version"] == "v1", "기본은 종전(v1)"
+    assert LC.account("kiwoom")["strength_version"] == "v2", "[2026-10-30 §82] 기본은 v2"
     c = LC.default_config()
     c["accounts"]["kis"]["strength_version"] = "v3"
     assert any("강도 방식" in e for e in LC.validate(c))
-    c["accounts"]["kis"]["strength_version"] = "v2"
+    c["accounts"]["kis"]["strength_version"] = "v1"
     cfg, ch = LC.save(c)
-    assert LC.account("kis")["strength_version"] == "v2" and any("강도 방식 v1 → v2" in x for x in ch)
+    assert LC.account("kis")["strength_version"] == "v1" and any("강도 방식 v2 → v1" in x for x in ch)
 
 
 def test_trader_uses_v2_with_v1_fallback(tmp_path, monkeypatch):

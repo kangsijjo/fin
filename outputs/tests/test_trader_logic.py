@@ -807,13 +807,29 @@ def test_signal_freshness_warns_then_blocks(tmp_path):
     (tmp_path / "20260814.csv").write_text("x", encoding="utf-8")
     (tmp_path / "20260817.csv.holiday").write_text("", encoding="utf-8")
 
-    # 1거래일 지연 → 경고하되 매수는 진행
+    # [2026-10-30 사용자 결정] 1거래일 지연부터 그날 매수는 건너뜀(종전: 1일 경고·2일 차단)
     ok, msg = mc.check_signal_freshness("20260814", "T", "20260819", d)
-    assert ok is True and msg and "1거래일" in msg
+    assert ok is False and msg and "1거래일" in msg and "건너뜀" in msg
 
-    # 2거래일 지연 → 매수 차단
     ok, msg = mc.check_signal_freshness("20260814", "T", "20260820", d)
-    assert ok is False and msg and "차단" in msg
+    assert ok is False and msg and "2거래일" in msg
+
+    # 밀리지 않았으면 그대로
+    (tmp_path / "20260818.csv").write_text("x", encoding="utf-8")
+    (tmp_path / "20260819.csv").write_text("x", encoding="utf-8")
+    assert mc.check_signal_freshness("20260819", "T", "20260820", d) == (True, None)
+
+
+def test_stale_alert_sent_once_per_day(monkeypatch, tmp_path):
+    """08:50 예열·09:00 매매·재시도마다 같은 경보가 4~8통 → 하루 한 번."""
+    import notifier
+    monkeypatch.setenv("NOTIFY_ONCE_PATH", str(tmp_path / "once.json"))
+    sent = []
+    monkeypatch.setattr(notifier, "safe_send", lambda t: (sent.append(t), (True, "ok"))[1])
+    assert notifier.safe_send_once("a", "k1")[0] is True
+    assert notifier.safe_send_once("a", "k1")[0] is False
+    assert notifier.safe_send_once("b", "k2")[0] is True
+    assert sent == ["a", "b"]
 
 
 def test_signal_freshness_fails_open_on_bad_input(tmp_path):
@@ -1522,6 +1538,7 @@ def test_task_missing_targets_accepts_existing_and_quoted():
 
 def test_task_check_is_quiet_when_everything_is_healthy(monkeypatch):
     import watchdog as w
+    monkeypatch.setattr(w, "_on_windows", lambda: True)   # 판정 로직은 OS 무관 — 리눅스에서도 검증
     real = os.path.join(OUTPUTS, "watchdog.py")
     tasks = [_task(_BS + "StockAI" + _BS + "Watchdog", exec_line=real),
              _task(_BS + "KIS_EOD", exec_line=real)]
@@ -1533,6 +1550,7 @@ def test_task_check_is_quiet_when_everything_is_healthy(monkeypatch):
 def test_task_check_flags_disabled_core_but_not_legacy(monkeypatch):
     """StockAI 폴더 작업이 꺼지면 경보. 루트 KIS_* 에는 의도적으로 꺼둔 레거시가 있다."""
     import watchdog as w
+    monkeypatch.setattr(w, "_on_windows", lambda: True)   # 판정 로직은 OS 무관 — 리눅스에서도 검증
     real = os.path.join(OUTPUTS, "watchdog.py")
     monkeypatch.setattr(w, "_query_scheduled_tasks", lambda: ([
         _task(_BS + "KIS_KiwoomSell", state="Disabled", result=1, exec_line=real),
@@ -1549,6 +1567,7 @@ def test_task_check_flags_disabled_core_but_not_legacy(monkeypatch):
 def test_task_check_benign_result_codes_are_not_failures(monkeypatch):
     """실행 중/미실행/중복방지는 실패가 아니다 — 좁게 잡으면 매일 오탐이 뜬다."""
     import watchdog as w
+    monkeypatch.setattr(w, "_on_windows", lambda: True)   # 판정 로직은 OS 무관 — 리눅스에서도 검증
     real = os.path.join(OUTPUTS, "watchdog.py")
     for rc in (0, 267009, 267011, 267014, 2147750687):
         monkeypatch.setattr(w, "_query_scheduled_tasks", lambda: (
@@ -1567,6 +1586,7 @@ def test_task_check_never_fails_silently(monkeypatch):
     이 점검이 침묵하면 이 점검을 만든 이유가 그대로 사라진다.
     """
     import watchdog as w
+    monkeypatch.setattr(w, "_on_windows", lambda: True)   # 판정 로직은 OS 무관 — 리눅스에서도 검증
     monkeypatch.setattr(w, "_query_scheduled_tasks", lambda: (None, "rc=1 Access is denied"))
     bad = [r for r in w.check_scheduled_tasks() if not r[2]]
     assert len(bad) == 1 and "읽지 못" in bad[0][3], bad
@@ -1982,18 +2002,14 @@ def test_cut_monitor_does_not_touch_trading_code():
             f"{f} 가 모니터를 import 한다 — Phase 1 은 매매에 개입하면 안 된다")
 
 
-def test_cut_monitor_thresholds_are_walkforward_constants():
-    """임계는 상수로 고정돼 있어야 한다(실행 시점에 재계산하면 결과가 표류)."""
+def test_cut_monitor_rules_follow_live_settings():
+    """[2026-10-30 §82] 모니터는 v2·지금 설정 기준 — 현행 기준은 라이브 전략별 기준, 대안은 고정 오프셋(실행마다 표류 없음)."""
     import strength_cut_monitor as M
+    import live_config as LC
     assert M.CUR_TH == {"kiwoom": 5.7, "kis": 5.7}, "현행 비교 기준이 라이브 임계(기본 5.7)와 다르다"
-    for cuts in (M.CUTS_40, M.CUTS_50):
-        # [2026-10-18] 강도 면제 전략(high_500d_filt 등)은 컷이 필요 없다 — 비면제 전략은 전부 컷이 있어야 한다
-        assert set(M.HOLD) - M.EXEMPT <= set(cuts) <= set(M.HOLD), "비면제 전략의 컷 누락"
-        for k, v in cuts.items():
-            assert 0 < v < 10, f"{k} 임계 {v} 가 점수 범위(0~10) 밖"
-    # 상위50% 컷은 상위40% 보다 낮아야 한다(더 많이 통과)
-    for k in M.CUTS_40:
-        assert M.CUTS_50[k] <= M.CUTS_40[k], f"{k}: 상위50% 컷이 상위40% 보다 높다"
+    assert M.CUR_TH_BY == {a: LC.account(a)["min_strength_by"] for a in ("kiwoom", "kis")}
+    assert M.RULES == {"현행(설정)": 0.0, "기준 −0.5": -0.5, "기준 +0.5": 0.5, "강도 필터 없음": None}
+    assert not hasattr(M, "CUTS_40"), "v1·옛 6전략 컷은 더 쓰지 않는다"
 
 
 def test_cut_monitor_live_constants_match_traders():

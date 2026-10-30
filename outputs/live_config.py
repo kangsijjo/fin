@@ -29,7 +29,8 @@ ACCOUNTS = ("kiwoom", "kis")
 ACCOUNT_LABEL = {"kiwoom": "키움 안C", "kis": "KIS 안D"}
 ALIAS = {"star_high_52w_20_filt": "high_52w_filt", "star_high_500d_20": "high_500d_filt"}   # engine → live
 SLOT_MODES = {"slots": "전략별 칸", "pool": "칸 없음(전체 10종목, 전략 안 순위 높은 순)"}
-STRENGTH_VERSIONS = {"v1": "공통(라이브 6전략 풀 학습, 종전)", "v2": "전략별(그 전략 자신의 과거 매매로 학습, §62)"}
+STRENGTH_VERSIONS = {"v1": "공통(라이브 6전략 풀 학습, 예전 방식)", "v2": "전략별(그 전략 자신의 과거 매매로 학습, §62)"}
+# [2026-10-30 §82] 기본값 v2 — 설정에 강도 방식이 없으면 v2(모델 없는 전략은 트레이더가 v1 점수로 대체)
 LOCK_WINDOW = ("0830", "1540")      # 거래일 이 시간엔 변경 금지(장전 예열·매수·손절·만기매도가 도는 구간)
 SIGNAL_TIME = "1825"                # 이 시각 이후(또는 휴장일)에 바꾸면 오늘 신호를 새 설정으로 다시 만든다
 
@@ -92,7 +93,7 @@ def validate(cfg, engine_names=None):
         ms = A.get("min_strength")
         if not isinstance(ms, (int, float)) or not 0 <= ms <= 10:
             errs.append(f"{lab}: 강도 기준은 0~10")
-        if A.get("strength_version", "v1") not in STRENGTH_VERSIONS:
+        if A.get("strength_version", "v2") not in STRENGTH_VERSIONS:
             errs.append(f"{lab}: 강도 방식은 v1/v2")
         if A.get("slot_mode", "slots") not in SLOT_MODES:
             errs.append(f"{lab}: 칸 방식은 slots/pool")
@@ -161,7 +162,7 @@ def account(acct, cfg=None):
     A = cfg["accounts"][acct]
     rows = A["strategies"]
     out = {"min_strength": float(A["min_strength"]), "rows": rows,
-           "strength_version": A.get("strength_version", "v1"),
+           "strength_version": A.get("strength_version", "v2"),
            "slot_mode": A.get("slot_mode", "slots"),
            "slots": {}, "priority": [], "exempt": set(), "stop": {}, "take": {}, "holding": {}, "engine": {},
            "min_strength_by": {}}
@@ -232,9 +233,9 @@ def diff(old, new):
             out.append(f"{lab} 강도 기준 {o['min_strength']:g} → {n['min_strength']:g}")
         if o.get("slot_mode", "slots") != n.get("slot_mode", "slots"):
             out.append(f"{lab} 칸 방식 {SLOT_MODES[o.get('slot_mode', 'slots')]} → {SLOT_MODES[n.get('slot_mode', 'slots')]}")
-        if o.get("strength_version", "v1") != n.get("strength_version", "v1"):
-            out.append(f"{lab} 강도 방식 {o.get('strength_version', 'v1')} → {n.get('strength_version', 'v1')}"
-                       f" ({STRENGTH_VERSIONS.get(n.get('strength_version', 'v1'), '')})")
+        if o.get("strength_version", "v2") != n.get("strength_version", "v2"):
+            out.append(f"{lab} 강도 방식 {o.get('strength_version', 'v2')} → {n.get('strength_version', 'v2')}"
+                       f" ({STRENGTH_VERSIONS.get(n.get('strength_version', 'v2'), '')})")
         om = {s["engine"]: s for s in o["strategies"]}
         nm = {s["engine"]: s for s in n["strategies"]}
         for e in nm:
@@ -269,7 +270,7 @@ def save(new, note="", engine_names=None):
     old.pop("_fallback", None)
     cfg = {"version": 1, "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "note": note or "",
            "accounts": {a: {"min_strength": float(new["accounts"][a]["min_strength"]),
-                            "strength_version": new["accounts"][a].get("strength_version", "v1"),
+                            "strength_version": new["accounts"][a].get("strength_version", "v2"),
                             "slot_mode": new["accounts"][a].get("slot_mode", "slots"),
                             "strategies": [{k: s.get(k) for k in ("engine", "slots", "exempt", "stop", "take", "holding",
                                                                   "min_strength")}

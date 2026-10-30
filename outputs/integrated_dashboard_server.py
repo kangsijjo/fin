@@ -1226,7 +1226,7 @@ def get_ai_paper():
 def get_cut_monitor(limit=200):
     """전략별 임계 '모니터 전용' 집계(strength_cut_monitor.py 산출)를 요약해 반환.
 
-    현행 5.7(단일 절대임계) vs 전략별 고정임계 상위40%/50% — **매매에는 개입하지 않고**
+    [2026-10-30 §82] v2·지금 설정 기준: 현행 vs 기준 ±0.5 vs 필터 없음(계좌 재현 / [신호 전체]) — **매매에는 개입하지 않고**
     '그 규칙이었으면 무엇을 샀고 얼마였을까'만 비교한다(시스템_설명서 §39).
     """
     out = {"rules": [], "rows": [], "by_strategy": [], "daily": [],
@@ -2348,7 +2348,7 @@ def _pbt_parse(req):
     mode = str(b.get("exit_mode") or "close")
     if mode not in ("close", "intraday"):
         return None, "판정 방식은 close / intraday"
-    sv = str(b.get("strength_version") or "v1")
+    sv = str(b.get("strength_version") or "v2")
     if sv not in ("v1", "v2"):
         return None, "강도 방식은 v1 / v2"
     ex = (["--stop", f"{stop:g}"] if stop is not None else []) + (["--take", f"{take:g}"] if take is not None else [])
@@ -2356,6 +2356,8 @@ def _pbt_parse(req):
         ex += ["--exit-mode", mode]
     if strength and sv == "v2":
         ex += ["--strength-version", "v2"]
+    elif strength:                                   # [§82] 기본이 v2 가 됐으니 v1 은 명시해서 넘긴다
+        ex += ["--strength-version", "v1"]
     return (start, end, names, bool(b.get("luck")), strength, ex), None
 
 
@@ -2566,7 +2568,7 @@ def _lc_view(cfg):
         A = cfg["accounts"][a]
         view["accounts"][a] = {"label": LC.ACCOUNT_LABEL[a], "min_strength": A["min_strength"],
                                "slot_mode": A.get("slot_mode", "slots"),
-                               "strength_version": A.get("strength_version", "v1"),
+                               "strength_version": A.get("strength_version", "v2"),
                                "strategies": [dict(x, live=LC.live_name(x["engine"])) for x in A["strategies"]]}
     return view
 
@@ -2617,7 +2619,7 @@ def _lc_from_request(b):
                          "min_strength": num(x.get("min_strength"))})      # [§71] 전략별 강도 기준(비우면 계좌 기본)
         new["accounts"][a] = {"min_strength": float(A.get("min_strength", 5.7)),
                               "slot_mode": str(A.get("slot_mode") or "slots"),
-                              "strength_version": str(A.get("strength_version") or "v1"), "strategies": rows}
+                              "strength_version": str(A.get("strength_version") or "v2"), "strategies": rows}
     return new
 
 
@@ -3329,14 +3331,13 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
 <!-- ===== 임계 모니터 (Phase 1, 모니터 전용) ===== -->
 <div id="tab-cutmon" class="tab-content">
   <div class="section">
-    <h2>&#xC804;&#xB7B5;&#xBCC4; &#xC784;&#xACC4; &#xBAA8;&#xB2C8;&#xD130; <span style="color:#f0883e;font-size:12px;font-weight:700">&mdash; &#xBAA8;&#xB2C8;&#xD130; &#xC804;&#xC6A9; &middot; &#xC2E4;&#xAC70;&#xB798;&#xC5D0; &#xAC1C;&#xC785;&#xD558;&#xC9C0; &#xC54A;&#xC74C;</span></h2>
+    <h2>강도 기준 모니터 (v2 · 지금 설정) <span style="color:#f0883e;font-size:12px;font-weight:700">— 모니터 전용 · 실거래에 개입하지 않음</span></h2>
     <div style="color:#8b949e;font-size:12px;margin-bottom:10px;line-height:1.7">
-      &#xD604;&#xD589;&#xC740; <b>&#xAC15;&#xB3C4; 5.7 &#xB2E8;&#xC77C; &#xC808;&#xB300;&#xC784;&#xACC4;</b>&#xB2E4;. &#xADF8;&#xB7F0;&#xB370; &#xD559;&#xC2B5;&#xBD84;&#xD3EC; &#xC0C1;&#xC704; 30% &#xCEF7;&#xC774;
-      high_52w_filt 3.16 ~ rsi_reversal 6.83 &#xB85C; <b>3.7&#xC810;</b> &#xBC8C;&#xC5B4;&#xC838; &#xC788;&#xC5B4;,
-      5.7 &#xD558;&#xB098;&#xB294; &#xBAA8;&#xBA58;&#xD140; 4&#xC804;&#xB7B5;&#xC744; &#xD1B5;&#xACFC;&#xC728; 0%&#xB85C; &#xB044;&#xBA74;&#xC11C; rsi_reversal &#xC740; &#xC624;&#xD788;&#xB824; &#xB290;&#xC2AC;&#xAC8C; &#xD1B5;&#xACFC;&#xC2DC;&#xD0A8;&#xB2E4;.
-      &#xC5EC;&#xAE30;&#xC11C;&#xB294; <b>&#xC804;&#xB7B5;&#xBCC4;&#xB85C; &#xB208;&#xAE08;&#xC744; &#xB9DE;&#xCD98; &#xC784;&#xACC4;</b>&#xC600;&#xB2E4;&#xBA74; &#xBB34;&#xC5C7;&#xC744; &#xC0C0;&#xC744;&#xC9C0;&#xB9CC; &#xAE30;&#xB85D;&#xD55C;&#xB2E4;.
-      &#xB9E4;&#xB9E4; &#xCF54;&#xB4DC;&#xB294; &#xAC74;&#xB4DC;&#xB9AC;&#xC9C0; &#xC54A;&#xC558;&#xB2E4; &mdash; &#xC21C;&#xC218; &#xC9D1;&#xACC4;&#xB2E4;. (&#xC2DC;&#xC2A4;&#xD15C;_&#xC124;&#xBA85;&#xC11C; &sect;39)
-      <br>&#xD310;&#xB2E8; &#xAE30;&#xC900;: <b>&#xD3C9;&#xADE0; net% &#xC640; &#xB204;&#xC801;&#xC744; &#xBD84;&#xB9AC;&#xD574; &#xBCF8;&#xB2E4;.</b> &#xC2B9;&#xB960;&#xC740; &#xC775;&#xC808;&#xADDC;&#xCE59;&#xC758; &#xC0B0;&#xBB3C;&#xC774;&#xB77C; &#xADFC;&#xAC70;&#xB85C; &#xC4F0;&#xC9C0; &#xC54A;&#xB294;&#xB2E4;.
+      지금 계좌 설정(강도 v2 점수·전략별 기준·면제·칸·손절·익절)을 그대로 쓰고, <b>기준을 0.5 낮췄다면 / 높였다면 / 아예 안 걸었다면</b>
+      무엇을 사서 얼마였을지 매일 기록한다(2026-10-22 v2 기록부터, 설명서 §82 — 종전 판은 v1·옛 6전략 기준이라 지금 계좌와 무관했다).
+      <br>두 가지로 본다: <b>계좌 재현</b>(칸·같은 종목 중복 금지 — 실제로 샀을 것) / <b>[신호 전체]</b>(칸 무시 — 기준을 넘은 신호 전부).
+      칸이 꽉 차 있으면 계좌 재현은 기준이 달라도 같은 종목을 사서 차이가 안 난다 → 기준 자체가 좋은 신호를 골라내는지는 [신호 전체]로 본다.
+      <br>판단 기준: <b>평균 net% 와 누적을 나눠 본다.</b> 표본이 몇 주~몇 달 쌓여야 의미가 있다 — 그 전엔 백테스트 탭 '강도 비교(v2)'를 참고.
     </div>
     <div style="color:#8b949e;font-size:12px" id="cm-meta"></div>
   </div>
@@ -3382,7 +3383,7 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
       <label style="font-size:13px;color:#cbd5e1"><span class="pbt-tip" data-tip="강도 비교(선택)|쉼표로 여러 값: 예 4, 5, 5.7 → 전략마다 [강도 없음] + [≥4] [≥5] [≥5.7] 줄이 나란히 나옴|강도 줄은 그날 후보를 강도 높은 순으로 담음(모의매매와 같은 규칙) · 0 = 거르지 않고 강도순으로만 담기|강도는 신호마다 그날 데이터로 다시 계산 — 가중치는 해마다 그 이전 매매로만 학습(미래 미사용)|처음 한 번은 수 분, 같은 날 다시 돌리면 저장분 사용">강도 비교</span>
         <input type="text" id="pbt-strength" placeholder="예: 4, 5, 5.7" style="width:110px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"></label>
       <select id="pbt-sver" title="강도 방식 — v1: 라이브 6전략 공통 가중치(종전) / v2: 전략마다 자기 과거 매매로 학습(§62)" style="background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px;font-size:12px">
-        <option value="v1">강도 v1(공통)</option><option value="v2">강도 v2(전략별)</option></select>
+        <option value="v2" selected>강도 v2(전략별)</option><option value="v1">강도 v1(공통·예전 방식)</option></select>
       <label style="font-size:13px;color:#cbd5e1"><span class="pbt-tip" data-tip="손절·익절(선택)|비우면 없음(만기에만 팖) · 모든 전략·강도 줄에 같은 규칙|손절은 음수(예 -10), 익절은 양수(예 20) — 진입가(다음날 시가) 기준|판정 '종가 기준' = 그날 종가가 선을 넘으면 다음날 시가에 팖(KIS 모의매매 손절과 같음, 보수적)|'장중 도달' = 그날 저가·고가가 닿으면 그 가격에 팖(키움 익절 지정가와 비슷, 시가부터 넘어 열리면 시가)">손절 %</span>
         <input type="number" id="pbt-stop" placeholder="없음" step="1" min="-50" max="-1" style="width:66px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"></label>
       <label style="font-size:13px;color:#cbd5e1">익절 %
@@ -3846,8 +3847,11 @@ function fillCutMonitor(cm){
 
   const rules=cm.rules||[];
   // 현행을 기준으로 삼아 신규 규칙의 우열을 색으로 표시한다
-  const base=rules.find(r=>String(r.rule).indexOf('현행')>=0);
+  // [2026-10-30 §82] 계좌 재현 줄과 [신호 전체] 줄은 각자의 '현행'과 비교
+  const _grp=r=>String(r.rule).startsWith('[신호 전체]');
+  const _base=r=>rules.find(x=>String(x.rule).indexOf('현행')>=0&&_grp(x)===_grp(r));
   setHtml('cm-rules', rules.length? rules.map(r=>{
+    const base=_base(r);
     const isBase=(base&&r.rule===base.rule);
     const d=(base&&r.avg!=null&&base.avg!=null&&!isBase)?(r.avg-base.avg):null;
     const dtxt=(d==null)?'':` <span class="${d>0?'pos':'neg'}" style="font-size:11px">(${d>0?'+':''}${d.toFixed(2)}%p)</span>`;
@@ -4301,7 +4305,7 @@ function pbtHistReuse(job){
   const sp=document.getElementById('pbt-stop'); if(sp) sp.value=j.stop==null?'':j.stop;
   const tk=document.getElementById('pbt-take'); if(tk) tk.value=j.take==null?'':j.take;
   const em=document.getElementById('pbt-exitmode'); if(em) em.value=j.exit_mode||'close';
-  const sv=document.getElementById('pbt-sver'); if(sv) sv.value=j.strength_version||'v1';
+  const sv=document.getElementById('pbt-sver'); if(sv) sv.value=j.strength_version||'v2';
   const lk=document.getElementById('pbt-luck'); if(lk) lk.checked=!!j.luck;
   _pbtCount();
   setHtml('pbt-warn', `<span style="color:#38bdf8;font-size:13px">↺ ${_pbtEsc(job)} 의 조건을 불러왔습니다${miss?` (지금은 없는 전략 ${miss}개 제외)`:''} — [데이터 점검]·[실행]으로 다시 계산</span>`);
@@ -4930,7 +4934,7 @@ function lcRender(){
           <button class="runbtn" style="padding:0 6px" title="아래로" onclick="lcMove('${a}',${i},1)">▼</button></td>
         <td><select style="${inp};max-width:330px" onchange="lcSet('${a}',${i},'engine',this.value)">${opts(s.engine)}</select>
           ${e.note?`<div style="color:#fbbf24;font-size:11px;max-width:340px">⚠ ${_lcEsc(e.note)}</div>`:''}
-          ${A.strength_version==='v2'?((L.v2_models||{})[s.engine]?`<div style="color:#64748b;font-size:11px">v2 모델: ${_lcEsc(L.v2_models[s.engine].trained)} · 학습 ${L.v2_models[s.engine].n}건 · 지표 ${L.v2_models[s.engine].n_ic}개</div>`
+          ${(A.strength_version||'v2')==='v2'?((L.v2_models||{})[s.engine]?`<div style="color:#64748b;font-size:11px">v2 모델: ${_lcEsc(L.v2_models[s.engine].trained)} · 학습 ${L.v2_models[s.engine].n}건 · 지표 ${L.v2_models[s.engine].n_ic}개</div>`
             :'<div style="color:#fbbf24;font-size:11px">v2 모델 없음 — 저장하면 학습(1~3분), 그 전엔 v1 점수로 대체</div>'):''}</td>
         <td>${A.slot_mode==='pool'?'<span style="color:#64748b;font-size:11px" title="칸 없음 모드 — 전략별 칸 수는 쓰지 않음">공유</span>':`<input type="number" min="1" max="10" step="1" value="${s.slots}" style="${inp};width:52px" onchange="lcSet('${a}',${i},'slots',this.value)">`}</td>
         <td style="text-align:center"><input type="checkbox" ${s.exempt?'checked':''} onchange="lcSet('${a}',${i},'exempt',this.checked)" title="체크하면 강도 기준과 상관없이 삼(후보가 많으면 강도 높은 순)"></td>
@@ -4947,8 +4951,8 @@ function lcRender(){
         <label style="font-size:13px;color:#cbd5e1" title="전략별 칸을 비운 전략에 쓰는 기본값">기본 강도 기준 ≥
           <input type="number" min="0" max="10" step="0.1" value="${A.min_strength}" style="${inp};width:62px" onchange="lcSetAcc('${a}','min_strength',this.value)"></label>
         <select style="${inp};font-size:12px" title="v1: 라이브 6전략 공통 가중치(종전) / v2: 전략마다 자기 과거 매매로 학습(방향이 해마다 유지된 지표만·시장 지표 제외, §62). v2 권장 기준 5.5" onchange="lcSetAcc('${a}','strength_version',this.value)">
-          <option value="v1"${(A.strength_version||'v1')==='v1'?' selected':''}>강도 v1(공통)</option>
-          <option value="v2"${A.strength_version==='v2'?' selected':''}>강도 v2(전략별)</option></select>
+          <option value="v1"${(A.strength_version||'v2')==='v1'?' selected':''}>강도 v1(공통·예전 방식)</option>
+          <option value="v2"${(A.strength_version||'v2')==='v2'?' selected':''}>강도 v2(전략별)</option></select>
         <select style="${inp};font-size:12px" title="전략별 칸: 전략마다 칸 수를 나눠 줌(위 순서대로 채움) / 칸 없음: 고른 전략 중 조건을 넘은 신호를 전체 10종목까지, 같은 날 후보는 전략 안 순위(그 전략 과거 강도 중 상위 몇 %) 높은 순 — 백테스트(§74)에선 신호가 많은 전략이 칸을 먼저 차지해 대체로 불리했음" onchange="lcSetAcc('${a}','slot_mode',this.value)">
           <option value="slots"${(A.slot_mode||'slots')==='slots'?' selected':''}>전략별 칸</option>
           <option value="pool"${A.slot_mode==='pool'?' selected':''}>칸 없음(전체 10종목)</option></select>
@@ -5038,7 +5042,7 @@ function vcRender(){
         <td><select style="${inp};max-width:330px" onchange="vcSet('${p}',${i},'engine',this.value)">${opts(s.engine)}</select>
           <div style="font-size:11px;color:${live?'#64748b':'#38bdf8'}">${live?'모의계좌 신호를 그대로 씀':'가상 전용 신호를 매일 18:31 새로 만듦(주문 없음)'}</div>
           ${e.note?`<div style="color:#fbbf24;font-size:11px;max-width:340px">⚠ ${_lcEsc(e.note)}</div>`:''}
-          ${(!isAI&&P.strength_version==='v2')?((V.v2_models||{})[s.engine]?`<div style="color:#64748b;font-size:11px">v2 모델: ${_lcEsc(V.v2_models[s.engine].trained)} · 학습 ${V.v2_models[s.engine].n}건</div>`
+          ${(!isAI&&(P.strength_version||'v2')==='v2')?((V.v2_models||{})[s.engine]?`<div style="color:#64748b;font-size:11px">v2 모델: ${_lcEsc(V.v2_models[s.engine].trained)} · 학습 ${V.v2_models[s.engine].n}건</div>`
             :'<div style="color:#fbbf24;font-size:11px">v2 모델 없음 — 저장하면 학습(1~3분), 그 전엔 v1 점수로 대체</div>'):''}</td>
         <td>${P.slot_mode==='pool'?'<span style="color:#64748b;font-size:11px" title="칸 없음 모드 — 전략별 칸 수는 쓰지 않음">공유</span>':`<input type="number" min="1" max="10" step="1" value="${s.slots}" style="${inp};width:52px" onchange="vcSet('${p}',${i},'slots',this.value)">`}</td>
         <td style="text-align:center"><input type="checkbox" ${s.exempt?'checked':''} onchange="vcSet('${p}',${i},'exempt',this.checked)" title="체크하면 기준과 상관없이 후보(후보가 많으면 순위 높은 순)"></td>
@@ -5053,8 +5057,8 @@ function vcRender(){
       : `<label style="font-size:13px;color:#cbd5e1" title="강도 점수(0~10) 이 값 이상만 삼. 비우면 기준 없이 강도 높은 순">기본 강도 기준 ≥
            <input type="number" min="0" max="10" step="0.1" placeholder="없음" value="${P.min_score==null?'':P.min_score}" style="${inp};width:62px" onchange="vcSetP('${p}','min_score',this.value)"></label>
          <select style="${inp};font-size:12px" onchange="vcSetP('${p}','strength_version',this.value)">
-           <option value="v1"${(P.strength_version||'v1')==='v1'?' selected':''}>강도 v1(공통)</option>
-           <option value="v2"${P.strength_version==='v2'?' selected':''}>강도 v2(전략별)</option></select>`;
+           <option value="v1"${(P.strength_version||'v2')==='v1'?' selected':''}>강도 v1(공통·예전 방식)</option>
+           <option value="v2"${(P.strength_version||'v2')==='v2'?' selected':''}>강도 v2(전략별)</option></select>`;
     return `<div style="flex:1;min-width:560px;background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:10px 12px">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
         <b style="font-size:14px">${isAI?'🤖':'💪'} ${_lcEsc(V.labels[p])} <span style="font-size:11px;color:#64748b;font-weight:400">${isAI?'AI 확률 높은 순':'강도 높은 순'}</span></b>

@@ -51,6 +51,32 @@ def safe_send(text):
         return False, "오류"
 
 
+def safe_send_once(text, key):
+    """[2026-10-30] 같은 날 같은 key 는 한 번만 보낸다 — 08:50 예열·09:00 매매·재시도마다 같은 경보가
+    4~8통 쌓이던 것(유니버스 지연 경보). 기록: db/notify_once.json(오늘 날짜만 유지). 예외 안전."""
+    try:
+        from datetime import datetime
+        p = os.environ.get("NOTIFY_ONCE_PATH") or os.path.join(_BASE, "db", "notify_once.json")
+        today = datetime.now().strftime("%Y%m%d")
+        try:
+            st = json.load(open(p, encoding="utf-8"))
+        except Exception:
+            st = {}
+        sent = st.get(today, [])
+        if key in sent:
+            return False, "오늘 이미 보냄"
+        r = safe_send(text)
+        if r[0]:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            tmp = p + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({today: sent + [key]}, f, ensure_ascii=False)
+            os.replace(tmp, p)
+        return r
+    except Exception:
+        return safe_send(text)
+
+
 # ── 매매 체결 묶음 알림 ──────────────────────────────────────────────────────────
 # 주문마다 보내면 10슬롯 차는 날 알림이 쏟아지므로, 한 실행에서 모아 1통으로 보낸다.
 _QUEUE = []

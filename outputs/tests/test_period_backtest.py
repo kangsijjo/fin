@@ -567,7 +567,8 @@ def test_run_job_strength_rows(monkeypatch, tmp_path):
     import strategies.daily_loader as DL
     monkeypatch.setattr(DL, "load_macro_daily", lambda *a, **k: df.copy())
     monkeypatch.setattr(SB, "score_trades", lambda d, t, log=print: (np.array([6.0, 4.5, np.nan]), {"2024": {"n_train": 9999}}))
-    P.run_job("pbt_20991231_000001", cal[90], cal[-1], ["fake"], False, [4.0, 5.7])
+    P.run_job("pbt_20991231_000001", cal[90], cal[-1], ["fake"], False, [4.0, 5.7],
+              strength_version="v1")       # [§82] 기본이 v2 가 됨 — 이 테스트는 v1 채점 경로를 본다
     st = json.load(open(P._job_path("pbt_20991231_000001"), encoding="utf-8"))
     r = {x["strategy"]: x for x in st["results"]}
     assert set(r) == {"fake", "fake ≥4", "fake ≥5.7"}

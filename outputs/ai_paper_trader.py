@@ -308,7 +308,7 @@ def _enter_configured(g, pc, port, d, cal_all, positions, cash_box):
         return
     if port == "ai":
         c["_rk"] = c["ai_prob"]
-    elif pc.get("strength_version") == "v2":
+    elif pc.get("strength_version", "v2") == "v2":      # [§82] 기본 v2
         c["_rk"] = c["score_v2"].where(c["score_v2"].notna(), c["score_ic"])   # v2 모델 없으면 v1 점수(라이브와 같음)
     else:
         c["_rk"] = c["score_ic"]
@@ -325,7 +325,7 @@ def _enter_configured(g, pc, port, d, cal_all, positions, cash_box):
     pool = pc.get("slot_mode") == "pool"
     if pool and port != "ai":    # [§75] 칸 없음: 전략마다 점수 척도가 달라 '그 전략 안 순위(백분위)'로 비교
         import strength_model as SM
-        ver = pc.get("strength_version", "v1")
+        ver = pc.get("strength_version", "v2")
         c["_rk"] = [SM.rank_pct(rows[st]["engine"], st, v if v == v else None, ver)
                     for st, v in zip(c["strategy"], c["_rk"])]
         c["_rk"] = pd.to_numeric(c["_rk"], errors="coerce")
