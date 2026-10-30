@@ -43,6 +43,8 @@ SEEDS = (42, 43, 44, 45, 46)  # 무작위 표본추출(subsample) 운을 줄이�
                               # 0.8~1.1%p 로 흔들렸다(같은 표본, 행 순서만 달라도). 평균하면 안정.
 MIN_ENGINE_N = 300          # 학습 매매가 이보다 적은 전략은 빼고 학습(그 전략 점수 = None → v2/v1 로 대체)
 MIN_TOTAL_N = 2000          # 전체가 이보다 적으면 그 해(워크포워드)는 채점 안 함
+MAX_ENGINE_N = 20000        # [§86] 전략당 학습 표본 상한(무작위 고정 추출) — 백테스트한 전략 전부(59개·230만 건)를 배워도
+                            # 학습이 몇 분 안에 끝나게. 전략마다 가중이 같아 이보다 많아도 얻는 게 적다. 점수 분위는 전체로 잰다.
 QN = 1001
 VALIDATE_FROM = 2021
 TOP_K = 2
@@ -118,6 +120,18 @@ def _weights(D):
     return (w / w.mean()).to_numpy()
 
 
+def _cap(T):
+    """전략마다 MAX_ENGINE_N 건까지만(넘으면 고정 씨앗 무작위 추출, 순서 유지)."""
+    big = T["engine"].value_counts()
+    big = big[big > MAX_ENGINE_N].index
+    if not len(big):
+        return T
+    keep = [T[~T["engine"].isin(big)]]
+    for e in big:
+        keep.append(T[T["engine"] == e].sample(MAX_ENGINE_N, random_state=0))
+    return pd.concat(keep).sort_index()
+
+
 class Ensemble:
     """씨앗만 다른 XGBRegressor 여러 개의 평균."""
 
@@ -143,20 +157,22 @@ def fit(T, feats=None):
     T = T[T["engine"].isin(engines)]
     if len(T) < MIN_TOTAL_N or not engines:
         return None, f"학습 매매 {len(T)}건 < {MIN_TOTAL_N}"
-    X = _design(T, feats, engines)
-    y, w = T["y_rank"].to_numpy(float), _weights(T)
+    Tt = _cap(T)
+    Xt = _design(Tt, feats, engines)
+    y, w = Tt["y_rank"].to_numpy(float), _weights(Tt)
     ms = []
     for sd in SEEDS:
         r = xgb.XGBRegressor(**dict(PARAMS, random_state=sd))
-        r.fit(X, y, sample_weight=w)
+        r.fit(Xt, y, sample_weight=w)
         ms.append(r)
     m = Ensemble(ms)
+    X = _design(T, feats, engines)
     pred = m.predict(X)
     ref = {}
     for e in engines:
         v = pred[(T["engine"] == e).to_numpy()]
         ref[e] = np.quantile(v, np.linspace(0, 1, QN)).round(6).tolist()
-    imp = {c: round(float(v), 4) for c, v in zip(X.columns, m.feature_importances_)}
+    imp = {c: round(float(v), 4) for c, v in zip(Xt.columns, m.feature_importances_)}
     meta = {"version": VERSION, "feats": feats, "engines": engines, "n": {e: int(cnt[e]) for e in engines},
             "n_total": int(len(T)), "ref": ref, "importance": imp, "params": PARAMS, "seeds": list(SEEDS),
             "data_max": str(T["entry_date"].max())}
@@ -269,7 +285,7 @@ def score(engine, feats):
 
 def _signature(T):
     s = T.groupby("engine").agg(n=("net_pct", "size"), mx=("exit_date", "max")).reset_index()
-    txt = "|".join(f"{r.engine}:{r.n}:{r.mx}" for r in s.itertuples()) + f"|v{VERSION}|{json.dumps(PARAMS, sort_keys=True)}|{SEEDS}|{','.join(feature_list())}"
+    txt = "|".join(f"{r.engine}:{r.n}:{r.mx}" for r in s.itertuples()) + f"|v{VERSION}|{json.dumps(PARAMS, sort_keys=True)}|{SEEDS}|{MAX_ENGINE_N}|{','.join(feature_list())}"
     return hashlib.sha1(txt.encode("utf-8")).hexdigest()[:16]
 
 
@@ -318,7 +334,40 @@ def walk_forward(T, X, years, engine, log=print):
 
 
 def _lift_rows(D, cols, k=TOP_K):
-    """전략·날짜마다(후보 3개↑) 점수 상위 k개 평균 − 그날 후보 평균, 그리고 그날 순위상관."""
+    """전략·날짜마다(후보 3개↑) 점수 상위 k개 평균 − 그날 후보 평균, 그리고 그날 순위상관. [§86] 벡터화
+    (전략 59개 검증에서 날짜 묶음 수만 개를 파이썬으로 돌면 수 분 — 결과는 _lift_rows_slow 와 같음, 테스트로 고정)."""
+    D = D.reset_index(drop=True)
+    n = D.groupby(["engine", "date"], sort=False)["net_pct"].transform("size")
+    D = D[n >= 3].reset_index(drop=True)
+    if D.empty:
+        return pd.DataFrame()
+    grp = [D["engine"], D["date"]]
+    net = D["net_pct"].astype(float)
+    out = D.groupby(["engine", "date"], sort=False).agg(Y=("Y", "first"), _mu=("net_pct", "mean"))
+    rnet = net.groupby(grp).rank()
+    for c in cols:
+        sc = D[c].astype(float)
+        has = sc.notna().groupby(grp).any()
+        order = sc.fillna(-np.inf).groupby(grp).rank(method="first", ascending=False)
+        top = net.where(order <= k).groupby(grp).mean()
+        out[c] = (top - out["_mu"]).where(has)
+        rs = sc.groupby(grp).rank()
+        ok = rs.notna()
+        a_, b_ = rs.where(ok), rnet.where(ok)
+        da = a_ - a_.groupby(grp).transform("mean")
+        db = b_ - b_.groupby(grp).transform("mean")
+        cov = (da * db).groupby(grp).sum()
+        va, vb = (da ** 2).groupby(grp).sum(), (db ** 2).groupby(grp).sum()
+        cnt = ok.groupby(grp).sum()
+        ic = cov / np.sqrt(va * vb)
+        out[c + "_ic"] = ic.where((cnt >= 3) & (va > 0) & (vb > 0))
+    out = out.drop(columns="_mu").reset_index()
+    out["Y"] = out["Y"].astype(int)
+    return out
+
+
+def _lift_rows_slow(D, cols, k=TOP_K):
+    """(검산용) 예전 루프판 — 결과 비교 테스트에만 씀."""
     rows = []
     for (e, d), g in D.groupby(["engine", "date"], sort=False):
         if len(g) < 3:
@@ -431,8 +480,56 @@ def build_missing(engines, log=print):
     return done
 
 
-def train(do_validate=True, log=print):
-    built = build_missing(configured_engines(), log=log)
+LOCK_HOURS = 3
+
+
+def _acquire():
+    """학습 중복 방지(일요일 파이프라인 · 설정 저장 · 백테스트 뒤 학습이 겹칠 수 있음). 3시간 넘은 잠금은 낡은 것으로 보고 넘김."""
+    os.makedirs(model_dir(), exist_ok=True)
+    lk = _p("train.lock")
+    try:
+        if os.path.exists(lk) and (datetime.now().timestamp() - os.path.getmtime(lk)) < LOCK_HOURS * 3600:
+            return False
+        with open(lk, "w", encoding="utf-8") as f:
+            f.write(f"{os.getpid()} {datetime.now():%Y-%m-%d %H:%M:%S}")
+        return True
+    except Exception:
+        return True
+
+
+def _release():
+    try:
+        os.remove(_p("train.lock"))     # 이 학습이 만든 잠금 표시 파일(데이터 아님)
+    except Exception:
+        pass
+
+
+def train(do_validate=True, log=print, extra_engines=None):
+    if not _acquire():
+        return {"ok": False, "why": "다른 AI 학습이 진행 중(잠금 3시간 이내) — 이번은 건너뜀", "busy": True}
+    try:
+        return _train(do_validate, log, extra_engines)
+    finally:
+        _release()
+
+
+def learn(names, log=print):
+    """[§86] 기간 백테스트 뒤: 그 전략들 학습표가 없으면 만들어 저장하고, AI 모델에 없는 전략이 생기면 다시 학습."""
+    import strength_model as SM
+    names = [n for n in dict.fromkeys(names or []) if n]
+    meta = meta_info() or {}
+    have = set(meta.get("engines") or [])
+    miss_tbl = [n for n in names if not os.path.exists(SM.train_path(n))]
+    miss_model = [n for n in names if n not in have]
+    if not miss_tbl and not miss_model:
+        return {"ok": True, "skipped": True, "why": "백테스트한 전략이 모두 이미 학습됨"}
+    res = train(do_validate=True, log=log, extra_engines=names)
+    res["learned"] = sorted(set(miss_model) & set((meta_info() or {}).get("engines") or []))
+    return res
+
+
+def _train(do_validate=True, log=print, extra_engines=None):
+    built = build_missing(sorted(set(configured_engines()) | set(extra_engines or [])), log=log)
     T = load_tables()
     m, meta = fit(T)
     if m is None:
@@ -474,12 +571,28 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--train", action="store_true")
     ap.add_argument("--no-validate", action="store_true")
+    ap.add_argument("--learn", default="", help="[§86] 기간 백테스트한 전략(쉼표) — 학습표 저장 + 모델에 없으면 재학습")
     a = ap.parse_args()
+    if a.learn:
+        res = learn([x for x in a.learn.split(",") if x])
+        print(json.dumps(res, ensure_ascii=False))
+        if not res.get("skipped") and not res.get("busy"):
+            try:
+                from notifier import safe_send
+                v = res.get("validation") or {}
+                safe_send("🤖 [AI 학습 — 백테스트한 전략 반영] " + (
+                    f"✅ {res.get('engines')}전략 {res.get('n', 0):,}건(새로 배운 전략 {len(res.get('learned') or [])}개, 학습표 새로 {len(res.get('built') or [])}개)"
+                    + (f" · 검증 AI {v.get('ai')} vs v2 {v.get('v2')}%p" if v else "") if res.get("ok") else f"⚠ 실패: {res.get('why')}"))
+            except Exception:
+                pass
+        return 0 if res.get("ok") or res.get("busy") else 1
     if not a.train:
         print(json.dumps(status(), ensure_ascii=False, indent=1))
         return 0
     res = train(do_validate=not a.no_validate)
     print(json.dumps(res, ensure_ascii=False))
+    if res.get("busy"):
+        return 0
     try:
         from notifier import safe_send
         v = res.get("validation") or {}

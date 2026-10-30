@@ -521,6 +521,32 @@ def apply_exits(trades, panel, stop=None, take=None, mode="close"):
     return out
 
 
+def _spawn_learn(names):
+    """[§86] 백테스트가 끝나면 그 전략들을 개선 AI 가 배우게 — 학습표가 없거나 모델에 없는 전략이 있을 때만 별도 프로세스로
+    `ai_model.py --learn`(학습표 생성·저장 → 재학습, 끝나면 텔레그램). 백테스트 결과에는 영향 없음. 환경변수 PBT_NO_LEARN=1 이면 안 함."""
+    if os.getenv("PBT_NO_LEARN") == "1" or not names:
+        return None
+    try:
+        import ai_model as AIM
+        import strength_model as SM
+        have = set((AIM.meta_info() or {}).get("engines") or [])
+        need = [n for n in names if n not in have or not os.path.exists(SM.train_path(n))]
+        if not need:
+            return {"started": False, "why": "모두 이미 학습됨"}
+        import subprocess
+        os.makedirs(os.path.join(HERE, "logs"), exist_ok=True)
+        flags = 0x08000000 if os.name == "nt" else 0          # CREATE_NO_WINDOW
+        py = os.path.join(HERE, ".venv", "Scripts", "python.exe")
+        py = py if os.path.exists(py) else sys.executable
+        subprocess.Popen([py, "-u", os.path.join(HERE, "ai_model.py"), "--learn", ",".join(names)], cwd=HERE,
+                         stdout=open(os.path.join(HERE, "logs", "run_ai_learn.log"), "w", encoding="utf-8", errors="replace"),
+                         stderr=subprocess.STDOUT, creationflags=flags,
+                         env=dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1"))
+        return {"started": True, "n_new": len(need)}
+    except Exception as e:
+        return {"started": False, "why": f"{type(e).__name__}: {str(e)[:120]}"}
+
+
 def _with_score(t, sc):
     """매매 복사본 — 슬롯 배정 순서를 강도로 바꾼다(원본은 그대로)."""
     from types import SimpleNamespace
@@ -581,7 +607,14 @@ def run_job(job, start, end, names, luck, strength=None, stop=None, take=None, e
             _write(job, state)
             try:
                 p = SM.train_path(n)
-                train_tables[n] = pd.read_pickle(p) if os.path.exists(p) else SM.build_train_table(n, df, log=print)
+                if os.path.exists(p):
+                    train_tables[n] = pd.read_pickle(p)
+                else:
+                    train_tables[n] = SM.build_train_table(n, df, log=print)
+                    try:            # [§86] 버리지 않고 저장 — 다음 백테스트가 빨라지고 개선 AI 가 이 전략도 배운다
+                        train_tables[n].to_pickle(p)
+                    except Exception as e_:
+                        print(f"[pbt] {n} 학습표 저장 실패(무시): {e_}")
             except Exception as e:
                 train_tables[n] = None
                 state["warnings"].append({"level": "warn", "strategy": n,
@@ -705,6 +738,7 @@ def run_job(job, start, end, names, luck, strength=None, stop=None, take=None, e
             state["luck"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
     state.update(status="done", current="", finished=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                  elapsed_sec=round(time.time() - t0))
+    state["ai_learn"] = _spawn_learn(names)
     _write(job, state)
     _cleanup()
     okr = sorted([r for r in state["results"] if r.get("cagr") is not None], key=lambda r: -r["cagr"])

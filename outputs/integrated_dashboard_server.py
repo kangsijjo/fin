@@ -2979,6 +2979,53 @@ def api_strategy_overlap_check():
         return jsonify({"ok": False, "warnings": [], "available": False, "msg": str(e)[:200]})
 
 
+_RECO_CACHE = {"key": None, "ev": None}
+
+
+def _reco_eval():
+    """[§86] 백테스트 종합 평가(strategy_reco.evaluate) — 근거 파일이 그대로면 재사용."""
+    import strategy_reco as SR
+    try:
+        fs = list(_PBT_DIR.glob("pbt_*.json")) + list((_PBT_DIR / "archive").glob("pbt_*.json"))
+        full = sorted((BASE / "results").glob("strategy_full_*.csv"))
+        key = (len(fs), max((f.stat().st_mtime for f in fs), default=0), full[-1].name if full else "")
+    except Exception:
+        key = None
+    if key is not None and _RECO_CACHE["key"] == key and _RECO_CACHE["ev"] is not None:
+        return _RECO_CACHE["ev"]
+    ev = SR.evaluate()
+    _RECO_CACHE.update(key=key, ev=ev)
+    return ev
+
+
+@app.route("/api/strategy_reco")
+def api_strategy_reco():
+    """[§86] 읽기 전용 — places(JSON: {kiwoom|kis|ai|strength: [지금 고른 엔진…]}) 마다 안 고른 좋은 전략 추천."""
+    import strategy_reco as SR
+    try:
+        places = json.loads(request.args.get("places") or "{}")
+    except Exception:
+        places = {}
+    try:
+        ev = _reco_eval()
+        names = {e["engine"] for e in _lc_engine_list()}
+        out = {}
+        for pl, sel in places.items():
+            if pl not in ("kiwoom", "kis", "ai", "strength"):
+                continue
+            sel = [x for x in (sel or []) if isinstance(x, str)]
+            rec, info = SR.recommend(pl, sel, engines=names, ev=ev)
+            se = []
+            for e in sel:
+                a_ = ev[0].get(e)
+                se.append({"engine": e, "score": round(a_["score"] * 100) if a_ else None,
+                           "cagr": round(a_["cagr"], 1) if a_ and a_["cagr"] is not None else None})
+            out[pl] = {"recos": rec, "selected": se}
+        return jsonify({"ok": True, "places": out, "info": ev[1], "min_score": round(SR.MIN_SCORE * 100)})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": f"{type(e).__name__}: {str(e)[:200]}"})
+
+
 @app.route("/api/pbt/jobs")
 def api_pbt_jobs():
     """지난 기간 백테스트 기록(최신순) — 요약만. 전체 결과는 /api/pbt/status?job= 로 연다. (2026-10-19)"""
@@ -5173,7 +5220,8 @@ function lcRender(){
         <tbody>${rows}</tbody></table>
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
         ${A.strategies.length<L.max_strategies?`<button class="runbtn" onclick="lcAdd('${a}')">+ 전략 추가</button>`:`<span style="font-size:11px;color:#64748b">전략은 최대 ${L.max_strategies}개</span>`}
-        <span style="font-size:11px;color:#64748b">손절: ${_lcEsc(stopSem)} · 익절: ${_lcEsc(takeSem)} · 보유일은 전략 정의대로</span></div></div>`;
+        <span style="font-size:11px;color:#64748b">손절: ${_lcEsc(stopSem)} · 익절: ${_lcEsc(takeSem)} · 보유일은 전략 정의대로</span></div>
+      <div class="reco-box" data-place="${a}" style="margin-top:8px">${_recoHtml[a]||''}</div></div>`;
   };
   const hist=(L.history||[]).slice(0,5).map(h=>`<div>· <b>${_lcEsc(h.time)}</b> ${_lcEsc((h.changes||[]).join(' / ')||'변경 없음')}</div>`).join('');
   const html=`<div style="font-size:12px;color:#94a3b8;margin-bottom:8px">
@@ -5191,7 +5239,7 @@ function lcRender(){
       <div style="font-size:12px;color:#cbd5e1;margin-top:4px;line-height:1.7">${hist||'<span style="color:#64748b">아직 없음</span>'}</div></details>
     <div style="font-size:11px;color:#64748b;margin-top:6px">빠진 전략으로 이미 산 종목은 원래 보유일·손절·익절대로 만기까지 갑니다 · 거래일 08:30~15:40 은 잠금 · 바꿀 때 두 번 확인합니다 · 백테스트 탭 '기간 백테스트'로 먼저 확인해 보세요</div>`;
   _LC_BOX.forEach(id=>setHtml(id,html.replace('id="lc-msg"',`id="lc-msg-${id}"`)));
-  ovRefresh();
+  ovRefresh(); recoRefresh();
 }
 function _lcMsg(h){ _LC_BOX.forEach(id=>setHtml('lc-msg-'+id,h)); }
 function lcSet(a,i,k,v){
@@ -5285,7 +5333,8 @@ function vcRender(){
         <tbody>${rows}</tbody></table>
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
         ${P.strategies.length<V.max_strategies?`<button class="runbtn" onclick="vcAdd('${p}')">+ 전략 추가</button>`:`<span style="font-size:11px;color:#64748b">전략은 최대 ${V.max_strategies}개</span>`}
-        <span style="font-size:11px;color:#64748b">순서는 표시용 — 같은 날 후보는 ${isAI?'AI 점수':'강도'} 높은 순으로 담고, 전략마다 슬롯 수까지</span></div></div>`;
+        <span style="font-size:11px;color:#64748b">순서는 표시용 — 같은 날 후보는 ${isAI?'AI 점수':'강도'} 높은 순으로 담고, 전략마다 슬롯 수까지</span></div>
+      <div class="reco-box" data-place="${p}" style="margin-top:8px">${_recoHtml[p]||''}</div></div>`;
   };
   const now=V.active, pend=V.pending;
   const nowTxt=!now?`종전 규칙 — ${_lcEsc(V.legacy_now)}`:now.legacy?`종전 규칙 — ${_lcEsc(now.desc)}`:`${_vcD(now.effective)} 신호부터 적용 중인 설정(저장 ${_lcEsc(now.saved||'')})`;
@@ -5303,10 +5352,68 @@ function vcRender(){
     <details style="margin-top:8px"><summary style="cursor:pointer;font-size:12px;color:#94a3b8">설정 이력(적용 신호일별)</summary>
       <div style="font-size:12px;color:#cbd5e1;margin-top:4px;line-height:1.7">${hist||'<span style="color:#64748b">아직 없음 — 지금은 종전 규칙</span>'}</div></details>
     <div style="font-size:11px;color:#64748b;margin-top:6px">가상매매는 주문이 없는 장부 시뮬입니다(신호일 종가 진입·왕복 0.33%) · 실제 모의계좌 설정은 🏦 모의계좌 탭 · AI 점수 = 개선 AI(§85, 같은 전략·같은 달 안 수익 순위 학습, 0~10·5=보통) — AI 모델에 없는 전략은 점수가 없어 면제가 아니면 안 삼(저장 후 'AI 학습' 또는 일요일 자동 학습으로 들어감)</div>`);
-  ovRefresh();
+  ovRefresh(); recoRefresh();
 }
 // ══ 2026-10-23 전략 겹침 경고(§72) — 모의계좌·가상매매 편집 중인 값으로 바로 점검(서버 표: db/strategy_overlap.json) ══
 let _ovT=null; const _ovHtml={lc:'',vc:''};
+// ══ 2026-10-30 §86 전략 추천 — 지금까지 돌린 백테스트 종합(기간 백테스트 기록 전부 + 주간 전체) · 편집 중인 값 기준 ══
+let _recoT=null; const _recoHtml={};
+function recoRefresh(){ clearTimeout(_recoT); _recoT=setTimeout(_recoRun,400); }
+async function _recoRun(){
+  const places={};
+  if(typeof _lcDraft!=='undefined'&&_lcDraft){ ['kiwoom','kis'].forEach(a=>{ if(_lcDraft[a]) places[a]=_lcDraft[a].strategies.map(s=>s.engine); }); }
+  if(typeof _vcDraft!=='undefined'&&_vcDraft){ ['ai','strength'].forEach(p=>{ if(_vcDraft[p]) places[p]=_vcDraft[p].strategies.map(s=>s.engine); }); }
+  if(!Object.keys(places).length) return;
+  let d; try{ d=await fetch('/api/strategy_reco?places='+encodeURIComponent(JSON.stringify(places))).then(r=>r.json()); }catch(e){ return; }
+  Object.keys(places).forEach(pl=>{
+    let h;
+    if(!d||!d.ok){ h=`<div style="font-size:12px;color:#64748b">추천을 만들지 못했습니다${d&&d.msg?' — '+_lcEsc(d.msg):''}</div>`; }
+    else{
+      const P=(d.places||{})[pl]||{recos:[],selected:[]}, I=d.info||{};
+      const isLc=pl==='kiwoom'||pl==='kis';
+      const sg=v=>v==null?'-':((v>=0?'+':'')+Number(v).toFixed(1));
+      const rows=(P.recos||[]).map(r=>{
+        const pre=JSON.stringify(r.best?{sv:r.best.sv,th:r.best.th,stop:r.best.stop,take:r.best.take}:{}).replace(/"/g,'&quot;');
+        const warn=[...(r.overlap||[]).map(o=>`⚠ ${_lcEsc(o.engine)} 와 같은 날 같은 종목 ${o.same}%`),
+                    ...(r.used_elsewhere||[]).map(u=>`ℹ ${_lcEsc(u.label)}에서 사용 중`)];
+        const aiTxt=(pl==='ai'||pl==='strength')&&r.ai?` · AI 고르기 효과 ${sg(r.ai.ai)}%p(v2 ${sg(r.ai.v2)})`:'';
+        const aiMiss=pl==='ai'&&!r.in_ai_model?' · <span style="color:#fbbf24">AI 모델에 없음(추가해 저장하면 학습)</span>':'';
+        return `<tr><td style="font-weight:600">${_lcEsc(r.engine)}</td>
+          <td class="r" style="font-weight:700;color:${r.score>=80?'#10b981':'#93c5fd'}">${r.score}</td>
+          <td style="font-size:11px;color:#cbd5e1">CAGR ${sg(r.cagr)}% · MDD ${r.mdd==null?'-':r.mdd+'%'} · 해 플러스 ${r.pos}% · 근거 ${r.n}건${aiTxt}${aiMiss}
+            ${r.best?`<div style="color:#38bdf8">권장: ${_lcEsc(r.best.text)} (점수 ${r.best.score}, CAGR ${sg(r.best.cagr)}%, ${r.best.n}회)</div>`:''}
+            ${warn.length?`<div style="color:#fcd34d">${warn.join(' · ')}</div>`:''}</td>
+          <td><button class="runbtn" style="padding:0 8px" title="편집 중인 초안에 넣기(권장 설정 포함) — 저장은 위 '변경 확인 후 저장'(두 번 확인)" onclick="${isLc?'lcAddReco':'vcAddReco'}('${pl}','${_lcEsc(r.engine)}',this.dataset.pre)" data-pre="${pre}">+ 추가</button></td></tr>`;}).join('');
+      const selTxt=(P.selected||[]).map(x=>`${_lcEsc(x.engine)} ${x.score==null?'-':x.score}${x.score!=null&&(x.score<50||(x.cagr!=null&&x.cagr<0))?'<span style="color:#f87171">(약함)</span>':''}`).join(' · ');
+      h=`<details ${rows?'open':''} style="background:rgba(56,189,248,.05);border:1px solid #1e3a5f;border-radius:6px;padding:5px 8px">
+        <summary style="cursor:pointer;font-size:12px;color:#93c5fd"><b>💡 추천 전략</b> — 안 고른 전략 중 백테스트 종합 점수 ${d.min_score}↑·CAGR+·해 절반 이상 플러스 ${rows?((P.recos||[]).length+'개'):'— 지금은 조건을 넘는 전략 없음'}</summary>
+        ${rows?`<table style="font-size:12px;width:100%;margin-top:4px"><thead><tr><th>전략</th><th class="r" title="0~100, 50=보통. 기록마다 그 실험 안 순위(CAGR 35%·샤프 25%·MDD 20%·해마다 플러스 20%)를 기간·최근성으로 가중 평균">점수</th><th>근거</th><th></th></tr></thead><tbody>${rows}</tbody></table>`:''}
+        <div style="font-size:11px;color:#64748b;margin-top:4px">지금 고른 전략 점수: ${selTxt||'-'}<br>근거: 기간 백테스트 ${I.n_jobs||0}회 + 주간 전체(${_lcEsc(I.full||'없음')}) · 최근·긴 기간일수록 무게↑, 10-24 전 계산 규칙 결과는 절반 · 과거 성적 순위라 운이 섞입니다(검토할 후보이지 보증 아님)</div></details>`;
+    }
+    _recoHtml[pl]=h;
+    document.querySelectorAll(`.reco-box[data-place="${pl}"]`).forEach(el=>{ el.innerHTML=h; });
+  });
+}
+function _recoPre(pre){ try{ return JSON.parse(pre||'{}'); }catch(e){ return {}; } }
+function lcAddReco(a,engine,pre){
+  const A=_lcDraft[a], S=A.strategies, L=_lc;
+  if(S.some(s=>s.engine===engine)){ alert('이미 들어 있습니다'); return; }
+  if(S.length>=L.max_strategies){ alert(`전략은 최대 ${L.max_strategies}개 — 하나를 빼고 추가하세요`); return; }
+  const e=_lcEng(engine), P=_recoPre(pre);
+  const th=(P.th!=null&&P.sv===(A.strength_version||'v2'))?P.th:null;   // 계좌 강도 방식과 같은 실험일 때만 기준을 옮김
+  S.push({engine:engine,slots:1,exempt:false,stop:P.stop??null,take:P.take??null,min_strength:th,holding:e.holding});
+  lcRender(); _lcMsg(`<span style="color:#38bdf8">${_lcEsc(engine)} 를 초안에 넣었습니다 — 슬롯 수를 맞추고 '변경 확인 후 저장'</span>`);
+}
+function vcAddReco(p,engine,pre){
+  const Pf=_vcDraft[p], S=Pf.strategies, V=_vc;
+  if(S.some(s=>s.engine===engine)){ alert('이미 들어 있습니다'); return; }
+  if(S.length>=V.max_strategies){ alert(`전략은 최대 ${V.max_strategies}개 — 하나를 빼고 추가하세요`); return; }
+  const e=_vcEng(engine), P=_recoPre(pre);
+  const want=p==='ai'?'ai':(Pf.strength_version||'v2');
+  const th=(P.th!=null&&P.sv===want)?P.th:null;
+  S.push({engine:engine,slots:1,exempt:false,stop:P.stop??null,take:P.take??null,min_score:th,holding:e.holding});
+  vcRender(); setHtml('vc-msg',`<span style="color:#38bdf8">${_lcEsc(engine)} 를 초안에 넣었습니다 — 슬롯 수를 맞추고 '변경 확인 후 저장'</span>`);
+}
 function ovRefresh(){ clearTimeout(_ovT); _ovT=setTimeout(_ovRun,250); }
 async function _ovRun(){
   const places={};

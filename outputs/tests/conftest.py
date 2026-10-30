@@ -36,6 +36,7 @@ os.environ["LIVE_CONFIG_PATH"] = os.path.join(_tempfile.mkdtemp(prefix="lc_test_
 os.environ["VIRTUAL_CONFIG_PATH"] = os.path.join(_tempfile.mkdtemp(prefix="vc_test_"), "virtual_config.json")
 os.environ["NOTIFY_ONCE_PATH"] = os.path.join(_tempfile.mkdtemp(prefix="no_test_"), "notify_once.json")   # [2026-10-30]
 os.environ["STALE_SKIP_PATH"] = os.path.join(_tempfile.mkdtemp(prefix="ss_test_"), "stale_skip.json")    # [2026-10-30 §81]
+os.environ["PBT_NO_LEARN"] = "1"      # [2026-10-30 §86] 테스트 백테스트가 끝날 때 진짜 AI 학습 프로세스를 띄우지 않게
 
 _sent = []
 
