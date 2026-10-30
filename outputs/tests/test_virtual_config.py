@@ -31,8 +31,9 @@ def test_effective_date_rules():
 
 def test_validate():
     assert VC.validate(_ports()) == []
-    bad = _ports(ai_min=1.5)
-    assert any("0~1" in e for e in VC.validate(bad))
+    assert VC.validate(_ports(ai_min=5.5)) == [], "[§85] AI 기준도 0~10(개선 AI 점수)"
+    bad = _ports(ai_min=10.5)
+    assert any("0~10" in e for e in VC.validate(bad))
     rows = [{"engine": "gc_for3d", "slots": 9, "exempt": False, "stop": None, "take": None, "holding": 15}]
     assert any("슬롯 합" in e for e in VC.validate(_ports(ai_rows=rows)))
     assert any("알 수 없는" in e for e in VC.validate(_ports(), engine_names={"x"}))

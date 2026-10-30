@@ -98,7 +98,8 @@ def test_wiring_logger_pipeline_and_api():
     bat = open(os.path.join(OUTPUTS, "run_ai_pipeline.bat"), "rb").read().decode("ascii")
     assert "strength_model.py --train" in bat
     src = open(os.path.join(OUTPUTS, "integrated_dashboard_server.py"), encoding="utf-8").read()
-    assert 'id="pbt-sver"' in src and "lcSetAcc('${a}','strength_version'" in src and '"--strength-version", "v2"' in src
+    assert 'id="pbt-sver"' in src and "lcSetAcc('${a}','strength_version'" in src
+    assert 'if strength and sv in ("v2", "ai"):' in src and '["--strength-version", sv]' in src   # [§85] v2·개선 AI 그대로 넘김
     rg = open(os.path.join(OUTPUTS, "regen_signals.py"), encoding="utf-8").read()
     assert '"--missing-only"' in rg
 

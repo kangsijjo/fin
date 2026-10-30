@@ -571,12 +571,13 @@ def run_job(job, start, end, names, luck, strength=None, stop=None, take=None, e
     # 종료일에 미청산이면 그날 종가로 평가(자본곡선은 종료일에서 끝남).
     i1 = cal.index(win[-1])
     train_tables = {}
-    if strength and strength_version == "v2":
+    if strength and strength_version in ("v2", "ai"):
         # 강도 v2: 전략마다 '자기 과거 매매' 학습 표본이 필요 — 주간 학습 저장분(db/strength_v2/*_train.pkl)을 쓰고,
         # 없으면 전체 기간으로 지금 만든다(잘라내기 전 df). 각 해 Y 는 Y 이전 매매로만 학습(워크포워드).
+        # [§85] 개선 AI 도 같은 학습표(+ 저장된 다른 전략 학습표 전부)로 해마다 풀링 학습한다.
         import strength_model as SM
         for n in names:
-            state["current"] = f"강도 v2 학습 표본 준비: {n}"
+            state["current"] = f"강도 {strength_version} 학습 표본 준비: {n}"
             _write(job, state)
             try:
                 p = SM.train_path(n)
@@ -639,6 +640,21 @@ def run_job(job, start, end, names, luck, strength=None, stop=None, take=None, e
                     scores[pos:pos + k], inf = SM.walk_forward(train_tables.get(n), Xn, yrs)
                     info[n] = inf
                     pos += k
+            elif strength_version == "ai":
+                import ai_model as AIM
+                state["current"] = "개선 AI 해마다 학습(처음엔 수 분 — 같은 표본이면 저장분 사용)"
+                _write(job, state)
+                X = SB.trade_features(df, allt, log=print)
+                T_all = AIM.load_tables(extra={n: t for n, t in train_tables.items() if t is not None and len(t)})
+                scores, info, pos = np.full(len(allt), np.nan), {}, 0
+                for n in kept:
+                    k = len(kept[n])
+                    Xn = X.iloc[pos:pos + k].reset_index(drop=True)
+                    yrs = [str(t.entry_date)[:4] for t in kept[n]]
+                    scores[pos:pos + k], inf = AIM.walk_forward(T_all, Xn, yrs, n)
+                    info[n] = inf
+                    pos += k
+                del T_all
             else:
                 scores, info = SB.score_trades(df, allt, log=print)
         except Exception as e:
@@ -718,7 +734,8 @@ def main():
     ap.add_argument("--stop", type=float, default=None, help="손절 %(음수, 예 -10)")
     ap.add_argument("--take", type=float, default=None, help="익절 %(양수, 예 20)")
     ap.add_argument("--exit-mode", default="close", choices=sorted(EXIT_MODES))
-    ap.add_argument("--strength-version", default="v2", choices=["v1", "v2"], help="강도 방식 v2(전략별, 기본)/v1(공통·예전)")
+    ap.add_argument("--strength-version", default="v2", choices=["v1", "v2", "ai"],
+                    help="강도 방식 v2(전략별, 기본)/v1(공통·예전)/ai(개선 AI, §85)")
     a = ap.parse_args()
     names = [n.strip() for n in a.names.split(",") if n.strip()]
     if a.check:

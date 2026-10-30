@@ -79,7 +79,8 @@ if "!DOW!"=="5" (
     echo === ai_training weekly v3+v4 === >> "!LOGFILE!"
     !PYEXE! make_trades_history_v3.py >> "!LOGFILE!" 2>&1
     if !ERRORLEVEL! NEQ 0 set "EXITCODE=1"
-    !PYEXE! ai_trainer_v4.py >> "!LOGFILE!" 2>&1
+    REM 2026-10-30 system doc 85: old meta-model ai_trainer_v4 retired - improved AI ai_model.py
+    !PYEXE! ai_model.py --train >> "!LOGFILE!" 2>&1
     if !ERRORLEVEL! NEQ 0 set "EXITCODE=1"
 ) else (
     echo === ai_training skipped - weekly Friday only === >> "!LOGFILE!"

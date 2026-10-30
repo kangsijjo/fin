@@ -189,13 +189,14 @@ def main():
     lab = glob.glob(os.path.join(BASE, "results", f"strategy_lab_{TODAY}.csv"))
     chk(bool(lab), "오늘 strategy_lab 산출", "있음" if lab else "results/strategy_lab_오늘.csv 없음")
 
-    # 5) AI 모델 신선도 (meta_model 만 점검 — 섹터모델은 라이브 미사용이라 학습 중단, 점검 제외)
-    _meta = os.path.join(BASE, "ai_data", "meta_model_v4.json")
+    # 5) AI 모델 신선도 — [§85] 개선 AI(db/ai_model/meta.json, 일요일 AI 파이프라인 [9]).
+    #    옛 meta_model_v4 는 학습을 멈췄으므로 점검하지 않는다(멈춘 파일을 '낡음'으로 매일 경고하지 않게).
+    _meta = os.path.join(BASE, "db", "ai_model", "meta.json")
     if os.path.exists(_meta):
         _age = _mtime_min(_meta) / 1440.0
-        chk(_age <= 10, "meta_model 학습", f"{int(_age)}일 전")
+        chk(_age <= 10, "개선 AI 학습", f"{int(_age)}일 전")
     else:
-        chk(False, "meta_model", "meta_model_v4.json 없음")
+        chk(False, "개선 AI", "db/ai_model/meta.json 없음 — python ai_model.py --train")
 
 
 

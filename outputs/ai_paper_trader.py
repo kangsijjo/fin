@@ -5,7 +5,8 @@ ai_paper_trader.py — AI/강도 '가상매매 실행' (순수 장부 시뮬 —
 매번 결정론적으로 재계산(strategy_lab 방식 — 상태파일 없음 = 드리프트/복구 걱정 없음).
 
 두 포트폴리오(각 10슬롯 · 시작 1,000만 · 2026-06-30~):
-  ai       : 당일 신호를 ai_prob(meta_model_v4 big-win 확률) 내림차순으로 슬롯 채움 (필터 없음)
+  ai       : 당일 신호를 AI 점수 내림차순으로 슬롯 채움 — [§85] 2026-11-02(ai_model.SINCE) 신호일부터 개선 AI
+             score_ai(0~10, 같은 전략·같은 달 안 수익 순위 학습), 그 전은 옛 ai_prob(meta_model_v4 대박 확률) 기록 그대로
   strength : 동일 신호를 score_ic(IC 강도) 내림차순 + **5.7 미만 스킵**(라이브 키움 매수필터와
              동일 — 슬롯 1순위여도 임계 미만이면 미진입, 2026-07-03 사용자 확인 반영.
              2026-08-09 양 계좌 5.7 (8월 매매정지 실측 후 재조정) — kiwoom/kis MIN_STRENGTH_SCORE 와 동기)
@@ -49,6 +50,10 @@ OUT_JSON = "./db/ai_paper_result.json"
 import live_config as _LC
 STRENGTH_EXEMPT = _LC.all_exempt()
 STRENGTH_LOG = "./db/signal_strength_log.csv"
+try:                                    # [§85] AI 포트가 개선 AI 점수(score_ai)로 바뀌는 신호일
+    from ai_model import SINCE as AI_SINCE
+except Exception:
+    AI_SINCE = "20261102"
 
 
 def load_signals():
@@ -72,9 +77,10 @@ def load_signals():
         sl = pd.read_csv(STRENGTH_LOG, dtype={"code": str})
         sl["signal_date"] = sl["signal_date"].astype(str).str.replace("-", "")
         sl["code"] = sl["code"].astype(str).str.zfill(6)
-        if "score_v2" not in sl.columns:
-            sl["score_v2"] = None
-        sl = sl[["signal_date", "code", "strategy", "score_ic", "ai_prob", "score_v2"]] \
+        for c in ("score_v2", "score_ai"):
+            if c not in sl.columns:
+                sl[c] = None
+        sl = sl[["signal_date", "code", "strategy", "score_ic", "ai_prob", "score_v2", "score_ai"]] \
             .drop_duplicates(["signal_date", "code", "strategy"], keep="last")
         s = s.merge(sl, on=["signal_date", "code", "strategy"], how="left")
     except Exception as e:
@@ -82,8 +88,12 @@ def load_signals():
         s["score_ic"] = None
         s["ai_prob"] = None
         s["score_v2"] = None
-    for c in ("score_ic", "ai_prob", "score_v2"):
+        s["score_ai"] = None
+    for c in ("score_ic", "ai_prob", "score_v2", "score_ai"):
         s[c] = pd.to_numeric(s[c], errors="coerce")
+    # [§85] AI 포트 순위 값: AI_SINCE 신호일부터 개선 AI 점수(0~10), 그 전은 옛 AI 확률(ai_prob) 그대로 — 과거 장부가 안 바뀐다.
+    #   (과거 신호를 새 모델로 다시 채점하면 그 시기 매매가 학습에 들어 있어 미래를 본 셈이 된다)
+    s["ai_score"] = s["score_ai"].where(s["signal_date"] >= AI_SINCE, s["ai_prob"])
     return s
 
 
@@ -119,7 +129,7 @@ def _port_cfg(history, port, d):
     e = VC.entry_for(history, d)
     if e is None or e.get("legacy"):
         return None, e
-    return e["portfolios"][port], None
+    return dict(e["portfolios"][port], _effective=e.get("effective", "")), None
 
 
 def simulate(sig, cal_all, cal, closes, rank_col, min_score=None, history=None, port=None, legacy_timeline=None):
@@ -307,16 +317,20 @@ def _enter_configured(g, pc, port, d, cal_all, positions, cash_box):
     if c.empty:
         return
     if port == "ai":
-        c["_rk"] = c["ai_prob"]
+        c["_rk"] = c["ai_score"] if "ai_score" in c.columns else c["ai_prob"]   # [§85] AI_SINCE 부터 개선 AI 점수(0~10), 그 전 옛 AI 확률
     elif pc.get("strength_version", "v2") == "v2":      # [§82] 기본 v2
         c["_rk"] = c["score_v2"].where(c["score_v2"].notna(), c["score_ic"])   # v2 모델 없으면 v1 점수(라이브와 같음)
     else:
         c["_rk"] = c["score_ic"]
     ex = c["strategy"].map(lambda x: bool(rows[x].get("exempt")))
     thr = pc.get("min_score")
+    # [§85] AI_SINCE 전에 저장한 AI 기준은 옛 확률 척도(0~1) — 새 점수(0~10)에 대면 뜻이 달라지므로 그 설정이 유지되는 동안은 기준 없음
+    stale_ai = port == "ai" and d >= AI_SINCE and str(pc.get("_effective", "")) < AI_SINCE
+    if stale_ai:
+        thr = None
     # [§71] 전략별 기준(행 min_score) — 비우면 포트폴리오 기준, 그것도 비우면 기준 없음
     th = pd.to_numeric(c["strategy"].map(
-        lambda x: rows[x].get("min_score") if rows[x].get("min_score") is not None else thr), errors="coerce")
+        lambda x: thr if stale_ai or rows[x].get("min_score") is None else rows[x].get("min_score")), errors="coerce")
     above = c["_rk"].notna() & (th.isna() | (c["_rk"] >= th.fillna(-1e9)))
     if port == "ai":        # AI 확률이 없으면 비교 불가 → 제외(면제 전략만 통과)
         ok = (c["_rk"].notna() & above) | ex
@@ -387,7 +401,7 @@ def main():
         "start": START, "capital0": CAPITAL0, "slots": SLOTS, "cost_pct": COST_PCT,
         "config": _config_view(hist),
         "portfolios": {
-            "ai":       simulate(sig, cal_all, cal, closes, "ai_prob", history=hist, port="ai", legacy_timeline=tl),
+            "ai":       simulate(sig, cal_all, cal, closes, "ai_score", history=hist, port="ai", legacy_timeline=tl),
             # min_score 는 kiwoom_trader.MIN_STRENGTH_SCORE 와 동기 유지(라이브 룰 쌍둥이) — 설정 이력이 생기면 '종전 규칙' 구간만
             "strength": simulate(sig, cal_all, cal, closes, "score_ic",
                                  min_score=_LC.account("kiwoom")["min_strength"], history=hist, port="strength",

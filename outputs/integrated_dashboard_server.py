@@ -1359,7 +1359,7 @@ def get_strength(limit=300):
     if df.empty:
         return out
     df["code"] = df["code"].astype(str).str.zfill(6)
-    for c in ("score_ic", "score_tv", "slot_rank", "entry_close", "n_factors", "ai_prob"):
+    for c in ("score_ic", "score_tv", "slot_rank", "entry_close", "n_factors", "ai_prob", "score_ai"):
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
@@ -1421,25 +1421,33 @@ def get_strength(limit=300):
                         })
                 out["virtual"] = {"done_total": int(len(j)), "buckets": buckets}
 
-            # AI 가상매매 검증 — ai_prob(모델 big-win 확률) 구간별 실현 성과.
-            # ai_prob 는 차원버그 수정(6/29) 후 6/30부터 기록 → 첫 완료 표본은 ~7/7 이후 누적.
-            if "ai_prob" in df.columns:
-                sa = df[pd.to_numeric(df["ai_prob"], errors="coerce").notna()].copy()
-                sa["ai_prob"] = pd.to_numeric(sa["ai_prob"], errors="coerce")
+            # AI 가상매매 검증 — AI 점수 구간별 실현 성과.
+            # [§85] 개선 AI(score_ai, 11-02 신호부터) 완료 표본이 9건 이상이면 그것으로, 그 전엔 옛 AI 확률(ai_prob)로.
+            _aic = "ai_prob"
+            if "score_ai" in df.columns:
+                _sa = df[df["score_ai"].notna()].copy()
+                _sa["signal_date"] = _sa["signal_date"].astype(str).str.replace("-", "")
+                if len(_sa.merge(pa[["signal_date", "code", "net_pct"]], on=["signal_date", "code"],
+                                 how="inner").dropna(subset=["net_pct"])) >= 9:
+                    _aic = "score_ai"
+            if _aic in df.columns:
+                sa = df[pd.to_numeric(df[_aic], errors="coerce").notna()].copy()
+                sa[_aic] = pd.to_numeric(sa[_aic], errors="coerce")
                 sa["signal_date"] = sa["signal_date"].astype(str).str.replace("-", "")
                 ja = sa.merge(pa[["signal_date", "code", "net_pct"]],
                               on=["signal_date", "code"], how="inner").dropna(subset=["net_pct"])
-                out["virtual_ai"] = {"done_total": int(len(ja)),
-                                     "logged_total": int(len(sa)), "buckets": []}
+                out["virtual_ai"] = {"done_total": int(len(ja)), "metric": _aic,
+                                     "logged_total": int(len(sa)), "buckets": [],
+                                     "new_logged": int(df["score_ai"].notna().sum()) if "score_ai" in df.columns else 0}
                 if len(ja) >= 9:   # 3분위 최소 표본
                     try:
-                        ja["q"] = pd.qcut(ja["ai_prob"], 3, labels=False, duplicates="drop")
+                        ja["q"] = pd.qcut(ja[_aic], 3, labels=False, duplicates="drop")
                         bks = []
                         for qi, lab in [(2, "상위⅓"), (1, "중위⅓"), (0, "하위⅓")]:
                             g = ja[ja["q"] == qi]
                             if len(g):
                                 bks.append({
-                                    "label": f"{lab} ({g['ai_prob'].min():.2f}~{g['ai_prob'].max():.2f})",
+                                    "label": f"{lab} ({g[_aic].min():.2f}~{g[_aic].max():.2f})",
                                     "n": int(len(g)),
                                     "avg_net": round(float(g["net_pct"].mean()), 2),
                                     "win": round(float((g["net_pct"] > 0).mean() * 100), 1),
@@ -1536,9 +1544,9 @@ def _get_scorer_cached():
 
 # ── 6. AI project status ───────────────────────────────────────────────────────
 def get_ai_registry(limit=24):
-    """ai_model_registry.csv (ai_trainer_v4 가 학습마다 1행 기록) → 모델 진화 표(최신순).
-    버전별 선택 지표그룹·test AUC·사이징 스프레드·CV best 를 보여줘 '스스로 발전'을 가시화."""
-    out = {"rows": [], "total": 0}
+    """ai_model_registry.csv (옛 ai_trainer_v4 가 학습마다 1행 기록 — §85 로 학습 중단, 기록 보존) → 표(최신순).
+    rows_new = 개선 AI(ai_model) 학습 기록."""
+    out = {"rows": [], "total": 0, "rows_new": _ai_new_registry(limit)}
     path = BASE / "ai_data" / "ai_model_registry.csv"
     if not path.exists():
         return out
@@ -1552,6 +1560,45 @@ def get_ai_registry(limit=24):
     out["total"] = int(len(df))
     out["rows"] = df.tail(limit).iloc[::-1].fillna("").to_dict("records")   # 최신순
     return out
+
+
+def _ai_new_registry(limit=24):
+    """[§85] 개선 AI 학습 기록(db/ai_model/registry.csv) — 최신순."""
+    p = BASE / "db" / "ai_model" / "registry.csv"
+    if not p.exists():
+        return []
+    try:
+        return pd.read_csv(p, encoding="utf-8-sig").tail(limit).iloc[::-1].fillna("").to_dict("records")
+    except Exception:
+        return []
+
+
+def get_ai_model_info():
+    """[§85] 개선 AI 모델 요약 — 학습일·표본·전략별 검증·지표 중요도(분위표 ref 는 빼고)."""
+    try:
+        if str(BASE) not in sys.path:
+            sys.path.insert(0, str(BASE))
+        import ai_model as AIM
+        m = AIM.meta_info()
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {str(e)[:120]}"}
+    if not m:
+        return {"missing": True}
+    try:
+        from factor_scorer import FEATURE_META
+    except Exception:
+        FEATURE_META = {}
+    imp = sorted(((k, v) for k, v in (m.get("importance") or {}).items() if not k.startswith("e_")), key=lambda kv: -kv[1])
+    tot = sum(v for _, v in imp) or 1.0
+    age = None
+    try:
+        age = (datetime.now() - datetime.strptime(m.get("trained", ""), "%Y-%m-%d %H:%M")).days
+    except Exception:
+        pass
+    return {"trained": m.get("trained"), "age_days": age, "data_max": m.get("data_max"), "n_total": m.get("n_total"),
+            "engines": m.get("engines") or [], "n": m.get("n") or {}, "validation": m.get("validation"),
+            "since": getattr(AIM, "SINCE", None),
+            "importance": [{"feat": k, "label": (FEATURE_META.get(k) or (k,))[0], "share": round(v / tot * 100, 1)} for k, v in imp]}
 
 
 def get_ai_status():
@@ -1583,14 +1630,9 @@ def get_ai_status():
     if FEAT_CSV.exists():
         try: model_info["feature_count"] = int(len(pd.read_csv(FEAT_CSV)))
         except Exception: pass
-    _sch = _latest_log("collect_*.log")
-    if _sch.exists():
-        try:
-            log_txt = _decode_log(_sch.read_bytes()[-30000:], _sch)   # 인코딩 자동판정(2026-07-21)
-            auc_m = re.findall(r"AUC[:\s=]+([0-9]+\.[0-9]+)", log_txt)
-            if auc_m: model_info["auc"] = float(auc_m[-1])
-        except Exception: pass
+    # [§85] 옛 'AUC' 칸(수집 로그 정규식)은 뺐다 — 옛 모델 기록은 레지스트리 표에 test AUC 로 남아 있다.
     out["model"] = model_info
+    out["ai_model"] = get_ai_model_info()          # [§85] 개선 AI
 
     ic_info = {}
     try:
@@ -1923,6 +1965,7 @@ def get_candidates():
             out["new_signals"] = [
                 {"code": str(r["code"]).zfill(6),
                  "name": str(r.get("name", "")),
+                 "strategy": str(r.get("strategy", "") or ""),
                  "entry_price": float(r.get("entry_price_close", 0) or 0),
                  "target_exit": str(r.get("target_exit_date", "")),
                  "signal_date": str(r.get("signal_date", ""))}
@@ -1937,6 +1980,21 @@ def get_candidates():
                     s["ai_bigwin"] = ai.get("bigwin_pct")
                     s["ai_pos"] = ai.get("top_pos", [])
                     s["ai_neg"] = ai.get("top_neg", [])
+            except Exception:
+                pass
+            # [§85] 개선 AI 점수(강도 기록 score_ai, 0~10) — 있으면 이것을 표시(옛 대박확률은 학습 중단된 모델)
+            try:
+                if out["new_signals"] and STRENGTH_LOG_CSV.exists():
+                    _sl = pd.read_csv(STRENGTH_LOG_CSV, dtype={"code": str}, encoding="utf-8-sig",
+                                      usecols=lambda c: c in ("signal_date", "code", "strategy", "score_ai"))
+                    if "score_ai" in _sl.columns:
+                        _sl = _sl[_sl["signal_date"].astype(str).str.replace("-", "") == today]
+                        _sl["code"] = _sl["code"].astype(str).str.zfill(6)
+                        _mp = {(c, st): v for c, st, v in zip(_sl["code"], _sl["strategy"].astype(str),
+                                                              pd.to_numeric(_sl["score_ai"], errors="coerce")) if v == v}
+                        for s_ in out["new_signals"]:
+                            v = _mp.get((s_["code"], s_["strategy"]))
+                            s_["score_ai"] = round(float(v), 2) if v is not None else None
             except Exception:
                 pass
         except Exception as e:
@@ -2206,7 +2264,7 @@ _RUN_TASKS = {
     "backfill":      ["powershell", "-ExecutionPolicy", "Bypass", "-File",
                       str(BASE.parent / "Stock_AI_Project" / "run_backfill.ps1")],   # Stock_AI 수집기 일괄(자체 cwd/venv)
     "ai_dataset":    [_VENV_PYTHON, str(BASE / "make_trades_history_v3.py")],        # AI 학습 데이터셋 생성
-    "ai_train":      [_VENV_PYTHON, str(BASE / "ai_trainer_v4.py")],                 # meta_model_v4 재학습
+    "ai_train":      [_VENV_PYTHON, str(BASE / "ai_model.py"), "--train"],           # [§85] 개선 AI 재학습(옛 meta_model_v4 는 학습 중단)
     "ai_pipeline":   ["cmd", "/c", str(BASE / "run_ai_pipeline.bat"), "auto"],       # 주1회 경량 AI 갱신(수집→데이터셋→학습, 게이팅)
     "strategy_lab":  [_VENV_PYTHON, str(BASE / "strategy_lab.py")],                  # 전략 랩 forward 집계
     "strategy_full": [_VENV_PYTHON, str(BASE / "strategy_engine.py"), "--full"],     # 전 전략 과거 백테스트(진짜 지표, 20~30분)
@@ -2401,13 +2459,13 @@ def _pbt_parse(req):
     if mode not in ("close", "intraday"):
         return None, "판정 방식은 close / intraday"
     sv = str(b.get("strength_version") or "v2")
-    if sv not in ("v1", "v2"):
-        return None, "강도 방식은 v1 / v2"
+    if sv not in ("v1", "v2", "ai"):
+        return None, "강도 방식은 v1 / v2 / ai"
     ex = (["--stop", f"{stop:g}"] if stop is not None else []) + (["--take", f"{take:g}"] if take is not None else [])
     if ex:
         ex += ["--exit-mode", mode]
-    if strength and sv == "v2":
-        ex += ["--strength-version", "v2"]
+    if strength and sv in ("v2", "ai"):          # [§85] ai = 개선 AI(해마다 풀링 학습)
+        ex += ["--strength-version", sv]
     elif strength:                                   # [§82] 기본이 v2 가 됐으니 v1 은 명시해서 넘긴다
         ex += ["--strength-version", "v1"]
     return (start, end, names, bool(b.get("luck")), strength, ex), None
@@ -2781,6 +2839,13 @@ def api_virtual_config():
                 v2[f.stem] = {"trained": m.get("trained"), "n": m.get("n"), "n_ic": len(m.get("ic", {}))}
     except Exception:
         pass
+    ai_eng, ai_tr = [], None
+    try:                                  # [§85] 개선 AI 모델에 들어 있는 전략(없는 전략은 AI 점수 없음)
+        import ai_model as AIM
+        _am = AIM.meta_info() or {}
+        ai_eng, ai_tr = list(_am.get("engines") or []), _am.get("trained")
+    except Exception:
+        pass
     view = lambda e: None if not e else {"effective": e["effective"], "saved": e.get("saved"), "legacy": bool(e.get("legacy")),
                                          "desc": VC.describe_legacy(e) if e.get("legacy") else "",
                                          "portfolios": e.get("portfolios")}
@@ -2791,6 +2856,7 @@ def api_virtual_config():
     return jsonify({"ok": True, "active": view(active), "pending": view(pending), "draft": draft,
                     "fallback": cfg.get("_fallback"), "engines": _lc_engine_list(),
                     "live_names": sorted(_vc_live_names()), "aliases": LC.ALIAS, "v2_models": v2,
+                    "ai_engines": ai_eng, "ai_trained": ai_tr,
                     "effective": VC.effective_date(), "slots_total": VC.SLOTS_TOTAL,
                     "max_strategies": VC.MAX_STRATEGIES, "labels": VC.LABEL, "history": hist_v,
                     "legacy_now": VC.describe_legacy(VC.legacy_snapshot()) if not hist else ""})
@@ -2855,6 +2921,18 @@ def api_virtual_config_save():
                   stdout=open(BASE / "logs" / "run_strength_v2_train.log", "w", encoding="utf-8", errors="replace"),
                   stderr=_sp.STDOUT, creationflags=_NO_WIN)
         msg += f" · 강도 v2 모델 학습 시작({', '.join(miss)})"
+    try:      # [§85] AI 포트 전략 중 개선 AI 모델에 없는 것 → 재학습(학습표가 없으면 만들어서, 수 분)
+        import ai_model as AIM
+        _ae = set((AIM.meta_info() or {}).get("engines") or [])
+        ai_miss = sorted({s["engine"] for s in new["ai"]["strategies"]} - _ae)
+    except Exception:
+        ai_miss = []
+    if ai_miss:
+        (BASE / "logs").mkdir(exist_ok=True)
+        _sp.Popen([_VENV_PYTHON, str(BASE / "ai_model.py"), "--train"], cwd=str(BASE),
+                  stdout=open(BASE / "logs" / "run_ai_model_train.log", "w", encoding="utf-8", errors="replace"),
+                  stderr=_sp.STDOUT, creationflags=_NO_WIN)
+        msg += f" · 개선 AI 재학습 시작({', '.join(ai_miss)} 포함)"
     try:
         import notifier
         notifier.safe_send("🧪 [AI·강도 가상매매 설정 변경]\n" + ("\n".join("· " + c for c in changes) or "· 변경 없음")
@@ -3209,7 +3287,7 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
     <h2>&#xC624;&#xB298; &#xB9E4;&#xB9E4; &#xD6C4;&#xBCF4;</h2>
     <table><thead><tr>
       <th>&#xC885;&#xBAA9;&#xCF54;&#xB4DC;</th><th>&#xC885;&#xBAA9;&#xBA85;</th><th>&#xC804;&#xB7B5;</th>
-      <th class="r">&#xC2E0;&#xD638;&#xC77C;</th><th class="r">AI&#xC810;&#xC218;</th><th class="r">&#xBC18;&#xB3C4;&#xC288; &#xD655;&#xB960;</th>
+      <th class="r">&#xC2E0;&#xD638;&#xC77C;</th><th class="r">진입가</th><th class="r" title="개선 AI 점수(0~10, 5=그 전략 보통) — 없으면 옛 대박확률(회색 %)">AI 점수</th>
     </tr></thead>
     <tbody id="ov-cand"><tr><td colspan="6" style="color:#8b949e;text-align:center">&#xB370;&#xC774;&#xD130; &#xB85C;&#xB529;&#xC911;...</td></tr></tbody>
     </table>
@@ -3353,7 +3431,7 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
     <div class="stats-row" id="st-virtual"><div style="color:#8b949e;font-size:13px">로딩중...</div></div>
   </div>
   <div class="section">
-    <h2>AI 가상매매 검증 <span style="color:#8b949e;font-size:12px;font-weight:400">&mdash; AI확률(ai_prob, big-win 예측) 분위별 실현 성과. USE_AI=False(매매 미개입) &middot; 기록은 2026-06-30부터(차원버그 수정 후) &middot; 첫 완료 표본 ~07-07 예상</span></h2>
+    <h2>AI 가상매매 검증 <span style="color:#8b949e;font-size:12px;font-weight:400">&mdash; AI 점수 분위별 실현 성과(완료 매매만). 실매매 미개입 &middot; 개선 AI(score_ai, 0~10)는 2026-11-02 신호부터 기록 &mdash; 완료 9건이 쌓이기 전까지는 옛 AI 확률(ai_prob, 학습 중단된 대박 확률 모델)로 표시</span></h2>
     <div class="stats-row" id="st-virtual-ai"><div style="color:#8b949e;font-size:13px">로딩중...</div></div>
   </div>
   <div class="section">
@@ -3376,7 +3454,7 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
     <div style="color:#8b949e;font-size:12px;margin-bottom:8px">강도(IC)=IC가중 통합 팩터점수(0~10, 높을수록 강함) · 거래대금순위=당일 전체순위(1=최대) · 슬롯순위=같은 전략 내 강도 우선순위(1=최강)</div>
     <table><thead><tr id="st-head">
       <th class="r sortable" onclick="sortSt('signal_date')">신호일</th><th class="sortable" onclick="sortSt('account')">계좌</th><th class="sortable" onclick="sortSt('strategy')">전략</th><th class="sortable" onclick="sortSt('name')">종목</th>
-      <th class="r sortable" onclick="sortSt('entry_close')">진입가</th><th class="r sortable" onclick="sortSt('score_ic')">강도(IC)</th><th class="r sortable" onclick="sortSt('ai_prob')">AI확률</th><th class="r sortable" onclick="sortSt('score_tv')">거래대금순위</th><th class="r sortable" onclick="sortSt('slot_rank')">슬롯순위</th><th class="sortable" onclick="sortSt('market_strong')">시장</th>
+      <th class="r sortable" onclick="sortSt('entry_close')">진입가</th><th class="r sortable" onclick="sortSt('score_ic')">강도(IC)</th><th class="r sortable" onclick="sortSt('score_ai')" title="개선 AI 점수(0~10) — 11-02 전 신호는 옛 AI 확률(회색 %)">AI</th><th class="r sortable" onclick="sortSt('score_tv')">거래대금순위</th><th class="r sortable" onclick="sortSt('slot_rank')">슬롯순위</th><th class="sortable" onclick="sortSt('market_strong')">시장</th>
     </tr></thead>
     <tbody id="st-rows"><tr><td colspan="10" style="color:#8b949e;text-align:center">강도 기록 없음 &mdash; 다음 신호생성(18:30) 때 첫 데이터 누적</td></tr></tbody>
     </table>
@@ -3437,8 +3515,8 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
       <span style="flex:1"></span>
       <label style="font-size:13px;color:#cbd5e1"><span class="pbt-tip" data-tip="강도 비교(선택)|쉼표로 여러 값: 예 4, 5, 5.7 → 전략마다 [강도 없음] + [≥4] [≥5] [≥5.7] 줄이 나란히 나옴|강도 줄은 그날 후보를 강도 높은 순으로 담음(모의매매와 같은 규칙) · 0 = 거르지 않고 강도순으로만 담기|강도는 신호마다 그날 데이터로 다시 계산 — 가중치는 해마다 그 이전 매매로만 학습(미래 미사용)|처음 한 번은 수 분, 같은 날 다시 돌리면 저장분 사용">강도 비교</span>
         <input type="text" id="pbt-strength" placeholder="예: 4, 5, 5.7" style="width:110px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"></label>
-      <select id="pbt-sver" title="강도 방식 — v1: 라이브 6전략 공통 가중치(종전) / v2: 전략마다 자기 과거 매매로 학습(§62)" style="background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px;font-size:12px">
-        <option value="v2" selected>강도 v2(전략별)</option><option value="v1">강도 v1(공통·예전 방식)</option></select>
+      <select id="pbt-sver" title="강도 방식 — v1: 라이브 6전략 공통 가중치(종전) / v2: 전략마다 자기 과거 매매로 학습(§62) / 개선 AI: 같은 전략·같은 달 안 수익 순위를 배우는 풀링 모델(§85, 0~10·5=보통, 해마다 그 이전 매매로만 학습)" style="background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px;font-size:12px">
+        <option value="v2" selected>강도 v2(전략별)</option><option value="ai">개선 AI(0~10)</option><option value="v1">강도 v1(공통·예전 방식)</option></select>
       <label style="font-size:13px;color:#cbd5e1"><span class="pbt-tip" data-tip="손절·익절(선택)|비우면 없음(만기에만 팖) · 모든 전략·강도 줄에 같은 규칙|손절은 음수(예 -10), 익절은 양수(예 20) — 진입가(다음날 시가) 기준|판정 '종가 기준' = 그날 종가가 선을 넘으면 다음날 시가에 팖(KIS 모의매매 손절과 같음, 보수적)|'장중 도달' = 그날 저가·고가가 닿으면 그 가격에 팖(키움 익절 지정가와 비슷, 시가부터 넘어 열리면 시가)">손절 %</span>
         <input type="number" id="pbt-stop" placeholder="없음" step="1" min="-50" max="-1" style="width:66px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"></label>
       <label style="font-size:13px;color:#cbd5e1">익절 %
@@ -3521,30 +3599,65 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
 <div id="tab-aimodel" class="tab-content">
   <div id="ai-err-box" style="display:none" class="err-box"></div>
   <div class="section">
-    <h2>&#xBAA8;&#xB378; &#xC815;&#xBCF4; (meta_model_v4)</h2>
+    <h2>개선 AI 모델 <span style="color:#8b949e;font-size:12px;font-weight:400">&mdash; 같은 전략·같은 달 안 '수익 순위'를 배우는 풀링 XGBoost(§85) · 점수 0~10(5 = 그 전략 과거 신호 중 보통) · 쓰는 곳: AI 가상매매 순위(11-02 신호부터)·기간 백테스트 [개선 AI] · 모의계좌 매매에는 아직 안 씀</span></h2>
     <div class="stats-row">
-      <div class="stat"><div class="v" id="ai-date">-</div><div class="l">&#xB9C8;&#xC9C0;&#xB9C9; &#xD559;&#xC2B5;</div></div>
-      <div class="stat"><div class="v" id="ai-age">-</div><div class="l">&#xACBD;&#xACFC;&#xC77C;</div></div>
-      <div class="stat"><div class="v" id="ai-auc">-</div><div class="l">AUC</div></div>
-      <div class="stat"><div class="v" id="ai-fc">-</div><div class="l">&#xD53C;&#xCC98; &#xC218;</div></div>
+      <div class="stat"><div class="v" id="ai-date">-</div><div class="l">마지막 학습</div></div>
+      <div class="stat"><div class="v" id="ai-age">-</div><div class="l">경과일</div></div>
+      <div class="stat"><div class="v" id="ai-n">-</div><div class="l">학습 매매(전략 수)</div></div>
+      <div class="stat" title="워크포워드 검증: 같은 날 후보(3개↑) 중 점수 상위 2개 평균 − 그날 후보 평균, 전략 평균(%p)"><div class="v" id="ai-lift">-</div><div class="l">같은 날 상위 2개 효과 · AI vs 강도 v2</div></div>
+      <div class="stat"><div class="v" id="ai-better">-</div><div class="l">v2 보다 나은 전략 · 해</div></div>
     </div>
+    <div id="ai-note" style="font-size:12px;color:#94a3b8;margin-top:6px"></div>
   </div>
   <div class="section">
-    <h2>모델 진화 <span style="color:#8b949e;font-size:12px;font-weight:400">&mdash; 학습마다 선택된 지표조합·성능 기록(최신순). 매주 AI 파이프라인이 한 줄씩 쌓음. 스프레드%p가 +3 이상 안정되면 사이징 연동 검토</span></h2>
+    <h2>워크포워드 검증 <span style="color:#8b949e;font-size:12px;font-weight:400">&mdash; 해마다 그 이전에 청산이 끝난 매매로만 학습 → 그 해 신호 채점(미래 미사용) · 같은 표본에서 강도 v2 와 비교 · 매주 학습 때 다시 계산</span></h2>
     <table><thead><tr>
-      <th class="r">학습일</th><th>엔진</th><th>선택 지표그룹</th><th class="r">피처</th>
-      <th class="r">test AUC</th><th class="r">스프레드%p</th><th class="r">CV best</th><th class="r">train/test</th>
+      <th>전략</th><th class="r" title="같은 날 후보 중 AI 점수 상위 2개 평균 − 그날 후보 평균">AI 상위 2개</th><th class="r">v2 상위 2개</th><th class="r">차이</th>
+      <th class="r" title="그날 후보 안에서 점수 순위와 수익 순위의 상관(평균)">AI 순위상관</th><th class="r">v2 순위상관</th><th class="r" title="후보 3개 이상인 날 수">날짜 수</th><th class="r">학습 매매</th>
     </tr></thead>
-    <tbody id="ai-reg-rows"><tr><td colspan="8" style="color:#8b949e;text-align:center">아직 기록 없음 &mdash; 다음 AI 학습 때부터 쌓입니다</td></tr></tbody>
+    <tbody id="ai-val-eng"><tr><td colspan="8" style="color:#8b949e;text-align:center">로딩중...</td></tr></tbody>
+    </table>
+    <div id="ai-val-year" style="font-size:12px;color:#cbd5e1;margin-top:8px"></div>
+  </div>
+  <div class="section">
+    <h2>지표 중요도 <span style="color:#8b949e;font-size:12px;font-weight:400">&mdash; 모델이 나눌 때 많이 쓴 지표(이득 기준, 전략 더미 제외). 방향(좋다/나쁘다)은 전략·구간마다 다를 수 있음 · 시장 공통 지표·뉴스는 일부러 뺌</span></h2>
+    <table><thead><tr><th>지표</th><th>설명</th><th class="r">비중</th><th></th></tr></thead>
+    <tbody id="ai-imp"><tr><td colspan="4" style="color:#8b949e">로딩중...</td></tr></tbody>
     </table>
   </div>
   <div class="section">
-    <h2>IC &#xAC00;&#xC911;&#xCE58; (Spearman &#xC815;&#xBCF4;&#xACC4;&#xC218;)</h2>
+    <h2>학습 기록 <span style="color:#8b949e;font-size:12px;font-weight:400">&mdash; 개선 AI 학습마다 한 줄(최신순) · 일요일 AI 파이프라인 [9] 자동 · 수동은 데이터+로그 탭 'AI 학습'</span></h2>
     <table><thead><tr>
-      <th>&#xD53C;&#xCC98;</th><th>&#xC124;&#xBA85;</th><th class="r">IC</th><th>&#xBC14;</th>
+      <th class="r">학습</th><th class="r">데이터 끝</th><th class="r">전략</th><th class="r">학습 매매</th><th class="r">AI 상위 2개</th><th class="r">v2 상위 2개</th><th class="r">AI 순위상관</th><th class="r">전략 · 해 우위</th>
     </tr></thead>
-    <tbody id="ai-ic"><tr><td colspan="4" style="color:#8b949e">&#xB85C;&#xB529;&#xC911;...</td></tr></tbody>
+    <tbody id="ai-reg2-rows"><tr><td colspan="8" style="color:#8b949e;text-align:center">아직 기록 없음</td></tr></tbody>
     </table>
+  </div>
+  <div class="section">
+    <details class="logdrop">
+      <summary>옛 AI 모델(meta_model_v4 · 대박 확률) — 학습 중단, 기록 보존</summary>
+      <div style="font-size:12px;color:#94a3b8;margin:6px 0;line-height:1.6">2026-10-30 점검(§84): 목표가 '순수익 10% 이상'이라 변동성 큰 종목을 찾는 잣대가 됐고, 같은 날 후보 고르기 실력이 없었음(AUC 0.606 중 0.597 이 '전략 이름' 효과, 지금 쓰는 전략 대부분이 학습에 없음). 파일은 그대로 두고 강도 기록의 ai_prob(옛 AI 확률)도 비교용으로 계속 남김. 아래 'test AUC·스프레드'는 전략이 섞인 효과라 실력 지표가 아님.</div>
+      <div class="stats-row">
+        <div class="stat"><div class="v" id="ai-old-date">-</div><div class="l">마지막 학습</div></div>
+        <div class="stat"><div class="v" id="ai-fc">-</div><div class="l">피처 수</div></div>
+      </div>
+      <table style="margin-top:8px"><thead><tr>
+        <th class="r">학습일</th><th>엔진</th><th>선택 지표그룹</th><th class="r">피처</th>
+        <th class="r">test AUC</th><th class="r">스프레드%p</th><th class="r">CV best</th><th class="r">train/test</th>
+      </tr></thead>
+      <tbody id="ai-reg-rows"><tr><td colspan="8" style="color:#8b949e;text-align:center">기록 없음</td></tr></tbody>
+      </table>
+    </details>
+  </div>
+  <div class="section">
+    <details class="logdrop">
+      <summary>강도 v1 IC 가중치(공통·예전 방식) — 참고</summary>
+      <table style="margin-top:8px"><thead><tr>
+        <th>피처</th><th>설명</th><th class="r">IC</th><th>바</th>
+      </tr></thead>
+      <tbody id="ai-ic"><tr><td colspan="4" style="color:#8b949e">로딩중...</td></tr></tbody>
+      </table>
+    </details>
   </div>
   <div class="section">
     <h2>DB &#xD604;&#xD669; (stock.db)</h2>
@@ -3607,7 +3720,7 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
         <span style="color:#8b949e;font-size:12px;min-width:72px">AI·분석·장중</span>
         <button class="runbtn" onclick="runTask('ai_pipeline','AI 파이프라인(수집→학습)')">AI 파이프라인</button>
         <button class="runbtn" onclick="runTask('ai_dataset','AI 학습 데이터셋')">AI 데이터셋</button>
-        <button class="runbtn" onclick="runTask('ai_train','AI 모델 학습')">AI 학습</button>
+        <button class="runbtn" title="개선 AI 재학습 + 해마다 검증(수 분) — 평소엔 일요일 AI 파이프라인이 자동" onclick="runTask('ai_train','개선 AI 학습')">AI 학습</button>
         <button class="runbtn" onclick="runTask('strategy_lab','전략 랩')">전략 랩</button>
         <button class="runbtn" onclick="runTask('paper_tracker','페이퍼 추적')">페이퍼 추적</button>
         <button class="runbtn" onclick="runTask('preview','장중 예비후보')">장중예비</button>
@@ -3703,7 +3816,7 @@ function fillOverview(ch, ai, cand){
   setTxt('ov-trades', fmt(ch.trade_count));
   setTxt('ov-active', safe(ch.active_count,'0'));
   setTxt('ov-dbsize', (ai&&ai.db&&ai.db.size_mb||'?')+'MB');
-  setTxt('ov-model', ai&&ai.model&&ai.model.last_trained?ai.model.last_trained.slice(0,10):'-');
+  setTxt('ov-model', ai&&ai.ai_model&&ai.ai_model.trained?String(ai.ai_model.trained).slice(0,10):'-');   // [§85] 개선 AI 학습일
   setTxt('ov-news7', ai&&ai.news?safe(ai.news.week_total,'0'):'0');
   setTxt('ov-newsig', cand?safe(cand.new_signal_count,'0'):'0');
   // candidates table
@@ -3712,7 +3825,7 @@ function fillOverview(ch, ai, cand){
     `<tr><td style="font-weight: 500;">${r.code||''}</td><td>${r.name||''}</td><td style="color:#9ca3af">${r.strategy||''}</td>
      <td class="r" style="color:#9ca3af">${String(r.signal_date||'').slice(0,8)}</td>
      <td class="r">${fmt(r.entry_price)}</td>
-     <td class="r ${clr(r.ai_bigwin)}" style="font-weight: 600;">${r.ai_bigwin!=null?Number(r.ai_bigwin).toFixed(0)+'%':(r.prob!=null?(Number(r.prob)*100).toFixed(1)+'%':'-')}</td></tr>`
+     <td class="r" style="font-weight: 600;">${r.score_ai!=null?Number(r.score_ai).toFixed(1):(r.ai_bigwin!=null?'<span style="color:#64748b">'+Number(r.ai_bigwin).toFixed(0)+'%</span>':(r.prob!=null?'<span style="color:#64748b">'+(Number(r.prob)*100).toFixed(1)+'%</span>':'-'))}</td></tr>`
   ).join(''):'<tr><td colspan="6" style="color:#9ca3af;text-align:center">&#xC624;&#xB298; &#xC2E0;&#xADDC; &#xD6C4;&#xBCF4; &#xC5C6;&#xC74C;</td></tr>');
 }
 
@@ -3996,10 +4109,10 @@ function fillStrength(st){
     va.buckets.map(b=>`
       <div class="stat" style="min-width:180px">
         <div class="v ${clr(b.avg_net)}">${pct(b.avg_net)}</div>
-        <div class="l" style="margin-top:8px">AI확률 ${b.label}<br><span style="color:#64748b;font-size:11px;text-transform:none">${fmt(b.n)}건 · 승률 ${b.win}%</span></div>
+        <div class="l" style="margin-top:8px">${va.metric==='score_ai'?'개선 AI 점수':'옛 AI 확률'} ${b.label}<br><span style="color:#64748b;font-size:11px;text-transform:none">${fmt(b.n)}건 · 승률 ${b.win}%</span></div>
       </div>`).join('')
     +`<div class="stat"><div class="v" style="font-size:16px">${fmt(va.done_total)}건</div><div class="l">완료 매매(조인 표본)</div></div>`
-    :`<div style="color:#9ca3af;font-size:13px;line-height:1.6">${va?`AI확률 기록 ${fmt(va.logged_total)}건 누적 중 — 완료 매매 ${fmt(va.done_total)}건(9건 이상부터 분위 표시).<br>ai_prob 는 06-30부터 기록되어 첫 만기(rsi 5일)가 ~07-07 도래.`:'AI확률 기록 없음'}</div>`);
+    :`<div style="color:#9ca3af;font-size:13px;line-height:1.6">${va?`${va.metric==='score_ai'?'개선 AI 점수':'옛 AI 확률'} 기록 ${fmt(va.logged_total)}건 누적 중 — 완료 매매 ${fmt(va.done_total)}건(9건 이상부터 분위 표시).<br>개선 AI 점수 기록 ${fmt(va.new_logged||0)}건 — 11-02 신호부터 쌓임(완료 9건부터 이 칸이 개선 AI 기준으로 바뀜).`:'AI 기록 없음'}</div>`);
   
   window._stRows = st.rows||[];
   window._stSort = window._stSort || {key:null, asc:false};
@@ -4013,7 +4126,7 @@ function fillAiPaper(ap){
   const P=ap.portfolios;
   el.innerHTML=['ai','strength'].map(k=>{
     const p=P[k]; if(!p) return '';
-    const nm=k==='ai'?'🤖 AI(ai_prob·필터없음)':'💪 강도(score_ic≥5.7 — 라이브 룰)';
+    const nm=k==='ai'?'🤖 AI(11-02부터 개선 AI 점수 순 · 그 전은 옛 AI 확률 순)':'💪 강도(설정 기준 — 라이브 룰 쌍둥이)';
     return `<div class="stat" style="min-width:260px">
       <div class="v ${clr(p.ret_pct)}" style="display:flex;align-items:baseline;gap:8px">${fmt(p.equity)}원 <span style="font-size:14px;font-weight:600">(${pct(p.ret_pct)})</span></div>
       <div class="l" style="margin-top:8px">${nm}<br><span style="color:#64748b;font-size:11px;text-transform:none">보유 ${p.n_pos} · 완료 ${p.n_trades}건${p.win_pct!=null?' · 승률 '+p.win_pct+'%':''}${p.avg_net!=null?' · 평균 '+pct(p.avg_net):''}</span></div>
@@ -4082,7 +4195,7 @@ function renderStRows(){
   const rows=(window._stRows||[]).slice();
   const s=window._stSort||{};
   if(s.key){
-    const numeric=['entry_close','score_ic','ai_prob','score_tv','slot_rank','signal_date'].includes(s.key);
+    const numeric=['entry_close','score_ic','ai_prob','score_ai','score_tv','slot_rank','signal_date'].includes(s.key);
     rows.sort((a,b)=>{
       let x=a[s.key], y=b[s.key];
       if(numeric){ x=Number(x)||(x===0?0:-Infinity); y=Number(y)||(y===0?0:-Infinity); }
@@ -4108,7 +4221,7 @@ function renderStRows(){
       <td style="font-weight:500">${r.code||''} ${r.name||''}</td>
       <td class="r">${fmt(r.entry_close)}</td>
       <td class="r ${icCls}" style="font-weight:700;font-size:14px">${safe(r.score_ic,'-')}</td>
-      <td class="r" style="font-weight:600">${(r.ai_prob!=null&&r.ai_prob!=='')?(Number(r.ai_prob)*100).toFixed(1)+'%':'-'}</td>
+      <td class="r" style="font-weight:600" title="${(r.score_ai!=null&&r.score_ai!=='')?'개선 AI 점수(0~10, 5=그 전략 보통)':'옛 AI 확률(학습 중단된 대박 확률 모델)'}">${(r.score_ai!=null&&r.score_ai!=='')?Number(r.score_ai).toFixed(1):((r.ai_prob!=null&&r.ai_prob!=='')?'<span style="color:#64748b">'+(Number(r.ai_prob)*100).toFixed(1)+'%</span>':'-')}</td>
       <td class="r">${safe(r.score_tv,'-')}</td>
       <td class="r">${safe(r.slot_rank,'-')}</td>
       <td>${ms}</td></tr>`;
@@ -4324,7 +4437,7 @@ async function pbtHistLoad(silent){
   setHtml('pbt-hist', _pbtHist.length?_pbtHist.map(j=>{
     const t=j.top&&j.top[0];
     const head=`<b style="color:#e2e8f0">${_pbtEsc((j.started||'').slice(0,16))}</b>
-      <span style="color:#94a3b8"> · ${_pbtD(j.start)} ~ ${_pbtD(j.end)} · ${j.names.length}전략${j.strength.length?' · 강도'+(j.strength_version==='v2'?'v2 ':' ')+j.strength.join('/'):''}${j.stop!=null?' · 손절 '+j.stop+'%':''}${j.take!=null?' · 익절 +'+j.take+'%':''}${j.luck?' · 운검정':''}</span>
+      <span style="color:#94a3b8"> · ${_pbtD(j.start)} ~ ${_pbtD(j.end)} · ${j.names.length}전략${j.strength.length?' · 강도'+(j.strength_version==='v2'?'v2 ':j.strength_version==='ai'?'AI ':' ')+j.strength.join('/'):''}${j.stop!=null?' · 손절 '+j.stop+'%':''}${j.take!=null?' · 익절 +'+j.take+'%':''}${j.luck?' · 운검정':''}</span>
       <span style="color:${j.status==='done'?'#10b981':j.status==='error'?'#ef4444':'#38bdf8'}"> · ${st[j.status]||_pbtEsc(j.status)}</span>
       ${t?`<span style="color:#cbd5e1"> · 1위 ${_pbtEsc(t.strategy)} <span class="${clr(t.cagr)}">${f(t.cagr)}</span></span>`:''}`;
     const rows=(j.top||[]).map((r,k)=>`<tr><td>${k+1}</td><td>${_pbtEsc(r.strategy)}</td><td class="r">${r.n_trades??'-'}</td>
@@ -4516,8 +4629,8 @@ function pbtRender(d){
     <tbody>${d.market?row(d.market,true):''}${rs.map(r=>row(r,false)).join('')}</tbody></table>
     <div style="font-size:11px;color:#64748b;margin-top:6px">전략마다 10슬롯 단독 · 다음날 시가 진입·보유일 만기${(p.stop!=null||p.take!=null)?'':'·손절/익절 없음'}·비용 왕복 ≈0.33%(연도별 거래세) · 상한가 시초가 미체결 · 상폐·정지는 마지막 거래가 청산 · 분할·병합 낀 신호 제외 · 일별 평가(MTM) · 시장 = 코스닥 유니버스 동일가중 · 연도별은 기간 안 각 해의 자본 증감${(p.strength||[]).length?` · <b>강도 줄(${_pbtEsc(p.strength_version||'v1')})</b> = 강도 기준 넘은 신호만, 강도 높은 순으로 담음(기본 줄은 강도 무관·전략 점수순)`:''}${(p.stop!=null||p.take!=null)?` · <b>청산</b>: ${p.stop!=null?'손절 '+p.stop+'%':''}${p.stop!=null&&p.take!=null?' / ':''}${p.take!=null?'익절 +'+p.take+'%':''} (${p.exit_mode==='intraday'?'장중 도달 → 그 가격':'종가 판정 → 다음날 시가'})`:''}</div>
     ${d.strength_info&&Object.keys(d.strength_info).length?`<div style="font-size:11px;color:#64748b;margin-top:3px">강도 ${_pbtEsc(p.strength_version||'v1')} 가중치(워크포워드) — ${
-      p.strength_version==='v2'
-        ? Object.entries(d.strength_info).map(([n,yy])=>`<b>${_pbtEsc(n)}</b>: `+Object.entries(yy||{}).map(([y,v])=>v.skipped||!v.n_ic?`${y} 채점 안 함`:`${y} 지표 ${v.n_ic}개`).join(', ')).join(' · ')
+      p.strength_version==='v2'||p.strength_version==='ai'
+        ? Object.entries(d.strength_info).map(([n,yy])=>`<b>${_pbtEsc(n)}</b>: `+Object.entries(yy||{}).map(([y,v])=>v.skipped||!v.n_ic?`${y} 채점 안 함`:(p.strength_version==='ai'?`${y} 학습 ${Number(v.n_train).toLocaleString()}건`:`${y} 지표 ${v.n_ic}개`)).join(', ')).join(' · ')
         : Object.entries(d.strength_info).map(([y,v])=>v.skipped?`${y}: 학습 ${v.n_train}건 부족 → 채점 안 함`:`${y}: ${y}년 이전 매매 ${Number(v.n_train).toLocaleString()}건으로 학습(${_pbtEsc((v.top||[]).join(', '))})`).join(' · ')}</div>`:''}`);
   const L=d.luck;
   if(L&&!L.error&&L.pbo!=null){
@@ -4580,6 +4693,17 @@ function fillLab(lab){
 }
 
 function fillAIRegistry(reg){
+  const rn=(reg&&reg.rows_new)||[];          // [§85] 개선 AI 학습 기록
+  const n2=v=>(v===''||v==null)?'-':Number(v).toFixed(2);
+  setHtml('ai-reg2-rows', rn.length?rn.map(r=>`<tr>
+      <td class="r" style="font-size:12px;color:#cbd5e1">${r.trained||''}</td>
+      <td class="r" style="font-size:12px;color:#94a3b8">${r.data_max||''}</td>
+      <td class="r">${r.n_engines||''}</td><td class="r">${fmt(r.n_train)}</td>
+      <td class="r ${clr(r.top2_ai)}" style="font-weight:700">${n2(r.top2_ai)}</td>
+      <td class="r ${clr(r.top2_v2)}">${n2(r.top2_v2)}</td>
+      <td class="r">${(r.dayic_ai===''||r.dayic_ai==null)?'-':Number(r.dayic_ai).toFixed(3)}</td>
+      <td class="r" style="font-size:12px">${r.engines_better||'-'} · ${r.years_better||'-'}</td></tr>`).join('')
+    :'<tr><td colspan="8" style="color:#9ca3af;text-align:center">아직 기록 없음 — python ai_model.py --train (일요일 AI 파이프라인이 자동)</td></tr>');
   const rows=(reg&&reg.rows)||[];
   setHtml('ai-reg-rows', rows.length?rows.map(r=>{
     const grp=String(r.groups||'').replace(/\\|/g,', ');
@@ -4602,11 +4726,41 @@ function fillAI(ai){
   if(!ai){errBox.style.display='flex';errBox.textContent='AI 데이터 없음';return;}
   if(ai.error){errBox.style.display='flex';errBox.textContent='API 오류: '+ai.error;return;}
   errBox.style.display='none';
-  const m=ai.model||{};
-  setTxt('ai-date', safe(m.last_trained,'-').slice(0,16));
-  setTxt('ai-age', m.age_days!=null?m.age_days+'일':'-');
-  setTxt('ai-auc', safe(m.auc,'-'));
+  const m=ai.model||{};                      // 옛 모델(접힌 칸)
+  setTxt('ai-old-date', safe(m.last_trained,'-').slice(0,16));
   setTxt('ai-fc', safe(m.feature_count,'-'));
+  const A=ai.ai_model||{};                   // [§85] 개선 AI
+  const sg=v=>v==null?'-':((v>=0?'+':'')+Number(v).toFixed(2));
+  if(A.missing||A.error){
+    setTxt('ai-date','-'); setTxt('ai-age','-'); setTxt('ai-n','-'); setTxt('ai-lift','-'); setTxt('ai-better','-');
+    setHtml('ai-note', `<span style="color:#fbbf24">${A.error?'개선 AI 읽기 실패: '+A.error:'개선 AI 모델 없음 — 데이터+로그 탭 [AI 학습] 또는 python ai_model.py --train'}</span>`);
+    setHtml('ai-val-eng','<tr><td colspan="8" style="color:#9ca3af;text-align:center">모델 없음</td></tr>');
+    setHtml('ai-imp','<tr><td colspan="4" style="color:#9ca3af">모델 없음</td></tr>');
+  } else {
+    const V=A.validation||{}, O=V.overall||{};
+    setTxt('ai-date', safe(A.trained,'-'));
+    setTxt('ai-age', A.age_days!=null?A.age_days+'일':'-');
+    setTxt('ai-n', `${fmt(A.n_total)} (${(A.engines||[]).length})`);
+    setHtml('ai-lift', O.ai!=null?`<span class="${clr(O.ai)}">${sg(O.ai)}</span> <span style="font-size:13px;color:#94a3b8">vs ${sg(O.v2)}%p</span>`:'-');
+    setTxt('ai-better', O.engines_better?`${O.engines_better} · ${O.years_better}`:'-');
+    setHtml('ai-note', `데이터 끝 ${_pbtD(A.data_max||'')} · AI 가상매매는 ${A.since?_pbtD(A.since):'-'} 신호부터 이 점수로 순위 · 점수는 그 전략 과거 신호 대비 분위라 전략끼리 비교 가능 · 모델에 없는 전략은 점수 없음(강도 v2/v1 은 그대로)`
+      +(V.from?` · 검증 ${V.from}~${V.to}년, 전략·날짜 ${fmt(V.n_cells)}칸`:''));
+    const E=(V.engines||[]);
+    setHtml('ai-val-eng', E.length?E.map(r=>{const d=(r.ai!=null&&r.v2!=null)?r.ai-r.v2:null; return `<tr>
+      <td style="font-weight:500">${r.engine}</td>
+      <td class="r ${clr(r.ai)}" style="font-weight:700">${sg(r.ai)}</td><td class="r ${clr(r.v2)}">${sg(r.v2)}</td>
+      <td class="r ${clr(d)}" style="font-weight:600">${sg(d)}</td>
+      <td class="r">${r.ai_ic==null?'-':Number(r.ai_ic).toFixed(3)}</td><td class="r">${r.v2_ic==null?'-':Number(r.v2_ic).toFixed(3)}</td>
+      <td class="r" style="color:#94a3b8">${fmt(r.n)}</td><td class="r" style="color:#94a3b8">${fmt((A.n||{})[r.engine])}</td></tr>`;}).join('')
+      :'<tr><td colspan="8" style="color:#9ca3af;text-align:center">검증 결과 없음(학습 때 --no-validate)</td></tr>');
+    const Y=(V.years||[]);
+    setHtml('ai-val-year', Y.length?'해별 상위 2개 효과(AI / v2, %p): '+Y.map(y=>`<b>${y.Y}</b> <span class="${clr(y.ai)}">${sg(y.ai)}</span> / <span class="${clr(y.v2)}">${sg(y.v2)}</span>`).join(' · '):'');
+    const I=(A.importance||[]);
+    setHtml('ai-imp', I.length?I.map(w=>`<tr><td style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#93c5fd">${w.feat}</td>
+      <td style="color:#cbd5e1;font-size:12px">${w.label||''}</td><td class="r" style="font-weight:600">${Number(w.share).toFixed(1)}%</td>
+      <td><div style="display:inline-block;width:${Math.round(w.share*4)}px;height:8px;background:#38bdf8;border-radius:4px"></div></td></tr>`).join('')
+      :'<tr><td colspan="4" style="color:#9ca3af">중요도 없음</td></tr>');
+  }
   const ic=ai.ic||{};
   if(ic.weights&&ic.weights.length){
     setHtml('ai-ic', ic.weights.map(w=>{
@@ -5099,18 +5253,20 @@ function vcRender(){
         <td><select style="${inp};max-width:330px" onchange="vcSet('${p}',${i},'engine',this.value)">${opts(s.engine)}</select>
           <div style="font-size:11px;color:${live?'#64748b':'#38bdf8'}">${live?'모의계좌 신호를 그대로 씀':'가상 전용 신호를 매일 18:31 새로 만듦(주문 없음)'}</div>
           ${e.note?`<div style="color:#fbbf24;font-size:11px;max-width:340px">⚠ ${_lcEsc(e.note)}</div>`:''}
+          ${isAI?((V.ai_engines||[]).includes(s.engine)?`<div style="color:#64748b;font-size:11px">AI 모델 포함(학습 ${_lcEsc(V.ai_trained||'')})</div>`
+            :'<div style="color:#fbbf24;font-size:11px">AI 모델에 없음 — 저장하면 AI 재학습(수 분), 그 전엔 점수 없음(면제가 아니면 안 삼)</div>'):''}
           ${(!isAI&&(P.strength_version||'v2')==='v2')?((V.v2_models||{})[s.engine]?`<div style="color:#64748b;font-size:11px">v2 모델: ${_lcEsc(V.v2_models[s.engine].trained)} · 학습 ${V.v2_models[s.engine].n}건</div>`
             :'<div style="color:#fbbf24;font-size:11px">v2 모델 없음 — 저장하면 학습(1~3분), 그 전엔 v1 점수로 대체</div>'):''}</td>
         <td>${P.slot_mode==='pool'?'<span style="color:#64748b;font-size:11px" title="칸 없음 모드 — 전략별 칸 수는 쓰지 않음">공유</span>':`<input type="number" min="1" max="10" step="1" value="${s.slots}" style="${inp};width:52px" onchange="vcSet('${p}',${i},'slots',this.value)">`}</td>
         <td style="text-align:center"><input type="checkbox" ${s.exempt?'checked':''} onchange="vcSet('${p}',${i},'exempt',this.checked)" title="체크하면 기준과 상관없이 후보(후보가 많으면 순위 높은 순)"></td>
-        <td>${s.exempt?'<span style="color:#64748b;font-size:11px">면제</span>':`<input type="number" min="0" max="${isAI?1:10}" step="${isAI?0.01:0.1}" placeholder="${P.min_score==null?'기본 없음':'기본 '+P.min_score}" value="${s.min_score==null?'':s.min_score}" style="${inp};width:70px${s.min_score!=null?';border-color:#38bdf8':''}" title="이 전략만의 기준 — 비우면 위의 기본 기준" onchange="vcSet('${p}',${i},'min_score',this.value)">`}</td>
+        <td>${s.exempt?'<span style="color:#64748b;font-size:11px">면제</span>':`<input type="number" min="0" max="10" step="0.1" placeholder="${P.min_score==null?'기본 없음':'기본 '+P.min_score}" value="${s.min_score==null?'':s.min_score}" style="${inp};width:70px${s.min_score!=null?';border-color:#38bdf8':''}" title="이 전략만의 기준 — 비우면 위의 기본 기준" onchange="vcSet('${p}',${i},'min_score',this.value)">`}</td>
         <td><input type="number" step="1" min="-50" max="-1" placeholder="없음" value="${s.stop==null?'':s.stop}" style="${inp};width:64px" onchange="vcSet('${p}',${i},'stop',this.value)"></td>
         <td><input type="number" step="1" min="1" max="300" placeholder="없음" value="${s.take==null?'':s.take}" style="${inp};width:64px" onchange="vcSet('${p}',${i},'take',this.value)"></td>
         <td style="color:#94a3b8">${e.holding??s.holding}일</td>
         <td><button class="runbtn" style="padding:0 7px" onclick="vcDel('${p}',${i})">✕</button></td></tr>`; }).join('');
     const thr=isAI
-      ? `<label style="font-size:13px;color:#cbd5e1" title="AI 확률(meta 모델 big-win 확률, 0~1) 이 값 이상만 삼. 비우면 기준 없이 확률 높은 순">기본 AI 확률 기준 ≥
-           <input type="number" min="0" max="1" step="0.01" placeholder="없음" value="${P.min_score==null?'':P.min_score}" style="${inp};width:68px" onchange="vcSetP('${p}','min_score',this.value)"></label>`
+      ? `<label style="font-size:13px;color:#cbd5e1" title="개선 AI 점수(0~10, 5 = 그 전략 과거 신호 중 보통) 이 값 이상만 삼. 비우면 기준 없이 점수 높은 순 · 11-02 신호부터 적용(그 전 신호는 옛 AI 확률 순)">기본 AI 점수 기준 ≥
+           <input type="number" min="0" max="10" step="0.1" placeholder="없음" value="${P.min_score==null?'':P.min_score}" style="${inp};width:68px" onchange="vcSetP('${p}','min_score',this.value)"></label>`
       : `<label style="font-size:13px;color:#cbd5e1" title="강도 점수(0~10) 이 값 이상만 삼. 비우면 기준 없이 강도 높은 순">기본 강도 기준 ≥
            <input type="number" min="0" max="10" step="0.1" placeholder="없음" value="${P.min_score==null?'':P.min_score}" style="${inp};width:62px" onchange="vcSetP('${p}','min_score',this.value)"></label>
          <select style="${inp};font-size:12px" onchange="vcSetP('${p}','strength_version',this.value)">
@@ -5118,9 +5274,9 @@ function vcRender(){
            <option value="v2"${(P.strength_version||'v2')==='v2'?' selected':''}>강도 v2(전략별)</option></select>`;
     return `<div style="flex:1;min-width:560px;background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:10px 12px">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
-        <b style="font-size:14px">${isAI?'🤖':'💪'} ${_lcEsc(V.labels[p])} <span style="font-size:11px;color:#64748b;font-weight:400">${isAI?'AI 확률 높은 순':'강도 높은 순'}</span></b>
+        <b style="font-size:14px">${isAI?'🤖':'💪'} ${_lcEsc(V.labels[p])} <span style="font-size:11px;color:#64748b;font-weight:400">${isAI?'AI 점수 높은 순':'강도 높은 순'}</span></b>
         ${thr}
-        <select style="${inp};font-size:12px" title="전략별 칸 / 칸 없음(조건 넘은 신호를 전체 10종목까지, 같은 날 후보는 ${isAI?'AI 확률':'전략 안 순위(강도 백분위)'} 높은 순)" onchange="vcSetP('${p}','slot_mode',this.value)">
+        <select style="${inp};font-size:12px" title="전략별 칸 / 칸 없음(조건 넘은 신호를 전체 10종목까지, 같은 날 후보는 ${isAI?'AI 점수(전략마다 0~10 으로 맞춘 값)':'전략 안 순위(강도 백분위)'} 높은 순)" onchange="vcSetP('${p}','slot_mode',this.value)">
           <option value="slots"${(P.slot_mode||'slots')==='slots'?' selected':''}>전략별 칸</option>
           <option value="pool"${P.slot_mode==='pool'?' selected':''}>칸 없음(전체 10종목)</option></select>
         ${P.slot_mode==='pool'?`<span style="font-size:12px;color:#38bdf8">칸 없음 · 전체 ${V.slots_total}종목</span>`:`<span style="font-size:12px;color:${tot===V.slots_total?'#10b981':'#ef4444'}">슬롯 합 ${tot}/${V.slots_total}</span>`}</div>
@@ -5129,7 +5285,7 @@ function vcRender(){
         <tbody>${rows}</tbody></table>
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
         ${P.strategies.length<V.max_strategies?`<button class="runbtn" onclick="vcAdd('${p}')">+ 전략 추가</button>`:`<span style="font-size:11px;color:#64748b">전략은 최대 ${V.max_strategies}개</span>`}
-        <span style="font-size:11px;color:#64748b">순서는 표시용 — 같은 날 후보는 ${isAI?'AI 확률':'강도'} 높은 순으로 담고, 전략마다 슬롯 수까지</span></div></div>`;
+        <span style="font-size:11px;color:#64748b">순서는 표시용 — 같은 날 후보는 ${isAI?'AI 점수':'강도'} 높은 순으로 담고, 전략마다 슬롯 수까지</span></div></div>`;
   };
   const now=V.active, pend=V.pending;
   const nowTxt=!now?`종전 규칙 — ${_lcEsc(V.legacy_now)}`:now.legacy?`종전 규칙 — ${_lcEsc(now.desc)}`:`${_vcD(now.effective)} 신호부터 적용 중인 설정(저장 ${_lcEsc(now.saved||'')})`;
@@ -5146,7 +5302,7 @@ function vcRender(){
       <span id="vc-msg" style="font-size:12px;color:#94a3b8"></span></div>
     <details style="margin-top:8px"><summary style="cursor:pointer;font-size:12px;color:#94a3b8">설정 이력(적용 신호일별)</summary>
       <div style="font-size:12px;color:#cbd5e1;margin-top:4px;line-height:1.7">${hist||'<span style="color:#64748b">아직 없음 — 지금은 종전 규칙</span>'}</div></details>
-    <div style="font-size:11px;color:#64748b;margin-top:6px">가상매매는 주문이 없는 장부 시뮬입니다(신호일 종가 진입·왕복 0.33%) · 실제 모의계좌 설정은 🏦 모의계좌 탭 · 모의계좌에 없는 전략의 AI 확률은 그 전략으로 학습되지 않은 모델 값이라 참고용</div>`);
+    <div style="font-size:11px;color:#64748b;margin-top:6px">가상매매는 주문이 없는 장부 시뮬입니다(신호일 종가 진입·왕복 0.33%) · 실제 모의계좌 설정은 🏦 모의계좌 탭 · AI 점수 = 개선 AI(§85, 같은 전략·같은 달 안 수익 순위 학습, 0~10·5=보통) — AI 모델에 없는 전략은 점수가 없어 면제가 아니면 안 삼(저장 후 'AI 학습' 또는 일요일 자동 학습으로 들어감)</div>`);
   ovRefresh();
 }
 // ══ 2026-10-23 전략 겹침 경고(§72) — 모의계좌·가상매매 편집 중인 값으로 바로 점검(서버 표: db/strategy_overlap.json) ══

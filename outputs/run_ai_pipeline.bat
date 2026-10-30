@@ -3,7 +3,7 @@ REM run_ai_pipeline.bat - Weekly LIGHT AI refresh, gated end-to-end.
 REM   1) preflight regression tests (ci_gate.py -> pytest tests)
 REM   2) data collection (run_backfill.ps1: OHLCV+macro+supply+news)
 REM   3) build training dataset (make_trades_history_v3.py)
-REM   4) train meta-model with Optuna (ai_trainer_v4.py)
+REM   4) (retired 2026-10-30, system doc 85) old meta-model ai_trainer_v4 - replaced by step 9 ai_model.py
 REM   5) post-train verification (ci_gate.py -> pytest tests)
 REM Each step ABORTS the pipeline if it fails (no silent training on a broken state).
 REM On abort, ci_gate.py sends a Telegram alert (test failure -> training stopped).
@@ -99,13 +99,10 @@ cd /d "%OUT%"
 if errorlevel 1 ( echo [ABORT] dataset build failed ^(exit !ERRORLEVEL!^) >> "%LOG%" & echo [X] dataset build FAILED & goto :fail )
 echo [%time%] [3/5] done.
 
-REM ---- 4/5 train meta-model (Optuna) (gated) ----
-set "STEP=train"
-echo [%time%] [4/5] Training meta-model (Optuna 40 trials)... a few minutes
-echo [4/5] ai_trainer_v4.py ... >> "%LOG%"
-"%PYEXE%" -u ai_trainer_v4.py >> "%LOG%" 2>&1
-if errorlevel 1 ( echo [ABORT] training failed ^(exit !ERRORLEVEL!^) >> "%LOG%" & echo [X] training FAILED & goto :fail )
-echo [%time%] [4/5] done.
+REM ---- 4/5 (retired 2026-10-30, system doc 85) ----
+REM   The old meta-model (ai_trainer_v4.py, "big-win" classifier) had no same-day stock picking
+REM   skill (walk-forward check). It is no longer trained; its files stay as they are.
+REM   The improved AI (ai_model.py) is trained in step 9, after the strength v2 tables (step 7).
 
 REM ---- 5/5 post-train verification (gated) ----
 REM   Re-run pytest tests AFTER training to verify the freshly-written model
@@ -148,6 +145,17 @@ cd /d "%OUT%"
 "%PYEXE%" -u strategy_overlap.py --fresh >> "%LOG%" 2>&1
 if errorlevel 1 ( echo [WARN] strategy overlap failed ^(exit !ERRORLEVEL!^) - previous table kept >> "%LOG%" )
 echo [%time%] [8] done.
+
+REM ---- 9 (NOT gated) improved AI weekly retrain (2026-10-30, system doc 85) ----
+REM   ai_model.py --train : pooled XGBoost on the strength v2 training tables (db\strength_v2\*_train.pkl),
+REM   target = rank inside the same strategy and month, + yearly walk-forward check vs strength v2
+REM   -> db\ai_model\ (AI tab, AI virtual trading score_ai). Failure = warning only (previous model kept).
+echo [%time%] [9] Improved AI retrain (ai_model --train, a few minutes)...
+echo [9] ai_model.py --train ... >> "%LOG%"
+cd /d "%OUT%"
+"%PYEXE%" -u ai_model.py --train >> "%LOG%" 2>&1
+if errorlevel 1 ( echo [WARN] improved AI retrain failed ^(exit !ERRORLEVEL!^) - previous model kept >> "%LOG%" )
+echo [%time%] [9] done.
 
 echo [%date% %time%] AI pipeline DONE >> "%LOG%"
 del "%LOCK%" 2>nul

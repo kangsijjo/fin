@@ -15,7 +15,9 @@ virtual_config.py — AI·강도 '가상매매'(ai_paper_trader) 전략 설정. 
 
 포트폴리오 설정: {"min_score": 숫자|None, "strength_version": v1|v2, "strategies": [{engine, slots, exempt, stop, take, holding, min_score}]}
     전략 행의 min_score(2026-10-23 §71) = 그 전략만의 기준(비우면 포트폴리오 기준).
-    ai       : min_score = AI 확률 기준(0~1, 비우면 기준 없음). 순서는 AI 확률 높은 순. 면제 = 기준과 상관없이 후보.
+    ai       : min_score = AI 점수 기준(0~10, 5 = 그 전략 보통, 비우면 기준 없음). 순서는 AI 점수 높은 순. 면제 = 기준과 상관없이 후보.
+               [§85] 2026-11-02 신호일부터 개선 AI(ai_model score_ai). 그 전 신호일은 옛 AI 확률(0~1) 순 그대로이고,
+               그 전에 저장한 AI 기준은 옛 척도라 11-02 부터는 적용하지 않는다(ai_paper_trader).
     strength : min_score = 강도 기준(0~10, 비우면 기준 없음). 순서는 강도(v1 score_ic / v2 score_v2) 높은 순.
 """
 import copy
@@ -178,7 +180,7 @@ def validate(ports, engine_names=None):
             errs.append(f"{lab}: 설정이 없습니다")
             continue
         ms = P.get("min_score")
-        hi = 1 if p == "ai" else 10
+        hi = 10                     # [§85] AI 도 0~10(개선 AI 점수 — 옛 AI 확률 0~1 은 2026-11-02 전 신호일에만 쓰임)
         if ms is not None and (not isinstance(ms, (int, float)) or isinstance(ms, bool) or not 0 <= ms <= hi):
             errs.append(f"{lab}: 기준은 0~{hi} 또는 비움")
         if P.get("strength_version", "v2") not in ("v1", "v2"):
