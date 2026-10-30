@@ -34,6 +34,8 @@ import tempfile as _tempfile
 os.environ["LIVE_CONFIG_PATH"] = os.path.join(_tempfile.mkdtemp(prefix="lc_test_"), "live_config.json")
 # [2026-10-22] 가상매매 설정(db/virtual_config.json)도 같은 이유로 테스트 전용 임시 경로
 os.environ["VIRTUAL_CONFIG_PATH"] = os.path.join(_tempfile.mkdtemp(prefix="vc_test_"), "virtual_config.json")
+os.environ["NOTIFY_ONCE_PATH"] = os.path.join(_tempfile.mkdtemp(prefix="no_test_"), "notify_once.json")   # [2026-10-30]
+os.environ["STALE_SKIP_PATH"] = os.path.join(_tempfile.mkdtemp(prefix="ss_test_"), "stale_skip.json")    # [2026-10-30 §81]
 
 _sent = []
 

@@ -1164,7 +1164,12 @@ def _signals_fresh(latest_date, label):
         print(msg)
         try:
             import notifier
-            notifier.safe_send(msg)
+            notifier.safe_send_once(msg, f"stale:{label}:{latest_date}")   # 예열·매매·재시도마다 같은 경보 반복 방지
+        except Exception:
+            pass
+    if not allowed:                     # [§81] 13:00 자동 복구(recover_stale.py)가 이 기록을 보고 다시 산다
+        try:
+            mc.mark_stale_skip(label, latest_date)
         except Exception:
             pass
     return allowed

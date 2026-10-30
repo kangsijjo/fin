@@ -245,6 +245,25 @@ try {
         -Action $a14 -Trigger $t14 -Settings $s14 -Principal $principal -Force | Out-Null
     Write-Host "[OK] StockAI\AfterMarket (weekdays 18:10, 시간외 등락률 -> stock.db)" -ForegroundColor Green
 
+    # 15. Stale-universe recovery (2026-10-30, system doc 81): weekdays 13:00, every 30 min until 14:00.
+    #     Acts only if this morning's buy was skipped for a lagging universe (db\stale_skip.json):
+    #     collect missing days -> regenerate signals -> buy before 15:00.
+    Write-Host "[15/15] Registering stale-universe recovery..."
+    $a15 = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_stale_recover.bat"
+    $t15 = New-ScheduledTaskTrigger -Weekly `
+               -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "13:00"
+    $rep15 = (New-ScheduledTaskTrigger -Once -At "13:00" `
+                  -RepetitionInterval (New-TimeSpan -Minutes 30) `
+                  -RepetitionDuration (New-TimeSpan -Hours 1 -Minutes 1)).Repetition
+    $t15.Repetition = $rep15
+    $s15 = New-ScheduledTaskSettingsSet @pw `
+               -MultipleInstances IgnoreNew `
+               -StartWhenAvailable `
+               -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+    Register-ScheduledTask -TaskName "StockAI\StaleRecover" `
+        -Action $a15 -Trigger $t15 -Settings $s15 -Principal $principal -Force | Out-Null
+    Write-Host "[OK] StockAI\StaleRecover (weekdays 13:00/13:30/14:00, only after a stale-universe skip)" -ForegroundColor Green
+
     Write-Host ""
     Write-Host "=== Registered Tasks ===" -ForegroundColor Cyan
     Get-ScheduledTask -TaskPath "\StockAI\" | Format-Table TaskName, State -AutoSize

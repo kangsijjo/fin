@@ -49,10 +49,12 @@ DATA_DIR = "./macro_data/daily"
 HOLIDAY_FILE = os.path.join(_HERE, "krx_holidays.txt")
 
 # 유니버스가 이 일수 이상 밀리면 매수를 막는다(그 미만은 경고만).
-#   1일 지연 = 신호가 이틀 묵음 → 진입가 가정이 한 세션 어긋나지만 방향성은 유효 → 경고
-#   2일 이상 = 수집 장애가 확실 → 차단(놓친 기회보다 잘못된 가격의 매수가 더 나쁘다)
+#   [2026-10-30 사용자 결정] 1일이라도 밀리면 그날 매수는 건너뛴다(종전: 1일 경고·2일 차단).
+#   1일 지연 = 어제 장의 정보 없이 그제 신호를 오늘 시가에 사는 것 — 백테스트 규칙(신호 다음날 시가)과 다르고,
+#   10-28·29 KRX 접속 장애 때 10-29 는 1일 지연이라 그대로 샀다. 놓친 하루보다 규칙이 다른 매수가 더 나쁘다.
+#   매도·손절·익절은 이 게이트와 무관하게 그대로 돈다.
 STALE_WARN_DAYS = 1
-STALE_BLOCK_DAYS = 2
+STALE_BLOCK_DAYS = 1
 
 # 당일 유니버스 파일이 생겼어야 하는 시각(HHMM). KIS_Paper(update_macro_daily)가
 # 15:50 전후에 당일 파일을 만든다 → 16:00 이후의 신호 작업은 '오늘' 파일을 기대.
@@ -154,13 +156,53 @@ def check_signal_freshness(latest_date: str, account_label: str,
     shown = ", ".join(missing[:5]) + (" …" if len(missing) > 5 else "")
     if n >= STALE_BLOCK_DAYS:
         return False, (
-            f"🚨 [{account_label}] 유니버스가 {n}거래일 밀렸습니다 — 당일 매수 차단\n"
+            f"🚨 [{account_label}] 유니버스가 {n}거래일 밀렸습니다 — 오늘 매수는 건너뜀(매도·손절은 그대로)\n"
             f"  최신 일봉: {latest_date} / 빠진 거래일: {shown}\n"
-            f"  이 상태로 매수하면 {n}일 묵은 신호를 오늘 시가에 사게 됩니다.\n"
-            f"  수집(run_collector / update_macro_daily) 실패 여부를 확인해 주세요.")
+            f"  이 상태로 사면 {n}일 묵은 신호를 오늘 시가에 사게 됩니다.\n"
+            f"  수집(KIS_Paper 15:50 / 20:00 재수집) 실패 여부를 확인하고, 대시보드 데이터+로그 → '보조데이터 부족분'으로 "
+            f"채우면 오늘 18:30 신호부터 정상입니다.")
     return True, (
         f"⚠ [{account_label}] 유니버스가 {n}거래일 밀렸습니다 — 매수는 진행하되 확인 요망\n"
         f"  최신 일봉: {latest_date} / 빠진 거래일: {shown}")
+
+
+# ── [2026-10-30 §81] 유니버스 지연으로 아침 매수를 건너뛴 날 기록 → 13:00 자동 복구(recover_stale.py)가 읽음 ──
+def stale_skip_path():
+    return os.environ.get("STALE_SKIP_PATH") or os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                             "db", "stale_skip.json")
+
+
+def load_stale_skip():
+    try:
+        import json
+        with open(stale_skip_path(), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_stale_skip(d):
+    import json
+    p = stale_skip_path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False)
+    os.replace(tmp, p)
+
+
+def mark_stale_skip(account_label, latest_date, now=None):
+    """오늘 이 계좌의 매수를 유니버스 지연으로 건너뛰었다고 기록(같은 날이면 계좌만 추가). 예외 안전."""
+    try:
+        today = (now or datetime.now()).strftime("%Y%m%d")
+        d = load_stale_skip()
+        if d.get("date") != today:
+            d = {"date": today, "accounts": [], "latest": str(latest_date)}
+        if account_label not in d["accounts"]:
+            d["accounts"].append(account_label)
+        save_stale_skip(d)
+    except Exception:
+        pass
 
 
 # ── 신선도 대기 (신호 작업 전, 부팅 직후 경합 방지) ───────────────────────────
