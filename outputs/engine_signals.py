@@ -155,6 +155,29 @@ def today_signals(strategy, df, last_date, all_dates, name_cache, live_name, hol
     return rows, ""
 
 
+def _drop_ca_rows(rows, strategy, df, last_date, live_name, log=print):
+    """[2026-10-23] 백테스트와 같은 규칙 — 신호 창(lookback)에 액면분할·병합·감자가 낀 종목, 긴 거래정지 뒤 재개 10거래일
+    (정리매매 포함) 종목은 오늘 신호에서 뺀다. strategies/base.py CA_LOOKBACK_FILTER 와 같은 스위치."""
+    try:
+        import strategies.base as B
+        import strategies._swing_base as SB
+        if not B.CA_LOOKBACK_FILTER or strategy is None or "change_pct" not in df.columns:
+            return rows
+        ca_map, dates, resume = SB._ca_map_cached(df)
+        L = SB.signal_lookback(strategy)
+        keep = [r for r in rows                                  # 행·df 모두 6자리 코드
+                if not SB.ca_in_lookback(ca_map, dates, str(r["code"]), last_date, L)
+                and not SB.halt_resume_recent(resume, dates, str(r["code"]), last_date)]
+        if len(keep) < len(rows):
+            gone = sorted({str(r["code"]).zfill(6) for r in rows} - {str(r["code"]).zfill(6) for r in keep})
+            log(f"  [{live_name}] 최근 {L}거래일 안 분할·병합 또는 긴 정지 뒤 재개(정리매매 등) 종목 "
+                f"{len(gone)}개 제외: {', '.join(gone[:8])}")
+        return keep
+    except Exception as e:
+        log(f"  [{live_name}] 기업행위 필터 건너뜀: {type(e).__name__}: {e}")
+        return rows
+
+
 def run_configured(account, df, last_date, all_dates, name_cache, known, is_excluded, offset_date, log=print):
     """설정(live_config)의 계좌 전략 전부 신호 생성.
     known: {라이브이름: 감지함수(df,last_date,all_dates,name_cache)} — 손으로 짠 검증된 감지기가 있는 전략.
@@ -178,6 +201,8 @@ def run_configured(account, df, last_date, all_dates, name_cache, known, is_excl
                                               acc["holding"][ln], is_excluded, offset_date)
         except Exception as e:
             rows, why = [], f"신호 계산 실패: {type(e).__name__}: {str(e)[:120]}"
+        if rows:
+            rows = _drop_ca_rows(rows, smap.get(acc["engine"].get(ln, "")), df, last_date, ln, log)
         if why:
             skipped.append((ln, why))
             log(f"  [{ln}] 건너뜀 — {why}")

@@ -96,10 +96,12 @@ def simulate_capital(trades, initial_capital=10_000_000, max_concurrent=10,
     days_recorded = 0
 
     for date in all_dates:
-        # 1. 오늘 청산할 포지션
+        # 1. 어제까지 청산된 포지션만 오늘 아침 돈·칸으로 쓴다.
+        #    [2026-10-23] 종전엔 '오늘 종가에 파는' 포지션도 아침 매수 전에 풀었다 — 실매매는 09:00 매수 → 15:21 만기 매도라
+        #    그 칸·돈은 오늘 아침에 없다(종가 손익을 아침에 미리 쓰는 셈). 오늘 청산분은 매수 뒤(장 마감)에 반영.
         remaining = []
         for p in positions:
-            if p["exit_date"] <= date:
+            if p["exit_date"] < date:
                 cash += p["invested_value"] * (1 + p["net_pct"] / 100)
             else:
                 remaining.append(p)
@@ -107,8 +109,13 @@ def simulate_capital(trades, initial_capital=10_000_000, max_concurrent=10,
 
         # 2. 오늘 새 진입 — 슬롯 부족 시 score(신호일 거래대금) 큰 순으로 배정.
         #    이전엔 CSV 도착 순서(사실상 임의)로 배정돼 결과가 운에 민감했음.
+        #    [2026-10-23] 이미 들고 있는 종목은 다시 사지 않는다(실매매 트레이더와 같은 규칙) — 종전엔 같은 종목이
+        #    여러 칸을 차지할 수 있었다(52주 신고가 매매의 절반이 '보유 중 재신호').
         todays = df[df["entry_date"] == date].sort_values("score", ascending=False)
         for _, row in todays.iterrows():
+            if any(p["code"] == row["code"] for p in positions):
+                n_skipped += 1
+                continue
             slots_left = max_concurrent - len(positions)
             if slots_left <= 0:
                 n_skipped += 1
@@ -126,6 +133,15 @@ def simulate_capital(trades, initial_capital=10_000_000, max_concurrent=10,
             })
             taken_nets.append(float(row["net_pct"]))
             cash -= invest
+
+        # 2b. 오늘 종가 청산분(만기) — 매수 뒤에 반영
+        remaining = []
+        for p in positions:
+            if p["exit_date"] <= date:
+                cash += p["invested_value"] * (1 + p["net_pct"] / 100)
+            else:
+                remaining.append(p)
+        positions = remaining
 
         # 3. 일별 equity 기록
         if use_mtm:
