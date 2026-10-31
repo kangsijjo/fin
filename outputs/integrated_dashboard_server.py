@@ -1131,6 +1131,8 @@ def _live_tables(acct):
         entries[ln] = ent + (" · 강도 필터 면제(강도순 정렬만)" if ln in A["exempt"]
                              else f" + 강도 ≥ {A['min_strength_by'].get(ln, A['min_strength']):g}"
                                   + ("(전략별)" if A['min_strength_by'].get(ln, A['min_strength']) != A['min_strength'] else ""))
+        if ln in (A.get("skip_limitup") or ()):          # [§91]
+            entries[ln] += " · 신호일 상한가 마감 종목 제외"
         holds[ln] = A["holding"][ln]
         st, tk = A["stop"].get(ln), A["take"].get(ln)
         stops[ln] = round(st * 100) if st is not None else ""
@@ -1571,6 +1573,184 @@ def _ai_new_registry(limit=24):
         return pd.read_csv(p, encoding="utf-8-sig").tail(limit).iloc[::-1].fillna("").to_dict("records")
     except Exception:
         return []
+
+
+def _next_weekly(weekday, hh, mm, now=None):
+    """다음 (요일 0=월, 시:분) 시각 문자열."""
+    now = now or datetime.now()
+    d = now.replace(hour=hh, minute=mm, second=0, microsecond=0) + timedelta(days=(weekday - now.weekday()) % 7)
+    if d <= now:
+        d += timedelta(days=7)
+    return d.strftime("%m-%d(%a) %H:%M").replace("Mon", "월").replace("Tue", "화").replace("Wed", "수") \
+        .replace("Thu", "목").replace("Fri", "금").replace("Sat", "토").replace("Sun", "일")
+
+
+def _tail_text(p, n=6000):
+    try:
+        b = p.read_bytes()[-n:]
+        return _decode_log(b, p)
+    except Exception:
+        return ""
+
+
+def get_ai_jobs_status(now=None):
+    """[§89] 데이터+로그 탭 'AI·탐색 작업 상태' — 일요일 AI 파이프라인 · 개선 AI 학습 · 백테스트 뒤 학습 · 토요일 촘촘 탐색 · 강도 v2.
+    각 행: {name, when, status(ok|run|fail|stale|none), detail, took, next, log}. 읽기 전용(파일만 봄)."""
+    now = now or datetime.now()
+    fin_logs = BASE.parent / "logs"
+    rows = []
+    fmt = lambda ts: datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")   # noqa: E731
+
+    def age_days(ts):
+        return (now.timestamp() - ts) / 86400
+
+    # 1) 일요일 AI 파이프라인
+    r = {"name": "일요일 AI 파이프라인(수집→데이터셋→강도 v2→개선 AI)", "next": _next_weekly(6, 3, 0, now), "status": "none",
+         "when": "-", "detail": "기록 없음", "took": "", "log": ""}
+    logs = sorted(fin_logs.glob("ai_pipeline_*.log"))
+    if logs:
+        lp = logs[-1]
+        t = _tail_text(lp, 20000)
+        r["log"] = str(lp)
+        try:
+            st = datetime.strptime(lp.stem.replace("ai_pipeline_", ""), "%Y%m%d_%H%M")
+            r["when"] = st.strftime("%m-%d %H:%M")
+            r["took"] = f"{int((lp.stat().st_mtime - st.timestamp()) // 60)}분"
+        except Exception:
+            r["when"] = fmt(lp.stat().st_mtime)
+        warns = [ln.strip() for ln in t.splitlines() if "[WARN]" in ln][-3:]
+        if "AI pipeline DONE" in t:
+            r["status"], r["detail"] = ("ok", "완료" + (f" · 경고 {len(warns)}건: " + " / ".join(w[-80:] for w in warns) if warns else ""))
+        elif "FAILED at step" in t:
+            m_ = re.search(r'FAILED at step "?([\w-]+)', t)
+            r["status"], r["detail"] = "fail", f"실패 — 단계 {m_.group(1) if m_ else '?'} (이후 단계 건너뜀)"
+        elif "SKIP" in t[-500:]:
+            r["status"], r["detail"] = "ok", "건너뜀(다른 실행이 진행 중이었음)"
+        elif age_days(lp.stat().st_mtime) < 0.25:
+            r["status"], r["detail"] = "run", "진행 중"
+        else:
+            r["status"], r["detail"] = "fail", "끝 표시 없이 멈춤(강제 종료·전원?)"
+        if r["status"] == "ok" and age_days(lp.stat().st_mtime) > 8:
+            r["status"], r["detail"] = "stale", r["detail"] + " · 8일 넘게 안 돎"
+    rows.append(r)
+
+    # 2) 개선 AI 학습(일요일 [9] · 설정 저장 · 수동)
+    r = {"name": "개선 AI 학습", "next": _next_weekly(6, 3, 0, now) + " (파이프라인 [9])", "status": "none",
+         "when": "-", "detail": "모델 없음", "took": "", "log": str(BASE / "db" / "ai_model")}
+    lock = BASE / "db" / "ai_model" / "train.lock"
+    try:
+        reg = pd.read_csv(BASE / "db" / "ai_model" / "registry.csv", encoding="utf-8-sig")
+        last = reg.iloc[-1]
+        tr = datetime.strptime(str(last["trained"]), "%Y-%m-%d %H:%M")
+        r["when"] = tr.strftime("%m-%d %H:%M")
+        r["detail"] = (f"{int(last['n_engines'])}전략 {int(last['n_train']):,}건 · 검증 AI {last['top2_ai']} vs v2 {last['top2_v2']}%p"
+                       f" · 전략 {last['engines_better']} · 해 {last['years_better']}")
+        r["status"] = "stale" if (now - tr).days > 8 else "ok"
+        if r["status"] == "stale":
+            r["detail"] += " · 8일 넘게 학습 안 됨"
+    except Exception:
+        pass
+    if lock.exists() and age_days(lock.stat().st_mtime) < 0.125:
+        r["status"], r["detail"] = "run", f"학습 중(시작 {fmt(lock.stat().st_mtime)}) · 이전: {r['detail']}"
+    rows.append(r)
+
+    # 3) 백테스트 뒤 AI 학습(§86)
+    r = {"name": "백테스트 뒤 AI 학습(새 전략 반영)", "next": "기간 백테스트가 끝날 때(새 전략이 있을 때만)", "status": "none",
+         "when": "-", "detail": "아직 없음", "took": "", "log": str(BASE / "logs" / "run_ai_learn.log")}
+    try:
+        jobs = sorted(_PBT_DIR.glob("pbt_*.json"), key=lambda p_: p_.stat().st_mtime)
+        for jp in reversed(jobs[-10:]):
+            d_ = json.loads(jp.read_text(encoding="utf-8"))
+            al = d_.get("ai_learn")
+            if al is None:
+                continue
+            if not al.get("started"):
+                if r["status"] == "none":                    # 가장 최근 백테스트는 학습할 게 없었음 → 더 앞의 실제 학습도 찾아 함께 보여 줌
+                    r["when"] = str(d_.get("finished") or "")[5:16]
+                    r["status"], r["detail"] = "ok", f"학습 안 함 — {al.get('why', '')}"
+                    skip_note = r["detail"]
+                continue
+            if r["status"] == "none":
+                r["when"] = str(d_.get("finished") or "")[5:16]
+                skip_note = ""
+            lp = BASE / "logs" / "run_ai_learn.log"
+            t = _tail_text(lp, 4000) if lp.exists() else ""
+            last = next((ln for ln in reversed(t.splitlines()) if ln.startswith("{")), "")
+            if last:
+                try:
+                    j_ = json.loads(last)
+                    if j_.get("ok"):
+                        v_ = j_.get("validation") or {}
+                        r["status"] = "ok"
+                        r["detail"] = (f"새 전략 {len(j_.get('learned') or [])}개 학습 → {j_.get('engines')}전략"
+                                       + (f" · 검증 AI {v_.get('ai')} vs v2 {v_.get('v2')}%p" if v_ else ""))
+                    elif j_.get("busy"):
+                        r["status"], r["detail"] = "ok", "다른 학습이 진행 중이라 건너뜀"
+                    else:
+                        r["status"], r["detail"] = "fail", f"실패 — {str(j_.get('why'))[:120]}"
+                    r["took"] = f"{int((lp.stat().st_mtime - jp.stat().st_mtime) // 60)}분" if lp.exists() else ""
+                except Exception:
+                    r["status"], r["detail"] = "fail", "결과를 읽지 못함 — 로그 확인"
+            elif lp.exists() and age_days(lp.stat().st_mtime) < 0.25:
+                r["status"], r["detail"] = "run", f"학습표 만들기·학습 중(새 전략 {al.get('n_new')}개)"
+            else:
+                r["status"], r["detail"] = "fail", "끝 표시 없음 — 로그 확인"
+            if skip_note:
+                r["detail"] = f"{skip_note} · 마지막 실제 학습 {str(d_.get('finished') or '')[5:16]}: {r['detail']}"
+            break
+    except Exception:
+        pass
+    rows.append(r)
+
+    # 4) 토요일 촘촘 탐색(§87·88)
+    r = {"name": "토요일 강도·손절·익절 촘촘 탐색", "next": _next_weekly(5, 2, 0, now), "status": "none",
+         "when": "-", "detail": "결과 없음", "took": "", "log": ""}
+    sl = sorted(fin_logs.glob("setting_sweep_*.log"))
+    swj = BASE / "db" / "setting_sweep.json"
+    if swj.exists():
+        try:
+            sw = json.loads(swj.read_text(encoding="utf-8"))
+            E_ = sw.get("engines") or {}
+            nerr = sum(1 for v in E_.values() if v.get("error"))
+            nrec = sum(1 for v in E_.values() for f in (v.get("families") or {}).values()
+                       if isinstance(f, dict) and f.get("status") == "권장")
+            r["when"] = str(sw.get("generated") or "")[5:16]
+            r["took"] = f"{int((sw.get('sec') or 0) // 60)}분"
+            r["detail"] = f"{len(E_)}전략{' · 촘촘' if sw.get('fine') else ''} · 권장 {nrec}건" + (f" · 실패 {nerr}전략" if nerr else "")
+            r["status"] = "fail" if nerr and nerr == len(E_) else ("stale" if age_days(swj.stat().st_mtime) > 8 else "ok")
+            if r["status"] == "stale":
+                r["detail"] += " · 8일 넘게 안 돎"
+        except Exception:
+            r["status"], r["detail"] = "fail", "결과 파일을 읽지 못함"
+    if sl:
+        lp = sl[-1]
+        r["log"] = str(lp)
+        t = _tail_text(lp, 3000)
+        if "setting sweep end" not in t and age_days(lp.stat().st_mtime) < 0.5:
+            r["status"], r["detail"] = "run", f"진행 중(로그 {fmt(lp.stat().st_mtime)}) · 이전: {r['detail']}"
+        elif re.search(r"setting sweep end rc=(?!0)\d+", t):
+            r["status"], r["detail"] = "fail", "실패(rc≠0) — 로그 확인 · 이전 결과: " + r["detail"]
+    rows.append(r)
+
+    # 5) 강도 v2 주간 학습(파이프라인 [7])
+    r = {"name": "강도 v2 학습(전략별)", "next": _next_weekly(6, 3, 0, now) + " (파이프라인 [7])", "status": "none",
+         "when": "-", "detail": "모델 없음", "took": "", "log": str(BASE / "db" / "strength_v2")}
+    try:
+        import live_config as LC
+        cfg = LC.load()
+        engs = sorted({s_["engine"] for a_ in LC.ACCOUNTS for s_ in cfg["accounts"][a_]["strategies"]})
+        ms = [(e_, (BASE / "db" / "strength_v2" / f"{e_}.json")) for e_ in engs]
+        have = [(e_, p_.stat().st_mtime) for e_, p_ in ms if p_.exists()]
+        miss = [e_ for e_, p_ in ms if not p_.exists()]
+        if have:
+            oldest = min(t_ for _, t_ in have)
+            r["when"] = fmt(max(t_ for _, t_ in have))
+            r["detail"] = f"모의계좌 전략 {len(have)}/{len(engs)}개 모델 · 가장 오래된 것 {fmt(oldest)}" + (f" · 없음: {', '.join(miss)}" if miss else "")
+            r["status"] = "stale" if age_days(oldest) > 8 else ("fail" if miss else "ok")
+    except Exception:
+        pass
+    rows.append(r)
+    return {"rows": rows, "now": now.strftime("%Y-%m-%d %H:%M")}
 
 
 def get_ai_model_info():
@@ -2096,6 +2276,7 @@ def api_all():
             "pvbt":       _safe(get_paper_vs_bt),
             "ai":         _safe(get_ai_status),
             "ai_registry": _safe(get_ai_registry),
+            "ai_jobs":    _safe(get_ai_jobs_status),          # [§89] AI·탐색 작업 상태
             "train":      _safe(get_training_stats),
             "candidates": _safe(get_candidates),
             "files":      _safe(get_file_meta),
@@ -2469,6 +2650,8 @@ def _pbt_parse(req):
         ex += ["--strength-version", sv]
     elif strength:                                   # [§82] 기본이 v2 가 됐으니 v1 은 명시해서 넘긴다
         ex += ["--strength-version", "v1"]
+    if b.get("skip_limitup") is True:                # [§91] 신호일 상한가 마감 신호 제외(모든 줄)
+        ex += ["--skip-limitup"]
     return (start, end, names, bool(b.get("luck")), strength, ex), None
 
 
@@ -2727,7 +2910,8 @@ def _lc_from_request(b):
             e = str(x.get("engine", ""))
             rows.append({"engine": e, "slots": int(x.get("slots") or 0), "exempt": bool(x.get("exempt")),
                          "stop": num(x.get("stop")), "take": num(x.get("take")), "holding": hold.get(e, 20),
-                         "min_strength": num(x.get("min_strength"))})      # [§71] 전략별 강도 기준(비우면 계좌 기본)
+                         "min_strength": num(x.get("min_strength")),       # [§71] 전략별 강도 기준(비우면 계좌 기본)
+                         "skip_limitup": bool(x.get("skip_limitup", False))})   # [§91] 상한가 마감 신호 제외
         new["accounts"][a] = {"min_strength": float(A.get("min_strength", 5.7)),
                               "slot_mode": str(A.get("slot_mode") or "slots"),
                               "strength_version": str(A.get("strength_version") or "v2"), "strategies": rows}
@@ -3058,7 +3242,8 @@ def _sweep_advice(sw, engine, place, fam):
     return {"family": fam, "status": f.get("status"), "best": f.get("best"), "best_stats": f.get("best_stats"),
             "base_stats": f.get("base_stats"), "wins": f.get("wins"), "oos_pick": f.get("oos_pick"),
             "oos_base": f.get("oos_base"), "plateau": f.get("plateau"),
-            "current": ({k: cur.get(k) for k in ("th", "stop", "take")} | {"stats": cur.get("stats")}) if cur else None,
+            "current": ({k: cur.get(k) for k in ("th", "stop", "take")} | {"lu": bool(cur.get("lu")), "stats": cur.get("stats")})
+                       if cur else None,                     # [§91] lu = 상한가 마감 신호 제외(옛 탐색 결과엔 없음 → False)
             "updated": E_.get("updated")}
 
 
@@ -3120,7 +3305,7 @@ def api_pbt_jobs():
             "start": prm.get("start"), "end": prm.get("eff_end") or prm.get("end"),
             "names": prm.get("names") or [], "strength": prm.get("strength") or [], "luck": bool(prm.get("luck")),
             "stop": prm.get("stop"), "take": prm.get("take"), "exit_mode": prm.get("exit_mode"),
-            "strength_version": prm.get("strength_version"),
+            "strength_version": prm.get("strength_version"), "skip_limitup": bool(prm.get("skip_limitup")),
             "market_cagr": (d.get("market") or {}).get("cagr"),
             "n_results": len(d.get("results") or []), "n_warn": len(d.get("warnings") or []),
             "error": d.get("error"),
@@ -3641,6 +3826,7 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
         <input type="number" id="pbt-take" placeholder="없음" step="1" min="1" max="300" style="width:66px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"></label>
       <select id="pbt-exitmode" title="손절·익절 판정 방식" style="background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px;font-size:12px">
         <option value="close">종가 기준(다음날 시가)</option><option value="intraday">장중 도달(그 가격)</option></select>
+      <label style="font-size:13px;color:#cbd5e1" title="신호일에 상한가로 마감(등락률 ≥ +29.5%)한 종목의 신호를 빼고 계산 — 모든 줄에 같은 규칙. 모의매매 설정의 전략별 '상한가 제외'와 같은 거르개(§91)"><input type="checkbox" id="pbt-lu"> 상한가 마감 신호 제외</label>
       <label style="font-size:13px;color:#cbd5e1" title="전략 5개 이상·거래일 80일 이상일 때 SPA·PBO·DSR 수행(1~2분 추가)"><input type="checkbox" id="pbt-luck"> 운 검정(SPA·PBO)</label>
     </div>
     <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px">
@@ -3850,6 +4036,12 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
       </div>
     </div>
     <div id="run-status" style="margin-top:10px;color:#8b949e;font-size:13px">&#xBC84;&#xD2BC;&#xC744; &#xB204;&#xB974;&#xBA74; &#xD574;&#xB2F9; &#xC791;&#xC5C5;&#xC774; &#xBC31;&#xADF8;&#xB77C;&#xC6B4;&#xB4DC;&#xB85C; &#xC2E4;&#xD589;&#xB429;&#xB2C8;&#xB2E4; (&#xB85C;&#xADF8;: logs/ &#xD3F4;&#xB354;).</div>
+  </div>
+  <div class="section">
+    <h2>AI·탐색 작업 상태 <span style="color:#8b949e;font-size:12px;font-weight:400">&mdash; 일요일 AI 파이프라인 · 개선 AI 학습 · 백테스트 뒤 학습 · 토요일 촘촘 탐색 · 강도 v2 — 마지막 실행·결과·다음 예정 (§89) · 실패·8일 넘게 안 돎은 빨강/노랑</span></h2>
+    <table><thead><tr><th>작업</th><th>상태</th><th class="r">마지막</th><th class="r">걸린 시간</th><th>내용</th><th class="r">다음 예정</th></tr></thead>
+    <tbody id="ai-jobs-rows"><tr><td colspan="6" style="color:#8b949e;text-align:center">로딩중...</td></tr></tbody></table>
+    <div id="ai-jobs-note" style="font-size:11px;color:#64748b;margin-top:6px"></div>
   </div>
   <div class="section">
     <details class="logdrop">
@@ -4506,7 +4698,8 @@ function _pbtBody(){
           strength:(document.getElementById('pbt-strength')||{}).value||'',
           stop:(document.getElementById('pbt-stop')||{}).value||'', take:(document.getElementById('pbt-take')||{}).value||'',
           exit_mode:(document.getElementById('pbt-exitmode')||{}).value||'close',
-          strength_version:(document.getElementById('pbt-sver')||{}).value||'v1'};
+          strength_version:(document.getElementById('pbt-sver')||{}).value||'v1',
+          skip_limitup:!!(document.getElementById('pbt-lu')||{}).checked};
 }
 async function _pbtPost(url){
   const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Action':'1'},body:JSON.stringify(_pbtBody())});
@@ -4556,7 +4749,7 @@ async function pbtHistLoad(silent){
   setHtml('pbt-hist', _pbtHist.length?_pbtHist.map(j=>{
     const t=j.top&&j.top[0];
     const head=`<b style="color:#e2e8f0">${_pbtEsc((j.started||'').slice(0,16))}</b>
-      <span style="color:#94a3b8"> · ${_pbtD(j.start)} ~ ${_pbtD(j.end)} · ${j.names.length}전략${j.strength.length?' · 강도'+(j.strength_version==='v2'?'v2 ':j.strength_version==='ai'?'AI ':' ')+j.strength.join('/'):''}${j.stop!=null?' · 손절 '+j.stop+'%':''}${j.take!=null?' · 익절 +'+j.take+'%':''}${j.luck?' · 운검정':''}</span>
+      <span style="color:#94a3b8"> · ${_pbtD(j.start)} ~ ${_pbtD(j.end)} · ${j.names.length}전략${j.strength.length?' · 강도'+(j.strength_version==='v2'?'v2 ':j.strength_version==='ai'?'AI ':' ')+j.strength.join('/'):''}${j.stop!=null?' · 손절 '+j.stop+'%':''}${j.take!=null?' · 익절 +'+j.take+'%':''}${j.skip_limitup?' · 상한가 제외':''}${j.luck?' · 운검정':''}</span>
       <span style="color:${j.status==='done'?'#10b981':j.status==='error'?'#ef4444':'#38bdf8'}"> · ${st[j.status]||_pbtEsc(j.status)}</span>
       ${t?`<span style="color:#cbd5e1"> · 1위 ${_pbtEsc(t.strategy)} <span class="${clr(t.cagr)}">${f(t.cagr)}</span></span>`:''}`;
     const rows=(j.top||[]).map((r,k)=>`<tr><td>${k+1}</td><td>${_pbtEsc(r.strategy)}</td><td class="r">${r.n_trades??'-'}</td>
@@ -4596,6 +4789,7 @@ function pbtHistReuse(job){
   const em=document.getElementById('pbt-exitmode'); if(em) em.value=j.exit_mode||'close';
   const sv=document.getElementById('pbt-sver'); if(sv) sv.value=j.strength_version||'v2';
   const lk=document.getElementById('pbt-luck'); if(lk) lk.checked=!!j.luck;
+  const lu=document.getElementById('pbt-lu'); if(lu) lu.checked=!!j.skip_limitup;
   _pbtCount();
   setHtml('pbt-warn', `<span style="color:#38bdf8;font-size:13px">↺ ${_pbtEsc(job)} 의 조건을 불러왔습니다${miss?` (지금은 없는 전략 ${miss}개 제외)`:''} — [데이터 점검]·[실행]으로 다시 계산</span>`);
   const sec=document.getElementById('pbt-sec'); if(sec) sec.scrollIntoView({behavior:'smooth',block:'start'});
@@ -4746,7 +4940,7 @@ function pbtRender(d){
   setHtml('pbt-res', `<table><thead><tr><th><span class="pbt-tip" data-tip="${_pbtEsc(_PBT_TIPS.strategy)}">전략</span></th>${th('n','매매수')}${th('win','승률')}${th('avg','신호 평균')}${th('slot','슬롯 실매매')}
     ${th('tot','총수익')}${th('cagr','CAGR')}${th('mdd','MDD')}${th('sharpe','샤프')}${th('vs','시장 대비')}${years.map(y=>`<th class="r"><span class="pbt-tip" data-tip="${_pbtEsc(_PBT_TIPS.year)}">${y}</span></th>`).join('')}</tr></thead>
     <tbody>${d.market?row(d.market,true):''}${rs.map(r=>row(r,false)).join('')}</tbody></table>
-    <div style="font-size:11px;color:#64748b;margin-top:6px">전략마다 10슬롯 단독 · 다음날 시가 진입·보유일 만기${(p.stop!=null||p.take!=null)?'':'·손절/익절 없음'}·비용 왕복 ≈0.33%(연도별 거래세) · 상한가 시초가 미체결 · 상폐·정지는 마지막 거래가 청산 · 분할·병합 낀 신호 제외 · 일별 평가(MTM) · 시장 = 코스닥 유니버스 동일가중 · 연도별은 기간 안 각 해의 자본 증감${(p.strength||[]).length?` · <b>강도 줄(${_pbtEsc(p.strength_version||'v1')})</b> = 강도 기준 넘은 신호만, 강도 높은 순으로 담음(기본 줄은 강도 무관·전략 점수순)`:''}${(p.stop!=null||p.take!=null)?` · <b>청산</b>: ${p.stop!=null?'손절 '+p.stop+'%':''}${p.stop!=null&&p.take!=null?' / ':''}${p.take!=null?'익절 +'+p.take+'%':''} (${p.exit_mode==='intraday'?'장중 도달 → 그 가격':'종가 판정 → 다음날 시가'})`:''}</div>
+    <div style="font-size:11px;color:#64748b;margin-top:6px">전략마다 10슬롯 단독 · 다음날 시가 진입·보유일 만기${(p.stop!=null||p.take!=null)?'':'·손절/익절 없음'}·비용 왕복 ≈0.33%(연도별 거래세) · 상한가 시초가 미체결 · 상폐·정지는 마지막 거래가 청산 · 분할·병합 낀 신호 제외 · 일별 평가(MTM) · 시장 = 코스닥 유니버스 동일가중 · 연도별은 기간 안 각 해의 자본 증감${(p.strength||[]).length?` · <b>강도 줄(${_pbtEsc(p.strength_version||'v1')})</b> = 강도 기준 넘은 신호만, 강도 높은 순으로 담음(기본 줄은 강도 무관·전략 점수순)`:''}${(p.stop!=null||p.take!=null)?` · <b>청산</b>: ${p.stop!=null?'손절 '+p.stop+'%':''}${p.stop!=null&&p.take!=null?' / ':''}${p.take!=null?'익절 +'+p.take+'%':''} (${p.exit_mode==='intraday'?'장중 도달 → 그 가격':'종가 판정 → 다음날 시가'})`:''}${p.skip_limitup?' · <b>신호일 상한가 마감 신호 제외</b>(모든 줄)':''}</div>
     ${d.strength_info&&Object.keys(d.strength_info).length?`<div style="font-size:11px;color:#64748b;margin-top:3px">강도 ${_pbtEsc(p.strength_version||'v1')} 가중치(워크포워드) — ${
       p.strength_version==='v2'||p.strength_version==='ai'
         ? Object.entries(d.strength_info).map(([n,yy])=>`<b>${_pbtEsc(n)}</b>: `+Object.entries(yy||{}).map(([y,v])=>v.skipped||!v.n_ic?`${y} 채점 안 함`:(p.strength_version==='ai'?`${y} 학습 ${Number(v.n_train).toLocaleString()}건`:`${y} 지표 ${v.n_ic}개`)).join(', ')).join(' · ')
@@ -4811,6 +5005,21 @@ function fillLab(lab){
   ).join(''):'<tr><td colspan="8" style="color:#9ca3af;text-align:center">strategy_lab.py 실행 대기 (BT는 즉시, FWD/갭은 누적)</td></tr>');
 }
 
+// [§89] AI·탐색 작업 상태 — 데이터+로그 탭
+function fillAIJobs(J){
+  const rows=(J&&J.rows)||[];
+  const badge={ok:['✅ 정상','#10b981'],run:['⏳ 진행 중','#38bdf8'],fail:['❌ 실패','#ef4444'],stale:['⚠ 오래됨','#fbbf24'],none:['— 없음','#64748b']};
+  setHtml('ai-jobs-rows', rows.length?rows.map(r=>{ const b=badge[r.status]||badge.none;
+    return `<tr><td style="font-weight:500">${_lcEsc(r.name)}</td>
+      <td style="color:${b[1]};font-weight:600;white-space:nowrap">${b[0]}</td>
+      <td class="r" style="font-size:12px;color:#cbd5e1">${_lcEsc(r.when||'-')}</td>
+      <td class="r" style="font-size:12px;color:#94a3b8">${_lcEsc(r.took||'')}</td>
+      <td style="font-size:12px;color:#cbd5e1"${r.log?` title="로그·위치: ${_lcEsc(r.log)}"`:''}>${_lcEsc(r.detail||'')}</td>
+      <td class="r" style="font-size:12px;color:#94a3b8">${_lcEsc(r.next||'')}</td></tr>`;}).join('')
+    :'<tr><td colspan="6" style="color:#9ca3af;text-align:center">상태를 읽지 못함</td></tr>');
+  const bad=rows.filter(r=>r.status==='fail'||r.status==='stale').length;
+  setHtml('ai-jobs-note', `${J&&J.now?'확인 '+_lcEsc(J.now)+' · ':''}내용 칸에 마우스를 올리면 로그 위치 · 실패하면 텔레그램(워치독)도 옴${bad?` · <span style="color:#fbbf24">점검 필요 ${bad}건</span>`:''}`);
+}
 function fillAIRegistry(reg){
   const rn=(reg&&reg.rows_new)||[];          // [§85] 개선 AI 학습 기록
   const n2=v=>(v===''||v==null)?'-':Number(v).toFixed(2);
@@ -5051,6 +5260,7 @@ async function load(){
   _r(fillStrategyFull, d.sfull);
   _r(fillAI, d.ai);
   _r(fillAIRegistry, d.ai_registry);
+  _r(fillAIJobs, d.ai_jobs);
   _r(fillLogs, d.logs, d.files);
   fetch('/api/intraday').then(r=>r.json()).then(fillIntraday).catch(()=>{});
   fetch('/api/preview').then(r=>r.json()).then(fillPreview).catch(()=>{});
@@ -5271,6 +5481,7 @@ function lcRender(){
         <td>${s.exempt?'<span style="color:#64748b;font-size:11px">면제</span>':`<input type="number" min="0" max="10" step="0.1" placeholder="기본 ${A.min_strength}" value="${s.min_strength==null?'':s.min_strength}" style="${inp};width:70px${s.min_strength!=null?';border-color:#38bdf8':''}" title="이 전략만의 강도 기준 — 비우면 계좌 기본값(${A.min_strength})" onchange="lcSet('${a}',${i},'min_strength',this.value)">`}</td>
         <td><input type="number" step="1" min="-50" max="-1" placeholder="없음" value="${s.stop==null?'':s.stop}" style="${inp};width:64px" onchange="lcSet('${a}',${i},'stop',this.value)"></td>
         <td><input type="number" step="1" min="1" max="300" placeholder="없음" value="${s.take==null?'':s.take}" style="${inp};width:64px" onchange="lcSet('${a}',${i},'take',this.value)"></td>
+        <td style="text-align:center"><input type="checkbox" ${s.skip_limitup?'checked':''} onchange="lcSet('${a}',${i},'skip_limitup',this.checked)" title="체크하면 신호일 상한가 마감 종목의 이 전략 신호는 사지 않음"></td>
         <td style="color:#94a3b8">${e.holding??s.holding}일</td>
         <td><button class="runbtn" style="padding:0 7px" title="빼기" onclick="lcDel('${a}',${i})">✕</button></td></tr>`; }).join('');
     const stopSem=a==='kiwoom'?'15:21 평가손익 판정 → 마감 동시호가 매도':'전일 종가 판정 → 다음날 09:01 시가 매도';
@@ -5288,7 +5499,7 @@ function lcRender(){
           <option value="pool"${A.slot_mode==='pool'?' selected':''}>칸 없음(전체 10종목)</option></select>
         ${A.slot_mode==='pool'?`<span style="font-size:12px;color:#38bdf8">칸 없음 · 전체 ${L.slots_total}종목</span>`:`<span style="font-size:12px;color:${tot===L.slots_total?'#10b981':'#ef4444'}">슬롯 합 ${tot}/${L.slots_total}</span>`}</div>
       <table style="font-size:12px;margin-top:6px;width:100%"><thead><tr><th>순서</th><th>전략</th><th>슬롯</th>
-        <th title="강도 기준과 상관없이 삼">강도 면제</th><th title="전략마다 다른 강도 기준 — 비우면 위의 계좌 기본값">강도 기준</th><th title="${_lcEsc(stopSem)}">손절 %</th><th title="${_lcEsc(takeSem)}">익절 %</th><th>보유</th><th></th></tr></thead>
+        <th title="강도 기준과 상관없이 삼">강도 면제</th><th title="전략마다 다른 강도 기준 — 비우면 위의 계좌 기본값">강도 기준</th><th title="${_lcEsc(stopSem)}">손절 %</th><th title="${_lcEsc(takeSem)}">익절 %</th><th title="신호일에 상한가로 마감(등락률 ≥ +29.5%)한 종목의 이 전략 신호는 사지 않음 — 전략마다 효과가 갈려(§91 검증 — 좋아짐: 52주 신고가·외국인 계열·MACD / 나빠짐: 500일 신고가·신용·스토캐스틱) 전략별로 고름. 토요일 탐색이 해마다 검증해 권장/유지를 알려 줌(§91)">상한가 제외</th><th>보유</th><th></th></tr></thead>
         <tbody>${rows}</tbody></table>
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
         ${A.strategies.length<L.max_strategies?`<button class="runbtn" onclick="lcAdd('${a}')">+ 전략 추가</button>`:`<span style="font-size:11px;color:#64748b">전략은 최대 ${L.max_strategies}개</span>`}
@@ -5319,6 +5530,7 @@ function lcSet(a,i,k,v){
   if(k==='slots') s.slots=parseInt(v||'0',10)||0;
   else if(k==='exempt'){ s.exempt=!!v; if(s.exempt) s.min_strength=null; }   // 면제면 전략별 기준은 의미 없음
   else if(k==='stop'||k==='take'||k==='min_strength') s[k]=(v===''||v==null)?null:Number(v);
+  else if(k==='skip_limitup') s.skip_limitup=!!v;                              // [§91] 상한가 마감 신호 제외
   else if(k==='engine'){ s.engine=v; const e=_lcEng(v); s.holding=e.holding; }
   lcRender();
 }
@@ -5382,6 +5594,7 @@ function vcRender(){
         <td>${s.exempt?'<span style="color:#64748b;font-size:11px">면제</span>':`<input type="number" min="0" max="10" step="0.1" placeholder="${P.min_score==null?'기본 없음':'기본 '+P.min_score}" value="${s.min_score==null?'':s.min_score}" style="${inp};width:70px${s.min_score!=null?';border-color:#38bdf8':''}" title="이 전략만의 기준 — 비우면 위의 기본 기준" onchange="vcSet('${p}',${i},'min_score',this.value)">`}</td>
         <td><input type="number" step="1" min="-50" max="-1" placeholder="없음" value="${s.stop==null?'':s.stop}" style="${inp};width:64px" onchange="vcSet('${p}',${i},'stop',this.value)"></td>
         <td><input type="number" step="1" min="1" max="300" placeholder="없음" value="${s.take==null?'':s.take}" style="${inp};width:64px" onchange="vcSet('${p}',${i},'take',this.value)"></td>
+        <td style="text-align:center"><input type="checkbox" ${s.skip_limitup?'checked':''} onchange="vcSet('${p}',${i},'skip_limitup',this.checked)" title="체크하면 신호일 상한가 마감 종목의 이 전략 신호는 사지 않음"></td>
         <td style="color:#94a3b8">${e.holding??s.holding}일</td>
         <td><button class="runbtn" style="padding:0 7px" onclick="vcDel('${p}',${i})">✕</button></td></tr>`; }).join('');
     const thr=isAI
@@ -5401,7 +5614,7 @@ function vcRender(){
           <option value="pool"${P.slot_mode==='pool'?' selected':''}>칸 없음(전체 10종목)</option></select>
         ${P.slot_mode==='pool'?`<span style="font-size:12px;color:#38bdf8">칸 없음 · 전체 ${V.slots_total}종목</span>`:`<span style="font-size:12px;color:${tot===V.slots_total?'#10b981':'#ef4444'}">슬롯 합 ${tot}/${V.slots_total}</span>`}</div>
       <table style="font-size:12px;margin-top:6px;width:100%"><thead><tr><th>순서</th><th>전략</th><th>슬롯</th>
-        <th title="기준과 상관없이 후보">${isAI?'AI 기준 면제':'강도 면제'}</th><th title="전략마다 다른 기준 — 비우면 위의 기본 기준">${isAI?'AI 기준':'강도 기준'}</th><th title="매일 종가로 판정 → 그 종가에 청산">손절 %</th><th title="매일 종가로 판정 → 그 종가에 청산">익절 %</th><th>보유</th><th></th></tr></thead>
+        <th title="기준과 상관없이 후보">${isAI?'AI 기준 면제':'강도 면제'}</th><th title="전략마다 다른 기준 — 비우면 위의 기본 기준">${isAI?'AI 기준':'강도 기준'}</th><th title="매일 종가로 판정 → 그 종가에 청산">손절 %</th><th title="매일 종가로 판정 → 그 종가에 청산">익절 %</th><th title="신호일에 상한가로 마감(등락률 ≥ +29.5%)한 종목의 이 전략 신호는 사지 않음 — 전략마다 효과가 갈려(§91 검증 — 좋아짐: 52주 신고가·외국인 계열·MACD / 나빠짐: 500일 신고가·신용·스토캐스틱) 전략별로 고름. 토요일 탐색이 해마다 검증해 권장/유지를 알려 줌(§91)">상한가 제외</th><th>보유</th><th></th></tr></thead>
         <tbody>${rows}</tbody></table>
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
         ${P.strategies.length<V.max_strategies?`<button class="runbtn" onclick="vcAdd('${p}')">+ 전략 추가</button>`:`<span style="font-size:11px;color:#64748b">전략은 최대 ${V.max_strategies}개</span>`}
@@ -5447,8 +5660,8 @@ async function _recoRun(){
       const fam=P.family||'v2';
       const rows=(P.recos||[]).map(r=>{
         const A=r.advice;
-        const preO=(A&&A.status==='권장')?{sv:fam,th:A.best.th,stop:A.best.stop,take:A.best.take}
-                  :(A&&A.status==='유지')?{}:(r.best?{sv:r.best.sv,th:r.best.th,stop:r.best.stop,take:r.best.take}:{});
+        const preO=(A&&A.status==='권장')?{sv:fam,th:A.best.th,stop:A.best.stop,take:A.best.take,lu:A.best.lu}
+                  :(A&&A.status==='유지')?{}:(r.best?{sv:r.best.sv,th:r.best.th,stop:r.best.stop,take:r.best.take,lu:!!r.best.lu}:{});
         const pre=JSON.stringify(preO).replace(/"/g,'&quot;');
         const warn=[...(r.overlap||[]).map(o=>`⚠ ${_lcEsc(o.engine)} 와 같은 날 같은 종목 ${o.same}%`),
                     ...(r.used_elsewhere||[]).map(u=>`ℹ ${_lcEsc(u.label)}에서 사용 중`)];
@@ -5462,10 +5675,11 @@ async function _recoRun(){
           <td><button class="runbtn" style="padding:0 8px" title="편집 중인 초안에 넣기(권장 설정 포함) — 저장은 위 '변경 확인 후 저장'(두 번 확인)" onclick="${isLc?'lcAddReco':'vcAddReco'}('${pl}','${_lcEsc(r.engine)}',this.dataset.pre)" data-pre="${pre}">+ 추가</button></td></tr>`;}).join('');
       const selTxt=(P.selected||[]).map(x=>`${_lcEsc(x.engine)} ${x.score==null?'-':x.score}${x.score!=null&&(x.score<50||(x.cagr!=null&&x.cagr<0))?'<span style="color:#f87171">(약함)</span>':''}`).join(' · ');
       const selAdv=(P.selected||[]).filter(x=>x.advice&&x.advice.status).map(x=>{
-        const A=x.advice, pre=JSON.stringify({sv:fam,th:A.best.th,stop:A.best.stop,take:A.best.take}).replace(/"/g,'&quot;');
-        const same=A.current&&A.current.th==A.best.th&&A.current.stop==A.best.stop&&A.current.take==A.best.take;
+        const A=x.advice, pre=JSON.stringify({sv:fam,th:A.best.th,stop:A.best.stop,take:A.best.take,lu:A.best.lu}).replace(/"/g,'&quot;');
+        const same=A.current&&A.current.th==A.best.th&&A.current.stop==A.best.stop&&A.current.take==A.best.take
+                   &&(A.best.lu==null||!!A.current.lu===!!A.best.lu);           // [§91] 옛 탐색 결과(lu 없음)는 비교에서 뺌
         return `<tr><td style="font-weight:600;white-space:nowrap">${_lcEsc(x.engine)}</td><td style="font-size:11px">${_advHtml(A,fam)}</td>
-          <td>${A.status==='권장'&&!same?`<button class="runbtn" style="padding:0 8px" title="초안의 그 전략 줄에 권장 강도·손절·익절을 넣음 — 저장은 두 번 확인" onclick="${isLc?'lcApplyAdv':'vcApplyAdv'}('${pl}','${_lcEsc(x.engine)}',this.dataset.pre)" data-pre="${pre}">권장값 적용</button>`:(same?'<span style="color:#10b981;font-size:11px">지금 = 권장</span>':'')}</td></tr>`;}).join('');
+          <td>${A.status==='권장'&&!same?`<button class="runbtn" style="padding:0 8px" title="초안의 그 전략 줄에 권장 강도·손절·익절(·상한가 제외)을 넣음 — 저장은 두 번 확인" onclick="${isLc?'lcApplyAdv':'vcApplyAdv'}('${pl}','${_lcEsc(x.engine)}',this.dataset.pre)" data-pre="${pre}">권장값 적용</button>`:(same?'<span style="color:#10b981;font-size:11px">지금 = 권장</span>':'')}</td></tr>`;}).join('');
       const sw=d.sweep;
       h=`<details ${rows?'open':''} style="background:rgba(56,189,248,.05);border:1px solid #1e3a5f;border-radius:6px;padding:5px 8px">
         <summary style="cursor:pointer;font-size:12px;color:#93c5fd"><b>💡 추천 전략</b> — 안 고른 전략 중 백테스트 종합 점수 ${d.min_score}↑·CAGR+·해 절반 이상 플러스 ${rows?((P.recos||[]).length+'개'):'— 지금은 조건을 넘는 전략 없음'}</summary>
@@ -5483,7 +5697,7 @@ function _recoPre(pre){ try{ return JSON.parse(pre||'{}'); }catch(e){ return {};
 function _advHtml(A,fam){
   const sg=v=>v==null?'-':((v>=0?'+':'')+Number(v).toFixed(1));
   const thT=v=>v==null?'강도 기준 없음(순서만)':`강도 ${fam==='ai'?'AI':fam} ≥${v}`;
-  const combo=b=>`${thT(b.th)} · ${b.stop==null?'손절 없음':'손절 '+b.stop+'%'} · ${b.take==null?'익절 없음':'익절 +'+b.take+'%'}`;
+  const combo=b=>`${thT(b.th)} · ${b.stop==null?'손절 없음':'손절 '+b.stop+'%'} · ${b.take==null?'익절 없음':'익절 +'+b.take+'%'}${b.lu?' · 상한가 마감 신호 제외':''}`;
   const st=x=>x?`연 ${sg(x.cagr)}% / 해 MDD ${x.mdd}% / 해 ${x.n_year}건`:'-';
   const cur=A.current&&A.current.stats?` · 지금 설정(${combo(A.current)}) ${st(A.current.stats)}`:'';
   const chk=`해마다 검증 ${A.wins}(그 해 이전만 보고 고른 값이 기본보다 나았던 해) · 표본 밖 누적 ${sg(A.oos_pick)}% vs 기본 ${sg(A.oos_base)}%`;
@@ -5496,6 +5710,7 @@ function _advRow(S,P,isMock){
   if(th==null){ if(!S.exempt){ if(isMock) S.min_strength=0; else S.min_score=0; } }
   else { S.exempt=false; if(isMock) S.min_strength=th; else S.min_score=th; }
   S.stop=P.stop??null; S.take=P.take??null;
+  if(P.lu!=null) S.skip_limitup=!!P.lu;          // [§91] 탐색이 상한가 축까지 본 결과일 때만(옛 결과는 그대로 둠)
 }
 function lcApplyAdv(a,engine,pre){
   const S=(_lcDraft[a].strategies||[]).find(s=>s.engine===engine); if(!S) return;
@@ -5514,7 +5729,7 @@ function lcAddReco(a,engine,pre){
   const e=_lcEng(engine), P=_recoPre(pre);
   const same=P.sv===(A.strength_version||'v2');                          // 계좌 강도 방식과 같은 실험일 때만 기준을 옮김
   const th=same&&P.th!=null?P.th:(same&&('th' in P)&&P.th==null?0:null);  // [§87] 탐색 결과 '기준 없음' = 0(다 통과·순서만)
-  S.push({engine:engine,slots:1,exempt:false,stop:P.stop??null,take:P.take??null,min_strength:th,holding:e.holding});
+  S.push({engine:engine,slots:1,exempt:false,stop:P.stop??null,take:P.take??null,min_strength:th,holding:e.holding,skip_limitup:!!P.lu});
   lcRender(); _lcMsg(`<span style="color:#38bdf8">${_lcEsc(engine)} 를 초안에 넣었습니다 — 슬롯 수를 맞추고 '변경 확인 후 저장'</span>`);
 }
 function vcAddReco(p,engine,pre){
@@ -5524,7 +5739,7 @@ function vcAddReco(p,engine,pre){
   const e=_vcEng(engine), P=_recoPre(pre);
   const want=p==='ai'?'ai':(Pf.strength_version||'v2');
   const th=P.sv===want?(P.th!=null?P.th:(('th' in P)?0:null)):null;
-  S.push({engine:engine,slots:1,exempt:false,stop:P.stop??null,take:P.take??null,min_score:th,holding:e.holding});
+  S.push({engine:engine,slots:1,exempt:false,stop:P.stop??null,take:P.take??null,min_score:th,holding:e.holding,skip_limitup:!!P.lu});
   vcRender(); setHtml('vc-msg',`<span style="color:#38bdf8">${_lcEsc(engine)} 를 초안에 넣었습니다 — 슬롯 수를 맞추고 '변경 확인 후 저장'</span>`);
 }
 function ovRefresh(){ clearTimeout(_ovT); _ovT=setTimeout(_ovRun,250); }
@@ -5552,6 +5767,7 @@ function vcSet(p,i,k,v){
   if(k==='slots') s.slots=parseInt(v||'0',10)||0;
   else if(k==='exempt'){ s.exempt=!!v; if(s.exempt) s.min_score=null; }
   else if(k==='stop'||k==='take'||k==='min_score') s[k]=(v===''||v==null)?null:Number(v);
+  else if(k==='skip_limitup') s.skip_limitup=!!v;                              // [§91] 상한가 마감 신호 제외
   else if(k==='engine'){ s.engine=v; const e=_vcEng(v); s.holding=e.holding; }
   vcRender();
 }

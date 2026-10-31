@@ -238,6 +238,7 @@ def test_pbt_run_spawns_once_and_check_parses(dash, monkeypatch):
 
 def test_collect_endpoint_guards_and_single_job(dash, monkeypatch, tmp_path):
     import collect_aux as C
+    monkeypatch.setattr(C, "LOCK_PATH", str(tmp_path / "collect.lock"))   # 실제 PC 에서 수집이 돌고 있어도 테스트는 무관하게(2026-10-31)
     calls = []
 
     class FakeProc:

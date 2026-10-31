@@ -556,13 +556,14 @@ def _with_score(t, sc):
 
 
 def run_job(job, start, end, names, luck, strength=None, stop=None, take=None, exit_mode="close",
-            strength_version="v2"):
+            strength_version="v2", skip_limitup=False):
     t0 = time.time()
     strength = list(strength or [])
     state = {"job": job, "status": "running", "params": {"start": start, "end": end, "names": names,
              "luck": luck, "strength": strength, "stop": stop, "take": take,
              "exit_mode": exit_mode if (stop is not None or take is not None) else None,
-             "strength_version": strength_version if strength else None}, "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+             "strength_version": strength_version if strength else None,
+             "skip_limitup": bool(skip_limitup)}, "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
              "progress": [0, len(names)], "current": "", "warnings": [], "results": [],
              "market": None, "luck": None}
     _write(job, state)
@@ -629,6 +630,7 @@ def run_job(job, start, end, names, luck, strength=None, stop=None, take=None, e
     import strategy_engine as E
     R = {}
     kept = {}                                   # 강도 모드: 전략별 기간 내 매매(강도는 한꺼번에 계산)
+    lu_keys, lu_drop = None, {}                 # [§91] 상한가 마감 신호 제외: (code, 진입일) 집합은 한 번만 만든다
     for k, n in enumerate(names, 1):
         state["current"] = n
         state["progress"] = [k - 1, len(names)]
@@ -638,6 +640,13 @@ def run_job(job, start, end, names, luck, strength=None, stop=None, take=None, e
             trs = s.backtest(df.copy(), E.DEFAULT_COSTS) or []
             gc.collect()
             tw = [t for t in trs if win[0] <= str(t.entry_date) <= eff_end]
+            if skip_limitup:                    # [§91] 신호일 상한가 마감 신호 제외(모든 줄에 같은 규칙, 손절·익절보다 먼저)
+                if lu_keys is None:
+                    import signal_filters as SFL
+                    lu_keys = SFL.limitup_entry_keys(df)
+                n0 = len(tw)
+                tw = [t for t in tw if (str(t.code).zfill(6), str(t.entry_date)) not in lu_keys]
+                lu_drop[n] = n0 - len(tw)
             if stop is not None or take is not None:      # [2026-10-21] 손절·익절 재청산(모든 줄에 같은 규칙)
                 tw = apply_exits(tw, build_panel(df, {str(t.code) for t in tw}), stop, take, exit_mode)
             del trs
@@ -655,6 +664,11 @@ def run_job(job, start, end, names, luck, strength=None, stop=None, take=None, e
                    "error": f"{type(e).__name__}: {str(e)[:120]}"}
         state["results"].append(row)
         gc.collect()
+    if skip_limitup:
+        state["warnings"].append({"level": "info", "strategy": "",
+                                  "msg": f"신호일 상한가 마감 신호 제외 — 모든 줄에서 {sum(lu_drop.values()):,}건 뺌"
+                                         + (" (" + ", ".join(f"{k} {v}" for k, v in lu_drop.items() if v) + ")"
+                                            if any(lu_drop.values()) else "")})
     if strength and kept:
         # 모든 전략의 신호를 모아 강도를 한 번에 계산(DB 를 한 번만 읽는다) → 임계별 줄 추가
         state["current"] = "강도 계산(처음엔 수 분 — 이후 같은 날은 저장분 사용)"
@@ -771,6 +785,7 @@ def main():
     ap.add_argument("--exit-mode", default="close", choices=sorted(EXIT_MODES))
     ap.add_argument("--strength-version", default="v2", choices=["v1", "v2", "ai"],
                     help="강도 방식 v2(전략별, 기본)/v1(공통·예전)/ai(개선 AI, §85)")
+    ap.add_argument("--skip-limitup", action="store_true", help="[§91] 신호일 상한가 마감 신호 제외(모든 줄)")
     a = ap.parse_args()
     names = [n.strip() for n in a.names.split(",") if n.strip()]
     if a.check:
@@ -791,6 +806,9 @@ def main():
                           "msg": "청산 규칙: " + " · ".join(x for x in (f"손절 {st_:g}%" if st_ is not None else "",
                                                                    f"익절 +{tk_:g}%" if tk_ is not None else "") if x)
                                  + f" — {EXIT_MODES[a.exit_mode]} (모든 줄에 같은 규칙, 만기는 그대로 상한)"})
+        if a.skip_limitup:
+            warns.append({"level": "info", "strategy": "",
+                          "msg": "신호일 상한가 마감(등락률 ≥ +29.5%) 신호 제외 — 모든 줄에 같은 규칙(§91)"})
         win = [d for d in cal if a.start <= d <= eff_end]
         print("PBT_CHECK " + json.dumps({"ok": ok, "warnings": warns, "eff_end": eff_end,
                                          "n_days": len(win), "data": [cal[0], cal[-1]] if cal else None,
@@ -800,7 +818,7 @@ def main():
     try:
         stop, take = parse_exits(a.stop, a.take)
         run_job(job, a.start, a.end, names, a.luck, parse_strength(a.strength), stop, take, a.exit_mode,
-                a.strength_version)
+                a.strength_version, a.skip_limitup)
     except Exception as e:
         try:
             st = json.load(open(_job_path(job), encoding="utf-8"))

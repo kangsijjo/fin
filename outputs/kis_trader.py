@@ -119,6 +119,8 @@ MIN_STRENGTH_SCORE = _ACC["min_strength"]     # 기본 5.7
 STRENGTH_VERSION = _ACC["strength_version"]   # [2026-10-22] v1(공통) / v2(전략별) — 기본 v1
 # [2026-10-23 §71] 전략별 강도 기준(대시보드에서 전략마다 고름, 비우면 계좌 기본값 MIN_STRENGTH_SCORE)
 STRENGTH_TH = dict(_ACC["min_strength_by"])
+# [2026-10-31 §91] 상한가 마감 신호 제외 — 설정에서 켠 전략(라이브 이름)은 신호일에 상한가(+29.5%↑)로 마감한 종목을 사지 않는다
+SKIP_LIMITUP = set(_ACC.get("skip_limitup") or set())
 
 
 def _th(strat):
@@ -1304,6 +1306,12 @@ def cmd_buy():
     if not sigs:
         print("[buy] 오늘 신호 없음 — 종료")
         return
+    if SKIP_LIMITUP:                              # [§91] 전략별 '상한가 마감 신호 제외'
+        import signal_filters as _SF
+        sigs, _lu_dropped = _SF.drop_limitup(sigs, SKIP_LIMITUP, label="buy")
+        if not sigs:
+            print("[buy] 남은 신호 없음(상한가 마감 신호 제외) — 종료")
+            return
 
     client = KISMockClient()
     deposit, positions = client.get_balance()

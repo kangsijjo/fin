@@ -13,6 +13,7 @@ strategy_reco.py — 지금까지 돌린 백테스트를 종합해 '안 고른 �
   전략 점수 = 가중 평균을 '근거 1단위'만큼 0.5(보통) 쪽으로 당김 — 한두 번 좋았던 전략이 1등이 되지 않게.
 추천 조건: 점수 ≥ 0.60 · 가중 평균 CAGR > 0 · 플러스 비율 ≥ 50% · 가중 평균 MDD > −60%, 그 자리(계좌·포트)에 안 고른 전략.
 권장 설정: 같은 전략의 강도·손절 실험 중 점수가 가장 높은 조합(근거 2회 이상이고 기본보다 높을 때만).
+  [§91] 기간 백테스트에서 '상한가 마감 신호 제외'를 켠 실험은 별도 조합(lu=True)으로 센다.
 주의: 과거 성적 순위다 — 59개 중 위를 고르면 운이 섞인다(§52 SPA p≈0.4). 추천은 '검토할 후보'이지 보증이 아님.
 """
 import glob
@@ -118,6 +119,7 @@ def load_observations(now=None):
         w = min(yrs, 5.0) * (0.5 ** (max(age, 0) / HALF_LIFE_DAYS)) * rule
         sv = prm.get("strength_version") or "v1"
         stop, take = prm.get("stop"), prm.get("take")
+        lu = bool(prm.get("skip_limitup"))           # [§91] 상한가 마감 신호 제외 실험
         base_rows, str_rows = [], []
         for r in d.get("results") or []:
             if r.get("error") or r.get("cagr") is None:
@@ -126,9 +128,12 @@ def load_observations(now=None):
             rr = dict(r, engine=e)
             (str_rows if r.get("strength_min") is not None else base_rows).append(rr)
 
-        def vk(r, sv=sv, stop=stop, take=take):
+        def vk(r, sv=sv, stop=stop, take=take, lu=lu):
             th = r.get("strength_min")
-            return json.dumps({"sv": sv if th is not None else None, "th": th, "stop": stop, "take": take}, sort_keys=True)
+            v = {"sv": sv if th is not None else None, "th": th, "stop": stop, "take": take}
+            if lu:                  # 켠 실험만 열쇠에 넣는다 — 끈 실험(기본 열쇠 포함)은 예전 기록과 같은 열쇠
+                v["lu"] = True
+            return json.dumps(v, sort_keys=True)
         if len(base_rows) >= 2:
             n_jobs += 1
             obs += _obs_from_rows(base_rows, yrs, w, f"기간 {start}~{end}", vk)
@@ -211,6 +216,8 @@ def variant_text(v):
         parts.append(f"손절 {v['stop']:g}%")
     if v.get("take") is not None:
         parts.append(f"익절 +{v['take']:g}%")
+    if v.get("lu"):
+        parts.append("상한가 마감 신호 제외")
     return " · ".join(parts) or "기본(강도·손절 없음)"
 
 

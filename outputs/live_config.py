@@ -12,6 +12,8 @@ live_config.py — 모의매매 전략 설정(계좌별 전략·슬롯·강도·
       것을 전체 10종목까지, 같은 날 후보는 전략 안 순위(강도 백분위) 높은 순). pool 이면 전략별 slots 값은 쓰지 않는다.
 전략별 강도 기준(2026-10-23 §71): 전략 행의 min_strength(0~10)가 있으면 그 전략은 그 값, 비우면(None) 계좌 기본값.
       트레이더는 account()["min_strength_by"][라이브이름] 로 읽는다(면제 전략은 기준과 무관).
+상한가 마감 신호 제외(2026-10-31 §91): 전략 행의 skip_limitup(True/False, 없으면 False) — 켜면 신호일에 상한가(+29.5%↑)로
+      마감한 종목의 그 전략 신호는 사지 않는다(signal_filters). 트레이더는 account()["skip_limitup"](라이브 이름 집합)로 읽는다.
 이름: 설정은 백테스트 엔진 이름(engine)으로 저장, 신호 CSV·원장엔 라이브 이름(live)을 쓴다
       (기존 두 전략만 별칭: star_high_52w_20_filt→high_52w_filt, star_high_500d_20→high_500d_filt).
 청산 규칙 누적(exit_rules): 전략을 빼도 그 전략으로 산 보유분은 만기까지 남는다 → 그 보유분의 손절·익절이
@@ -130,6 +132,8 @@ def validate(cfg, engine_names=None):
             sm = s.get("min_strength")
             if sm is not None and (not isinstance(sm, (int, float)) or isinstance(sm, bool) or not 0 <= sm <= 10):
                 errs.append(f"{lab}: {e} 전략별 강도 기준은 0~10 또는 비움")
+            if "skip_limitup" in s and not isinstance(s.get("skip_limitup"), bool):
+                errs.append(f"{lab}: {e} 상한가 마감 신호 제외 값 오류")
         if tot != SLOTS_TOTAL and A.get("slot_mode", "slots") == "slots":     # 칸 없음이면 전략별 칸 수는 안 씀
             errs.append(f"{lab}: 슬롯 합이 {tot} — {SLOTS_TOTAL} 이어야 합니다")
     return errs
@@ -165,7 +169,7 @@ def account(acct, cfg=None):
            "strength_version": A.get("strength_version", "v2"),
            "slot_mode": A.get("slot_mode", "slots"),
            "slots": {}, "priority": [], "exempt": set(), "stop": {}, "take": {}, "holding": {}, "engine": {},
-           "min_strength_by": {}}
+           "min_strength_by": {}, "skip_limitup": set()}
     # 누적 규칙 먼저(옛 보유분), 그 위에 현재 규칙
     for ln, r in (cfg.get("exit_rules") or {}).items():
         if r.get("stop") is not None:
@@ -184,6 +188,8 @@ def account(acct, cfg=None):
         out["min_strength_by"][ln] = float(sm) if sm is not None else out["min_strength"]   # [§71] 전략별 강도 기준
         if s.get("exempt"):
             out["exempt"].add(ln)
+        if s.get("skip_limitup"):                       # [§91] 상한가 마감 신호 제외
+            out["skip_limitup"].add(ln)
         out["stop"].pop(ln, None)
         out["take"].pop(ln, None)
         if s.get("stop") is not None:
@@ -244,14 +250,18 @@ def diff(old, new):
                 out.append(f"{lab} + {e} ({s['slots']}슬롯{', 강도 면제' if s['exempt'] else ''}"
                            f"{', 강도 기준 ' + format(s['min_strength'], 'g') if s.get('min_strength') is not None else ''}"
                            f"{', 손절 ' + format(s['stop'], 'g') + '%' if s['stop'] is not None else ''}"
-                           f"{', 익절 +' + format(s['take'], 'g') + '%' if s['take'] is not None else ''})")
+                           f"{', 익절 +' + format(s['take'], 'g') + '%' if s['take'] is not None else ''}"
+                           f"{', 상한가 마감 신호 제외' if s.get('skip_limitup') else ''})")
         for e in om:
             if e not in nm:
                 out.append(f"{lab} − {e} (보유분은 만기까지 그대로)")
         for e in nm:
             if e in om:
-                ch = [f"{ {'min_strength': '강도기준'}.get(k, k)} {_fmt(om[e].get(k))}→{_fmt(nm[e].get(k))}"
-                      for k in ("slots", "exempt", "stop", "take", "min_strength") if om[e].get(k) != nm[e].get(k)]
+                def _v(x, k):
+                    return bool(x.get(k)) if k == "skip_limitup" else x.get(k)     # 없음 = 끔
+                ch = [f"{ {'min_strength': '강도기준', 'skip_limitup': '상한가 제외'}.get(k, k)} {_fmt(_v(om[e], k))}→{_fmt(_v(nm[e], k))}"
+                      for k in ("slots", "exempt", "stop", "take", "min_strength", "skip_limitup")
+                      if _v(om[e], k) != _v(nm[e], k)]
                 if ch:
                     out.append(f"{lab} {e}: " + ", ".join(ch))
     return out
@@ -272,8 +282,9 @@ def save(new, note="", engine_names=None):
            "accounts": {a: {"min_strength": float(new["accounts"][a]["min_strength"]),
                             "strength_version": new["accounts"][a].get("strength_version", "v2"),
                             "slot_mode": new["accounts"][a].get("slot_mode", "slots"),
-                            "strategies": [{k: s.get(k) for k in ("engine", "slots", "exempt", "stop", "take", "holding",
-                                                                  "min_strength")}
+                            "strategies": [dict({k: s.get(k) for k in ("engine", "slots", "exempt", "stop", "take", "holding",
+                                                                        "min_strength")},
+                                                skip_limitup=bool(s.get("skip_limitup", False)))     # [§91]
                                            for s in new["accounts"][a]["strategies"]]}
                         for a in ACCOUNTS}}
     rules = dict(old.get("exit_rules") or {})

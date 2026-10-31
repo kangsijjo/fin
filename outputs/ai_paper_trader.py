@@ -91,6 +91,13 @@ def load_signals():
         s["score_ai"] = None
     for c in ("score_ic", "ai_prob", "score_v2", "score_ai"):
         s[c] = pd.to_numeric(s[c], errors="coerce")
+    # [§91] 신호일 상한가 마감 여부 — 설정에서 그 전략의 '상한가 마감 신호 제외'를 켠 포트는 담지 않음(_enter_configured)
+    try:
+        import signal_filters as _SF
+        _lu = {d: (_SF.limitup_codes(d) or set()) for d in s["signal_date"].unique()}
+        s["limitup"] = [c in _lu.get(d, set()) for c, d in zip(s["code"], s["signal_date"])]
+    except Exception:
+        s["limitup"] = False
     # [§85] AI 포트 순위 값: AI_SINCE 신호일부터 개선 AI 점수(0~10), 그 전은 옛 AI 확률(ai_prob) 그대로 — 과거 장부가 안 바뀐다.
     #   (과거 신호를 새 모델로 다시 채점하면 그 시기 매매가 학습에 들어 있어 미래를 본 셈이 된다)
     s["ai_score"] = s["score_ai"].where(s["signal_date"] >= AI_SINCE, s["ai_prob"])
@@ -336,6 +343,9 @@ def _enter_configured(g, pc, port, d, cal_all, positions, cash_box):
         ok = (c["_rk"].notna() & above) | ex
     else:                   # 강도는 종전처럼 무기록 통과(정렬 맨 뒤)
         ok = c["_rk"].isna() | above | ex
+    if "limitup" in c.columns:   # [§91] 전략 행에서 '상한가 마감 신호 제외'를 켰으면 그 전략의 상한가 마감일 신호는 뺀다
+        skip_lu = c["strategy"].map(lambda x: bool(rows[x].get("skip_limitup"))) & c["limitup"].fillna(False).astype(bool)
+        ok = ok & ~skip_lu
     pool = pc.get("slot_mode") == "pool"
     if pool and port != "ai":    # [§75] 칸 없음: 전략마다 점수 척도가 달라 '그 전략 안 순위(백분위)'로 비교
         import strength_model as SM

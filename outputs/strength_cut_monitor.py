@@ -58,6 +58,7 @@ STOP = {**_KW["stop"], **_KI["stop"]}
 TAKE = {**_KW["take"], **_KI["take"]}
 EXEMPT = _KW["exempt"] | _KI["exempt"]          # = kis ∪ kiwoom STRENGTH_EXEMPT
 EXEMPT_BY = {"kiwoom": set(_KW["exempt"]), "kis": set(_KI["exempt"])}
+SKIP_LU = {"kiwoom": set(_KW.get("skip_limitup") or ()), "kis": set(_KI.get("skip_limitup") or ())}   # [§91]
 MAX_POS = 10
 
 
@@ -121,6 +122,11 @@ def exit_of(panel, code, entry_date, strat):
     return ep, (cl[-1] / ep - 1) * 100 - COST_AT(dates[-1]), "보유중", dates[-1], False
 
 
+def _skip_lu(acct, strat, r):
+    """[§91] 그 계좌가 이 전략에 '상한가 마감 신호 제외'를 켰고 신호일 상한가 마감이면 True(라이브 cmd_buy 와 같음)."""
+    return strat in SKIP_LU.get(acct, ()) and bool(getattr(r, "limitup", False))
+
+
 def _passes(acct, strat, sc, offset):
     """규칙 통과 여부 — 면제는 항상, 필터 없음(None)은 항상, 그 외 전략별 기준+offset."""
     if strat in EXEMPT_BY[acct] or offset is None:
@@ -156,7 +162,7 @@ def simulate(sig, panel, tdates, offset, rule):
             for cand in order:
                 for r in cand.itertuples():
                     strat = r.strategy
-                    if not _passes(acct, strat, r.sc, offset):
+                    if _skip_lu(acct, strat, r) or not _passes(acct, strat, r.sc, offset):
                         continue
                     if r.code in held or len(held) >= MAX_POS:
                         continue
@@ -182,7 +188,8 @@ def simulate_signals(sig, panel, tdates, offset, rule):
     칸이 꽉 차면 위 simulate 는 규칙이 달라도 같은 종목만 사서 차이가 안 보인다 → '기준이 좋은 신호를 골라내는가'를 따로 본다."""
     rows = []
     for r in sig.itertuples():
-        if r.strategy not in PRIORITY.get(r.acct, []) or not _passes(r.acct, r.strategy, r.sc, offset):
+        if (r.strategy not in PRIORITY.get(r.acct, []) or _skip_lu(r.acct, r.strategy, r)
+                or not _passes(r.acct, r.strategy, r.sc, offset)):
             continue
         k = np.searchsorted(tdates, r.signal_date)
         if k + 1 >= len(tdates):
@@ -213,6 +220,12 @@ def load_scores(path=LOG, since=V2_SINCE):
     L = L[L["signal_date"] >= since].copy()
     L["code"] = L["code"].astype(str).str.zfill(6)
     L = L.drop_duplicates(["signal_date", "acct", "strategy", "code"], keep="last")
+    try:                                          # [§91] 신호일 상한가 마감 여부(설정에서 켠 전략은 라이브처럼 뺀다)
+        import signal_filters as _SF
+        _lu = {d: (_SF.limitup_codes(d) or set()) for d in L["signal_date"].unique()}
+        L["limitup"] = [c in _lu.get(d, set()) for c, d in zip(L["code"], L["signal_date"])]
+    except Exception:
+        L["limitup"] = False
     return L.rename(columns={"name": "name_"})
 
 

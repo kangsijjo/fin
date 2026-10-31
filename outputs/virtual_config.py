@@ -13,7 +13,8 @@ virtual_config.py — AI·강도 '가상매매'(ai_paper_trader) 전략 설정. 
     · 첫 저장 때 '종전 규칙'(모의계좌 신호 전부·10칸 공유) 항목을 이력 맨 앞에 둔다. 종전 규칙 구간의 강도 기준·면제는
       **그날 모의계좌가 실제로 쓰던 값**(live_rules_timeline — live_config 백업으로 복원)이라 나중에 바꿔도 과거가 안 바뀐다.
 
-포트폴리오 설정: {"min_score": 숫자|None, "strength_version": v1|v2, "strategies": [{engine, slots, exempt, stop, take, holding, min_score}]}
+포트폴리오 설정: {"min_score": 숫자|None, "strength_version": v1|v2, "strategies": [{engine, slots, exempt, stop, take, holding, min_score, skip_limitup}]}
+    전략 행의 skip_limitup(2026-10-31 §91) = 신호일 상한가 마감 종목의 그 전략 신호는 담지 않음(없으면 끔).
     전략 행의 min_score(2026-10-23 §71) = 그 전략만의 기준(비우면 포트폴리오 기준).
     ai       : min_score = AI 점수 기준(0~10, 5 = 그 전략 보통, 비우면 기준 없음). 순서는 AI 점수 높은 순. 면제 = 기준과 상관없이 후보.
                [§85] 2026-11-02 신호일부터 개선 AI(ai_model score_ai). 그 전 신호일은 옛 AI 확률(0~1) 순 그대로이고,
@@ -220,6 +221,8 @@ def validate(ports, engine_names=None):
             sm = s.get("min_score")
             if sm is not None and (not isinstance(sm, (int, float)) or isinstance(sm, bool) or not 0 <= sm <= hi):
                 errs.append(f"{lab}: {e} 전략별 기준은 0~{hi} 또는 비움")
+            if "skip_limitup" in s and not isinstance(s.get("skip_limitup"), bool):
+                errs.append(f"{lab}: {e} 상한가 마감 신호 제외 값 오류")
         if tot != SLOTS_TOTAL and P.get("slot_mode", "slots") == "slots":   # [§75] 칸 없음이면 전략별 칸 수는 안 씀
             errs.append(f"{lab}: 슬롯 합이 {tot} — {SLOTS_TOTAL} 이어야 합니다")
     return errs
@@ -257,14 +260,16 @@ def diff(old, new):
         nm = {s["engine"]: s for s in n["strategies"]}
         for e in nm:
             if e not in om:
-                out.append(f"{lab} + {e} ({nm[e]['slots']}칸)")
+                out.append(f"{lab} + {e} ({nm[e]['slots']}칸{', 상한가 마감 신호 제외' if nm[e].get('skip_limitup') else ''})")
         for e in om:
             if e not in nm:
                 out.append(f"{lab} − {e} (산 것은 만기까지)")
         for e in nm:
             if e in om:
-                ch = [f"{ {'min_score': '기준'}.get(k, k)} {_fmt(om[e].get(k))}→{_fmt(nm[e].get(k))}"
-                      for k in ("slots", "exempt", "stop", "take", "min_score") if om[e].get(k) != nm[e].get(k)]
+                def _v(x, k):
+                    return bool(x.get(k)) if k == "skip_limitup" else x.get(k)     # [§91] 없음 = 끔
+                ch = [f"{ {'min_score': '기준', 'skip_limitup': '상한가 제외'}.get(k, k)} {_fmt(_v(om[e], k))}→{_fmt(_v(nm[e], k))}"
+                      for k in ("slots", "exempt", "stop", "take", "min_score", "skip_limitup") if _v(om[e], k) != _v(nm[e], k)]
                 if ch:
                     out.append(f"{lab} {e}: " + ", ".join(ch))
     return out
@@ -284,6 +289,7 @@ def clean(ports, holding_map=None):
             e = str(x.get("engine", ""))
             rows.append({"engine": e, "slots": int(x.get("slots") or 0), "exempt": bool(x.get("exempt")),
                          "stop": num(x.get("stop")), "take": num(x.get("take")), "min_score": num(x.get("min_score")),
+                         "skip_limitup": bool(x.get("skip_limitup", False)),           # [§91]
                          "holding": int((holding_map or {}).get(e, x.get("holding") or 20))})
         out[p] = {"min_score": ms, "strength_version": str(P.get("strength_version") or "v2"),
                   "slot_mode": str(P.get("slot_mode") or "slots"), "strategies": rows}

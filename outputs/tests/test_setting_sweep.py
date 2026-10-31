@@ -115,7 +115,7 @@ def test_fine_refines_around_best_and_smoothing_prefers_plateau():
     assert S._key(4.8, -18.0, None) in more and S._key(5.3, -22.0, None) in more, "강도 0.1·손절 1%p 둘레"
     # 한 점만 튀는 곳(4.6) vs 넓게 좋은 구간(5.0 둘레) — 주변 평균으로 넓은 쪽을 고른다
     for k in more:
-        th, st, tk = k
+        th, st, tk = k[:3]            # [§91] 열쇠 = (강도, 손절, 익절, 상한가 제외)
         near = th is not None and st is not None and tk is None and abs(th - 5.0) <= 0.2 and abs(st + 20) <= 2
         T[k] = {y: ((5.5 if near else 2.5), -20.0, 40) for y in yrs}       # 기본(2.0)보다 조금 나은 바탕 + 넓게 좋은 구간
     T[S._key(4.6, -20.0, None)] = {y: (9.0, -20.0, 40) for y in yrs}
@@ -137,3 +137,29 @@ def test_reco_uses_sweep_out_of_sample(tmp_path, monkeypatch):
     assert info["sweep"]["n"] == 2
     sc = {o["engine"]: o["score"] for o in obs}
     assert sc["aa"] > sc["bb"]
+
+
+def test_limitup_axis_is_its_own_dimension():
+    """[§91] 상한가 마감 신호 제외(lu) — 켬/끔은 서로 이웃이 아니고, 꾸준히 나으면 lu=True 를 권장."""
+    yrs = ["2021", "2022", "2023", "2024", "2025"]
+    T = {}
+    for th in [None] + S.TH:
+        for st in S.STOPS:
+            for tk in S.TAKES:
+                for lu in (False, True):
+                    T[S._key(th, st, tk, lu)] = {y: ((4.0 if lu else 1.0), -20.0, 40) for y in yrs}
+    r = S.choose(T, yrs)
+    assert r["status"] == "권장" and r["best"]["lu"] is True
+    M = S._near([S._key(5.0, -20.0, None, False), S._key(5.0, -20.0, None, True)], S.SMOOTH)
+    assert M.toarray().tolist() == [[1.0, 0.0], [0.0, 1.0]], "켬/끔은 주변 평균에 섞이지 않음"
+    assert S._key(5, -20, None) == (5.0, -20.0, None, False)
+
+
+def test_limitup_flags_marks_signal_day():
+    import signal_filters as SF
+    df = pd.DataFrame({"code": ["000001"] * 4 + ["000002"] * 4,
+                       "date": ["20240102", "20240103", "20240104", "20240105"] * 2,
+                       "change_pct": [1.0, 29.9, 3.0, -2.0, 30.0, 1.0, 2.0, 1.0]})
+    # 000001: 01-03 상한가 → 01-04 진입 매매가 해당 / 000002: 01-02 상한가 → 01-03 진입
+    f = SF.limitup_flags(df, ["000001", "000001", "000002", "000002"], ["20240104", "20240105", "20240103", "20240104"])
+    assert f == [True, False, True, False]

@@ -8,7 +8,7 @@ setting_sweep.py — 전략마다 강도 기준 × 손절 × 익절 조합을 �
   ② 전략마다 엔진 백테스트 매매(2021~) + 강도 점수(워크포워드 — 그 해 이전 매매로만 학습):
      v2(전략별 선형) · AI(개선 AI). 손절·익절 재청산은 기간 백테스트와 같은 규칙(종가 판정 → 다음날 시가, 만기는 상한).
   ③ 조합 = 강도[기준 없음(강도 순서로만)·4.0·4.5·5.0·5.5·6.0] × 손절[없음·−10·−15·−20·−25·−30] × 익절[없음·+20·+30·+50]
-     (+ 지금 설정값), 해마다 따로 10칸 단독 자본 시뮬 → 해별 수익·MDD.
+     × [§91] 상한가 마감 신호 제외[끔·켬] (+ 지금 설정값), 해마다 따로 10칸 단독 자본 시뮬 → 해별 수익·MDD.
   ④ 점수 = 해 평균 수익 + 0.3 × 해 평균 MDD(음수) — 균형. 해 평균 매매 10건 미만인 조합은 제외(기준이 너무 빡빡).
   ⑤ 과적합 점검(해마다 검증): 해 Y 에 대해 'Y 이전 해들만 보고 고른 조합'이 Y 에도 '기준 없음·손절/익절 없음'보다 나았나.
      권장 = 전체 기간 최고 조합이 기본보다 낫고 · 해마다 검증 60% 이상 이김 · 이웃 값(강도 ±0.5, 손절 ±5%p)도 기본보다 나음.
@@ -119,8 +119,13 @@ def objective(stats, years):
     return float(np.mean([x[0] for x in v]) + MDD_W * np.mean([x[1] for x in v]))
 
 
-def _key(th, stop, take):
-    return (None if th is None else float(th), None if stop is None else float(stop), None if take is None else float(take))
+def _key(th, stop, take, lu=False):
+    """조합 열쇠 (강도, 손절, 익절, 상한가 마감 신호 제외[§91])."""
+    return (None if th is None else float(th), None if stop is None else float(stop), None if take is None else float(take),
+            bool(lu))
+
+
+KEYS = ("th", "stop", "take", "lu")
 
 
 def summarize(stats):
@@ -134,20 +139,21 @@ def summarize(stats):
 
 
 def _arr(keys):
-    k = np.array([[np.nan if v is None else v for v in key] for key in keys], float)
-    return k[:, 0], k[:, 1], k[:, 2]
+    k = np.array([[np.nan if v is None else float(v) for v in key[:3]] for key in keys], float).reshape(-1, 3)
+    lu = np.array([bool(key[3]) if len(key) > 3 else False for key in keys], bool)
+    return k[:, 0], k[:, 1], k[:, 2], lu
 
 
 def _near(keys, rad, chunk=400):
     """keys 사이 '가까움' 행렬(희소) — 같은 칸이 비었는지(None)가 같고 차이가 rad 이내. 자기 자신 포함.
     촘촘 탐색은 조합이 수천 개라 n×n 을 한 번에 만들지 않고 줄 묶음으로 나눠 만든다(메모리 작게)."""
     from scipy.sparse import csr_matrix
-    th, st, tk = _arr(keys)
+    th, st, tk, lu = _arr(keys)
     n = len(keys)
     rows, cols = [], []
     for a in range(0, n, chunk):
         b = min(n, a + chunk)
-        m = np.ones((b - a, n), bool)
+        m = lu[a:b, None] == lu[None, :]          # [§91] 상한가 제외 켬/끔은 서로 이웃이 아님
         for v, r in ((th, rad[0]), (st, rad[1]), (tk, rad[2])):
             nan = np.isnan(v)
             vv = np.nan_to_num(v).astype(np.float32)
@@ -173,7 +179,7 @@ def _smoothed(M, o):
 def choose(table, years, smooth=SMOOTH):
     """table: {key: {Y: (ret, mdd, n)}} → 권장 판정. 고르기 = 주변 평균 점수 최고(촘촘 격자일수록 의미 — 거친 격자에선 이웃이 없어 그 점 점수).
     해마다 검증: Y 이전 해만 보고 고른 조합이 Y 에서 기본보다 나았나. 넓은 이웃(강도 ±0.5·손절 ±5·익절 ±10) 평균도 기본보다 나아야 권장."""
-    base_k = _key(None, None, None)
+    base_k = _key(None, None, None, False)
     if base_k not in table:
         return None
     keys = list(table)
@@ -215,7 +221,7 @@ def choose(table, years, smooth=SMOOTH):
     better = base_o is None or sm[b] > base_o + 1e-9
     win_ok = tests > 0 and wins / tests >= WIN_SHARE
     status = "권장" if (best_k != base_k and better and win_ok and plateau) else "유지"
-    return {"status": status, "best": dict(zip(("th", "stop", "take"), best_k)), "best_stats": summarize(table[best_k]),
+    return {"status": status, "best": dict(zip(KEYS, best_k)), "best_stats": summarize(table[best_k]),
             "base_stats": summarize(table[base_k]), "obj_best": round(float(o_all[b]), 2), "obj_best_smooth": round(float(sm[b]), 2),
             "obj_base": None if base_o is None else round(base_o, 2),
             "wins": f"{wins}/{tests}", "oos_pick": round((pick_comp - 1) * 100, 1), "oos_base": round((base_comp - 1) * 100, 1),
@@ -230,10 +236,13 @@ def fine_combos(table, years, seeds=FINE_SEEDS):
     for k in keys:
         if len(picked) >= seeds:
             break
-        if any(abs((k[0] or 0) - (p[0] or 0)) <= 0.5 and abs((k[1] or 0) - (p[1] or 0)) <= 5 and (k[2] == p[2]) for p in picked):
+        if any(abs((k[0] or 0) - (p[0] or 0)) <= 0.5 and abs((k[1] or 0) - (p[1] or 0)) <= 5 and (k[2] == p[2])
+               and k[3:] == p[3:] for p in picked):
             continue                                  # 이미 고른 구간과 겹치면 다음 후보
         picked.append(k)
-    for th, st, tk in picked:
+    for pk in picked:
+        th, st, tk = pk[:3]
+        lu = pk[3] if len(pk) > 3 else False
         ths = [None] if th is None else [round(th + d, 1) for d in np.arange(-FINE_TH[0], FINE_TH[0] + 1e-9, FINE_TH[1])]
         sts = [None] if st is None else [round(st + d, 1) for d in np.arange(-FINE_ST[0], FINE_ST[0] + 1e-9, FINE_ST[1])]
         tks = [None] if tk is None else [round(tk + d, 1) for d in np.arange(-FINE_TK[0], FINE_TK[0] + 1e-9, FINE_TK[1])]
@@ -246,16 +255,16 @@ def fine_combos(table, years, seeds=FINE_SEEDS):
                 for c in tks:
                     if c is not None and not 1 <= c <= 300:
                         continue
-                    k = _key(a, b, c)
+                    k = _key(a, b, c, lu)
                     if k not in table:
                         out.add(k)
-    return sorted(out, key=lambda k: tuple(-1e9 if v is None else v for v in k)), picked
+    return sorted(out, key=lambda k: tuple(-1e9 if v is None else float(v) for v in k)), picked
 
 
 # ── 대상·현재 설정 ──────────────────────────────────────────────────────────
 
 def current_settings():
-    """{엔진: [{place, family, th, stop, take}]} — 지금 모의계좌·가상매매 설정(가상은 예약분 우선)."""
+    """{엔진: [{place, family, th, stop, take, lu}]} — 지금 모의계좌·가상매매 설정(가상은 예약분 우선). lu = 상한가 마감 신호 제외."""
     import live_config as LC
     import virtual_config as VC
     out = {}
@@ -265,7 +274,8 @@ def current_settings():
         fam = A.get("strength_version") or "v2"
         for s in A["strategies"]:
             th = None if s.get("exempt") else (s.get("min_strength") if s.get("min_strength") is not None else A.get("min_strength"))
-            out.setdefault(s["engine"], []).append({"place": a, "family": fam, "th": th, "stop": s.get("stop"), "take": s.get("take")})
+            out.setdefault(s["engine"], []).append({"place": a, "family": fam, "th": th, "stop": s.get("stop"), "take": s.get("take"),
+                                                    "lu": bool(s.get("skip_limitup"))})
     act, pend = VC.state()
     e = pend or act
     if e and not e.get("legacy"):
@@ -274,7 +284,8 @@ def current_settings():
             fam = "ai" if p == "ai" else (P.get("strength_version") or "v2")
             for s in P["strategies"]:
                 th = None if s.get("exempt") else (s.get("min_score") if s.get("min_score") is not None else P.get("min_score"))
-                out.setdefault(s["engine"], []).append({"place": p, "family": fam, "th": th, "stop": s.get("stop"), "take": s.get("take")})
+                out.setdefault(s["engine"], []).append({"place": p, "family": fam, "th": th, "stop": s.get("stop"), "take": s.get("take"),
+                                                        "lu": bool(s.get("skip_limitup"))})
     return out
 
 
@@ -294,7 +305,7 @@ def targets():
 
 # ── 전략 1개 ─────────────────────────────────────────────────────────────────
 
-def sweep_engine(engine, df, smap, T_all, cur_rows, log=print, fine=False):
+def sweep_engine(engine, df, smap, T_all, cur_rows, log=print, fine=False, lu_keys=None):
     import strategy_engine as E
     import strength_backtest as SB
     import strength_model as SM
@@ -320,8 +331,11 @@ def sweep_engine(engine, df, smap, T_all, cur_rows, log=print, fine=False):
         log(f"  [{engine}] AI 점수 실패: {e}")
     panel = build_panel(df, {str(t.code) for t in trs})
     ex = {}
+    import signal_filters as SFL
     B = pd.DataFrame({"entry_date": np.array([int(t.entry_date) for t in trs], np.int32),
-                      "code": [str(t.code) for t in trs], "Y": yrs})
+                      "code": [str(t.code) for t in trs], "Y": yrs,
+                      # [§91] 신호일(진입 전날) 상한가 마감 — '상한가 마감 신호 제외' 축
+                      "lu": SFL.limitup_flags(df, [t.code for t in trs], [t.entry_date for t in trs], keys=lu_keys)})
 
     def exits(st, tk):
         """(손절, 익절) 재청산 결과 — 처음 쓸 때 계산해 (청산일 int32, 순수익 float32)만 둔다(촘촘 탐색 수백 조합도 메모리 작게).
@@ -337,18 +351,20 @@ def sweep_engine(engine, df, smap, T_all, cur_rows, log=print, fine=False):
         s_ = sc[fam]
         by = {}
         for k in combos:
-            by.setdefault((k[1], k[2]), []).append(k[0])
-        for (st, tk), ths in by.items():
+            by.setdefault((k[1], k[2]), []).append((k[0], k[3] if len(k) > 3 else False))
+        for (st, tk), tls in by.items():
             D = exits(st, tk).assign(score=np.where(np.isnan(s_), -1.0, s_), _s=s_)
             byY = {Y: g for Y, g in D.groupby("Y")}
-            for th in ths:
+            for th, lu in tls:
                 stats = {}
                 for Y in years:
                     g = byY.get(Y)
+                    if g is not None and lu:
+                        g = g[~g["lu"]]                        # [§91] 상한가 마감 신호 제외
                     # 라이브처럼 강도 기록이 없는 신호는 통과(맨 뒤 순서) — fail-open
                     R = g if (g is None or th is None) else g[(g["_s"] >= th) | g["_s"].isna()]
                     stats[Y] = year_sim(R)
-                table[_key(th, st, tk)] = stats
+                table[_key(th, st, tk, lu)] = stats
 
     res = {"n_trades": len(trs), "years": years, "families": {}, "current": [], "fine": bool(fine)}
     tables = {}
@@ -357,8 +373,8 @@ def sweep_engine(engine, df, smap, T_all, cur_rows, log=print, fine=False):
         if s_ is None or np.isnan(s_).all():
             res["families"][fam] = {"error": "점수 없음(모델에 없는 전략이거나 학습 표본 부족)"}
             continue
-        coarse = [_key(th, st, tk) for th in [None] + TH for st in STOPS for tk in TAKES]
-        cur = [_key(r["th"], r["stop"], r["take"]) for r in cur_rows if r["family"] == fam]
+        coarse = [_key(th, st, tk, lu) for th in [None] + TH for st in STOPS for tk in TAKES for lu in (False, True)]
+        cur = [_key(r["th"], r["stop"], r["take"], r.get("lu", False)) for r in cur_rows if r["family"] == fam]
         table = {}
         evaluate(fam, sorted(set(coarse) | set(cur), key=str), table)
         search = {k: table[k] for k in coarse}          # 고르는 대상 = 격자(지금 설정값은 비교용으로만)
@@ -371,11 +387,11 @@ def sweep_engine(engine, df, smap, T_all, cur_rows, log=print, fine=False):
         tables[fam] = table
         r_ = choose(search, years) or {"error": "선택 불가"}
         if seeds:
-            r_["seeds"] = [dict(zip(("th", "stop", "take"), k)) for k in seeds]
+            r_["seeds"] = [dict(zip(KEYS, k)) for k in seeds]
         res["families"][fam] = r_
     for r in cur_rows:
         t = tables.get(r["family"])
-        k = _key(r["th"], r["stop"], r["take"])
+        k = _key(r["th"], r["stop"], r["take"], r.get("lu", False))
         res["current"].append(dict(r, stats=summarize(t[k]) if t and k in t else None))
     res["sec"] = round(time.time() - t0, 1)
     res["n_exits"] = len(ex)
@@ -399,6 +415,8 @@ def run(names=None, log=print, fine=False):
     df = df[df["date"] >= f"{FROM_YEAR - 3}0101"].reset_index(drop=True)   # 워밍업(최대 ~560거래일) 여유만 남겨 메모리 절약
     df["code"] = df["code"].astype(str).str.zfill(6)
     T_all = AIM.load_tables()
+    import signal_filters as SFL
+    lu_keys = SFL.limitup_entry_keys(df)          # [§91] 상한가 마감 신호일 → 진입 열쇠(전략마다 다시 만들지 않게 한 번만)
     old = {}
     try:
         old = json.load(open(out_path(), encoding="utf-8")).get("engines") or {}
@@ -407,7 +425,7 @@ def run(names=None, log=print, fine=False):
     eng = dict(old)
     for n in names:
         try:
-            eng[n] = sweep_engine(n, df, smap, T_all, cur.get(n, []), log=log, fine=fine)
+            eng[n] = sweep_engine(n, df, smap, T_all, cur.get(n, []), log=log, fine=fine, lu_keys=lu_keys)
             import gc
             gc.collect()
             eng[n]["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -415,7 +433,7 @@ def run(names=None, log=print, fine=False):
             eng[n] = {"error": f"{type(e).__name__}: {str(e)[:150]}", "updated": datetime.now().strftime("%Y-%m-%d %H:%M")}
             log(f"  [{n}] 실패: {eng[n]['error']}")
     out = {"generated": datetime.now().strftime("%Y-%m-%d %H:%M"), "from_year": FROM_YEAR, "fine": bool(fine),
-           "grid": {"th": TH, "stop": STOPS, "take": TAKES,
+           "grid": {"th": TH, "stop": STOPS, "take": TAKES, "lu": [False, True],
                     "fine": {"seeds": FINE_SEEDS, "th": FINE_TH, "stop": FINE_ST, "take": FINE_TK, "smooth": SMOOTH} if fine else None},
            "rule": {"mdd_w": MDD_W, "min_trades_year": MIN_TRADES_YEAR, "win_share": WIN_SHARE, "exit_mode": "close"},
            "engines": eng, "sec": round(time.time() - t0)}
