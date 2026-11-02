@@ -3505,6 +3505,8 @@ details.logdrop>summary::before{content:"\\25B8  ";color:#38bdf8;margin-right:6p
 details.logdrop[open]>summary::before{content:"\\25BE  "}
 /* 정렬 가능한 표 헤더 */
 th.sortable{cursor:pointer;user-select:none;transition:color .2s}
+table.tbl-click thead th{cursor:pointer;user-select:none}
+.sort-mark{color:#38bdf8}
 th.sortable:hover{color:#38bdf8}
 /* 표 필터(2026-08-09) — initTableFilter 가 표 위에 자동 삽입 */
 .tblfilter-wrap{display:flex;align-items:center;gap:8px;margin:2px 0 8px}
@@ -3756,15 +3758,15 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
     </table>
     <div style="color:#c9d1d9;font-size:13px;margin:16px 0 4px">전략별 성과 (완료 거래)</div>
     <div id="ap-bystrat" style="color:#8b949e;font-size:13px">데이터 없음</div>
-    <div style="color:#c9d1d9;font-size:13px;margin:16px 0 4px">완료 매매내역 (클릭해서 펼치기)</div>
+    <div style="color:#c9d1d9;font-size:13px;margin:16px 0 4px">완료 매매내역 (클릭해서 펼치기) <span style="color:#8b949e;font-size:11px">· 열 제목 클릭 = 오름차순 ▲(다시 클릭 = 내림차순 ▼)</span></div>
     <div id="ap-trades" style="color:#8b949e;font-size:13px">완료 거래 없음</div>
   </div>
   <div class="section">
-    <h2>강도 기록 (최근 300건) <span style="color:#8b949e;font-size:11px;font-weight:400">&mdash; 열 제목 클릭 = 정렬(다시 클릭 = 반대방향)</span></h2>
+    <h2>강도 기록 (최근 300건) <span style="color:#8b949e;font-size:11px;font-weight:400">&mdash; 열 제목 클릭 = 오름차순 ▲(다시 클릭 = 내림차순 ▼)</span></h2>
     <div style="color:#8b949e;font-size:12px;margin-bottom:8px">강도(IC)=IC가중 통합 팩터점수(0~10, 높을수록 강함) · 거래대금순위=당일 전체순위(1=최대) · 슬롯순위=같은 전략 내 강도 우선순위(1=최강)</div>
     <table><thead><tr id="st-head">
-      <th class="r sortable" onclick="sortSt('signal_date')">신호일</th><th class="sortable" onclick="sortSt('account')">계좌</th><th class="sortable" onclick="sortSt('strategy')">전략</th><th class="sortable" onclick="sortSt('name')">종목</th>
-      <th class="r sortable" onclick="sortSt('entry_close')">진입가</th><th class="r sortable" onclick="sortSt('score_ic')">강도(IC)</th><th class="r sortable" onclick="sortSt('score_ai')" title="개선 AI 점수(0~10) — 11-02 전 신호는 옛 AI 확률(회색 %)">AI</th><th class="r sortable" onclick="sortSt('score_tv')">거래대금순위</th><th class="r sortable" onclick="sortSt('slot_rank')">슬롯순위</th><th class="sortable" onclick="sortSt('market_strong')">시장</th>
+      <th class="r sortable">신호일</th><th class="sortable">계좌</th><th class="sortable">전략</th><th class="sortable">종목</th>
+      <th class="r sortable">진입가</th><th class="r sortable">강도(IC)</th><th class="r sortable" title="개선 AI 점수(0~10) — 11-02 전 신호는 옛 AI 확률(회색 %, 정렬에선 맨 뒤)">AI</th><th class="r sortable">거래대금순위</th><th class="r sortable">슬롯순위</th><th class="sortable">시장</th>
     </tr></thead>
     <tbody id="st-rows"><tr><td colspan="10" style="color:#8b949e;text-align:center">강도 기록 없음 &mdash; 다음 신호생성(18:30) 때 첫 데이터 누적</td></tr></tbody>
     </table>
@@ -4452,7 +4454,6 @@ function fillStrength(st){
     :`<div style="color:#9ca3af;font-size:13px;line-height:1.6">${va?`${va.metric==='score_ai'?'개선 AI 점수':'옛 AI 확률'} 기록 ${fmt(va.logged_total)}건 누적 중 — 완료 매매 ${fmt(va.done_total)}건(9건 이상부터 분위 표시).<br>개선 AI 점수 기록 ${fmt(va.new_logged||0)}건 — 11-02 신호부터 쌓임(완료 9건부터 이 칸이 개선 AI 기준으로 바뀜).`:'AI 기록 없음'}</div>`);
   
   window._stRows = st.rows||[];
-  window._stSort = window._stSort || {key:null, asc:false};
   renderStRows();
 }
 
@@ -4509,42 +4510,31 @@ function fillAiPaper(ap){
   }).join('');
   setHtml('ap-bystrat', bsHtml||'완료 거래 없음');
 
+  // [§95] 5분마다 다시 그려도 펼친 상태·정렬을 유지(정렬은 _tblReapply)
+  const _apOpen=new Set(Array.from(document.querySelectorAll('#ap-trades details[open]')).map(x=>x.dataset.k));
   const trHtml=['ai','strength'].map(k=>{
     const p=P[k]; const tds=(p&&p.trades)||[];
     const label=k==='ai'?'🤖 AI':'💪 강도';
     if(!tds.length) return `<details style="margin-bottom:8px;background:#1f2937;padding:12px 16px;border-radius:8px"><summary style="cursor:pointer;color:#94a3b8">${label} — 완료 0건</summary></details>`;
     const body=tds.map(t=>`<tr>
-      <td style="font-weight:500">${t.code||''} ${t.name||''}</td>
+      <td style="font-weight:500" data-v="${_lcEsc(t.name||t.code||'')}">${t.code||''} ${t.name||''}</td>
       <td style="color:#94a3b8;font-size:12px">${t.strategy||''}</td>
       <td class="r" style="font-size:12px;color:#cbd5e1">${t.entry_date||''}</td>
       <td class="r" style="font-size:12px;color:#cbd5e1">${t.exit_date||''}</td>
       <td class="r" style="font-weight:600">${t.score!=null?t.score:''}</td>
       <td class="r ${clr(t.net_pct)}" style="font-weight:600">${pct(t.net_pct)}</td>
       <td class="r ${clr(t.pnl)}" style="font-weight:600">${fmt(t.pnl)}원</td></tr>`).join('');
-    return `<details style="margin-bottom:8px;background:#1f2937;padding:12px 16px;border-radius:8px"><summary style="cursor:pointer;color:#e2e8f0;font-weight:600">${label} — 완료 ${tds.length}건 <span style="font-weight:normal;color:#64748b;font-size:12px">(클릭)</span></summary>
-      <table style="margin-top:12px"><thead><tr><th>종목</th><th>전략</th><th class="r">진입</th><th class="r">청산</th><th class="r">점수</th><th class="r">순수익%</th><th class="r">손익</th></tr></thead>
-      <tbody>${body}</tbody></table></details>`;
+    return `<details data-k="${k}" ${_apOpen.has(k)?'open':''} style="margin-bottom:8px;background:#1f2937;padding:12px 16px;border-radius:8px"><summary style="cursor:pointer;color:#e2e8f0;font-weight:600">${label} — 완료 ${tds.length}건 <span style="font-weight:normal;color:#64748b;font-size:12px">(클릭)</span></summary>
+      <table class="tbl-click" style="margin-top:12px"><thead><tr><th>종목</th><th>전략</th><th class="r">진입</th><th class="r">청산</th><th class="r">점수</th><th class="r">순수익%</th><th class="r">손익</th></tr></thead>
+      <tbody id="ap-trades-${k}">${body}</tbody></table></details>`;
   }).join('');
   setHtml('ap-trades', trHtml||'완료 거래 없음');
+  _tblReapply(['ap-trades-ai','ap-trades-strength']);
 }
 
+// [§95] 정렬은 범용 '한 번 클릭' 정렬(SORTABLE_TBODIES 'st-rows')이 맡는다 — 종전 sortSt(첫 클릭 내림차순)와 이중이던 것을 통일
 function renderStRows(){
   const rows=(window._stRows||[]).slice();
-  const s=window._stSort||{};
-  if(s.key){
-    const numeric=['entry_close','score_ic','ai_prob','score_ai','score_tv','slot_rank','signal_date'].includes(s.key);
-    rows.sort((a,b)=>{
-      let x=a[s.key], y=b[s.key];
-      if(numeric){ x=Number(x)||(x===0?0:-Infinity); y=Number(y)||(y===0?0:-Infinity); }
-      else { x=String(x||''); y=String(y||''); }
-      return (x<y?-1:x>y?1:0)*(s.asc?1:-1);
-    });
-  }
-  document.querySelectorAll('#st-head th.sortable').forEach(th=>{
-    th.textContent=th.textContent.replace(/ [▲▼]$/,'');
-    const m=th.getAttribute('onclick')||'';
-    if(s.key && m.includes(`'${s.key}'`)) th.textContent+=(s.asc?' ▲':' ▼');
-  });
   setHtml('st-rows', rows.length?rows.map(r=>{
     const msv=String(r.market_strong);
     const ms=(msv==='True'||msv==='true')?'<span style="color:#10b981;background:rgba(16,185,129,0.1);padding:2px 6px;border-radius:4px;font-weight:600">강세</span>'
@@ -4558,19 +4548,11 @@ function renderStRows(){
       <td style="font-weight:500">${r.code||''} ${r.name||''}</td>
       <td class="r">${fmt(r.entry_close)}</td>
       <td class="r ${icCls}" style="font-weight:700;font-size:14px">${safe(r.score_ic,'-')}</td>
-      <td class="r" style="font-weight:600" title="${(r.score_ai!=null&&r.score_ai!=='')?'개선 AI 점수(0~10, 5=그 전략 보통)':'옛 AI 확률(학습 중단된 대박 확률 모델)'}">${(r.score_ai!=null&&r.score_ai!=='')?Number(r.score_ai).toFixed(1):((r.ai_prob!=null&&r.ai_prob!=='')?'<span style="color:#64748b">'+(Number(r.ai_prob)*100).toFixed(1)+'%</span>':'-')}</td>
+      <td class="r" style="font-weight:600" data-v="${(r.score_ai!=null&&r.score_ai!=='')?r.score_ai:''}" title="${(r.score_ai!=null&&r.score_ai!=='')?'개선 AI 점수(0~10, 5=그 전략 보통)':'옛 AI 확률(학습 중단된 대박 확률 모델)'}">${(r.score_ai!=null&&r.score_ai!=='')?Number(r.score_ai).toFixed(1):((r.ai_prob!=null&&r.ai_prob!=='')?'<span style="color:#64748b">'+(Number(r.ai_prob)*100).toFixed(1)+'%</span>':'-')}</td>
       <td class="r">${safe(r.score_tv,'-')}</td>
       <td class="r">${safe(r.slot_rank,'-')}</td>
       <td>${ms}</td></tr>`;
   }).join(''):'<tr><td colspan="10" style="color:#9ca3af;text-align:center">강도 기록 없음</td></tr>');
-}
-
-function sortSt(key){
-  const s=window._stSort||{key:null,asc:false};
-  if(s.key===key) s.asc=!s.asc;
-  else { s.key=key; s.asc=false; }
-  window._stSort=s;
-  renderStRows();
 }
 
 function fillBacktest(bt, sc){
@@ -4626,6 +4608,7 @@ function fillBacktest(bt, sc){
 
 // ── [2026-10-18] 기간 백테스트 테스트기 ─────────────────────────────────────────
 let _pbtMeta=null, _pbtTimer=null, _pbtLastRes=null;
+let _pbtHistAsc=false;      // [§95] 지난 계산 기록: false=최신순(기본) / true=오래된순
 // ── 지표 설명(마우스를 올리면 뜸) — '|' 는 줄바꿈 (2026-10-18) ──
 const _PBT_TIPS={
   strategy:'전략 이름을 누르면 어떤 조건으로 사고파는지 쉬운 말로 설명이 뜹니다|★ = 지금 모의매매에서 쓰는 전략|이름 옆 ℹ 참고 · ⚠ 경고(데이터·표본 부족) · ⛔ 오류 — 마우스를 올리면 이유와 결과를 읽는 법이 뜸',
@@ -4772,7 +4755,8 @@ async function pbtHistLoad(silent){
   if(silent) return;
   const f=(v,k)=>v==null||isNaN(v)?'-':(v>0?'+':'')+Number(v).toFixed(k==null?1:k)+'%';
   const st={done:'완료',running:'계산 중',error:'실패'};
-  setHtml('pbt-hist', _pbtHist.length?_pbtHist.map(j=>{
+  const _hl=_pbtHistAsc?_pbtHist.slice().reverse():_pbtHist;
+  setHtml('pbt-hist', _pbtHist.length?`<div style="margin-bottom:6px"><button class="runbtn" onclick="pbtHistOrder()" title="눌러서 순서 바꾸기">↕ ${_pbtHistAsc?'오래된순 ▲':'최신순 ▼'}</button></div>`+_hl.map(j=>{
     const t=j.top&&j.top[0];
     const head=`<b style="color:#e2e8f0">${_pbtEsc((j.started||'').slice(0,16))}</b>
       <span style="color:#94a3b8"> · ${_pbtD(j.start)} ~ ${_pbtD(j.end)} · ${j.names.length}전략${j.strength.length?' · 강도'+(j.strength_version==='v2'?'v2 ':j.strength_version==='ai'?'AI ':' ')+j.strength.join('/'):''}${j.stop!=null?' · 손절 '+j.stop+'%':''}${j.take!=null?' · 익절 +'+j.take+'%':''}${j.skip_limitup?' · 상한가 제외':''}${j.luck?' · 운검정':''}</span>
@@ -4797,6 +4781,7 @@ async function pbtHistLoad(silent){
           <span style="color:#475569;align-self:center">${_pbtEsc(j.job)}</span></div>
       </div></details>`; }).join('') : '<span style="color:#64748b;font-size:12px">아직 계산한 기록이 없습니다</span>');
 }
+function pbtHistOrder(){ _pbtHistAsc=!_pbtHistAsc; pbtHistLoad(); }
 function pbtHistOpen(job){
   clearTimeout(_pbtTimer); pbtPoll(job);
   const el=document.getElementById('pbt-prog'); if(el) el.scrollIntoView({behavior:'smooth',block:'start'});
@@ -4948,29 +4933,33 @@ function pbtRender(d){
   // ★ 는 '지금' 운용 중인 전략 기준(작업 파일의 live 는 실행 당시 값이라 교체 후엔 틀릴 수 있다)
   const _live=n=>{ const x=((_pbtMeta&&_pbtMeta.strategies)||[]).find(z=>z.name===n); return x?x.live:''; };
   const _star=n=>_pbtBadge(((_pbtMeta&&_pbtMeta.strategies)||[]).find(z=>z.name===n));
-  const row=(r,isM)=>`<tr${r.strength_min!=null?' style="background:#0b1220;font-size:12px"':(!isM&&_live(r.strategy)?' style="background:rgba(251,191,36,0.06)"':'')}${isM?' style="background:#111827;font-style:italic"':''}>
-    <td style="font-weight:500">${r.strength_min!=null?`<span style="color:#64748b;padding-left:14px">└ 강도 ≥${r.strength_min}</span> <span style="color:#64748b;font-size:11px" title="이 전략 신호 중 강도 기준을 넘은 비율">(통과 ${r.pass_pct??'-'}%)</span>${_wMark([...(wmap['S:'+r.base]||[]),...(wmap[r.strategy]||[])])}`:
+  // [§95] 머리글 클릭 정렬 — 칸마다 data-v(정렬값). 시장 줄은 맨 위 고정(data-pin). 강도 줄엔 어느 전략인지(정렬하면 기본 줄과 떨어지므로)
+  const dv=v=>(v==null||v===''||(typeof v==='number'&&isNaN(v)))?'':v;
+  const row=(r,isM)=>`<tr${isM?' data-pin="1"':''}${r.strength_min!=null?' style="background:#0b1220;font-size:12px"':(!isM&&_live(r.strategy)?' style="background:rgba(251,191,36,0.06)"':'')}${isM?' style="background:#111827;font-style:italic"':''}>
+    <td style="font-weight:500" data-v="${_pbtEsc(isM?'':(r.strength_min!=null?(r.base||'')+' '+String(r.strength_min).padStart(5,'0'):r.strategy))}">${r.strength_min!=null?`<span style="color:#64748b;padding-left:14px">└ 강도 ≥${r.strength_min}</span> <span style="color:#475569;font-size:11px">${_pbtEsc(r.base||'')}</span> <span style="color:#64748b;font-size:11px" title="이 전략 신호 중 강도 기준을 넘은 비율">(통과 ${r.pass_pct??'-'}%)</span>${_wMark([...(wmap['S:'+r.base]||[]),...(wmap[r.strategy]||[])])}`:
       `${!isM?_star(r.strategy):''}${isM?_pbtEsc(r.name):`<a href="javascript:void(0)" onclick="pbtExplain('${_pbtEsc(r.strategy)}')" style="color:#93c5fd;text-decoration:underline dotted" title="눌러서 전략 설명 보기">${_pbtEsc(r.strategy)}</a>`}`}${r.strength_min==null?_wMark(wmap[r.strategy]):''}${r.error?` <span style="color:#ef4444" title="${_pbtEsc(r.error)}">오류</span>`:''}</td>
-    <td class="r" style="color:#94a3b8">${isM?'-':(r.n_trades??'-')}${!isM&&r.n_open?`<span style="font-size:10px" title="기간 안에 신호가 났지만 종료일 뒤에 청산되는 매매 — 신호 평균·승률에서 제외, 자본곡선에선 실제로 보유 중인 것만 종료일 종가로 평가"> (미완료 ${r.n_open})</span>`:''}</td>
-    <td class="r">${isM||r.win==null?'-':r.win.toFixed(1)+'%'}</td>
-    <td class="r ${c(r.avg_net)}">${isM?'-':f(r.avg_net)}</td>
-    <td class="r ${c(r.slot_avg)}" style="font-weight:600">${isM?'-':f(r.slot_avg)}</td>
-    <td class="r ${c(r.total_ret)}">${f(r.total_ret,1)}</td>
-    <td class="r ${c(r.cagr)}" style="font-weight:800">${f(r.cagr,1)}</td>
-    <td class="r neg">${f(r.mdd,1)}</td>
-    <td class="r">${r.sharpe==null?'-':Number(r.sharpe).toFixed(2)}</td>
-    <td class="r ${c(r.vs_mkt)}">${isM?'기준':f(r.vs_mkt,1)+'p'}</td>
-    ${years.map(y=>`<td class="r ${c((r.yearly||{})[y])}">${f((r.yearly||{})[y],1)}</td>`).join('')}</tr>`;
+    <td class="r" style="color:#94a3b8" data-v="${isM?'':dv(r.n_trades)}">${isM?'-':(r.n_trades??'-')}${!isM&&r.n_open?`<span style="font-size:10px" title="기간 안에 신호가 났지만 종료일 뒤에 청산되는 매매 — 신호 평균·승률에서 제외, 자본곡선에선 실제로 보유 중인 것만 종료일 종가로 평가"> (미완료 ${r.n_open})</span>`:''}</td>
+    <td class="r" data-v="${isM?'':dv(r.win)}">${isM||r.win==null?'-':r.win.toFixed(1)+'%'}</td>
+    <td class="r ${c(r.avg_net)}" data-v="${isM?'':dv(r.avg_net)}">${isM?'-':f(r.avg_net)}</td>
+    <td class="r ${c(r.slot_avg)}" style="font-weight:600" data-v="${isM?'':dv(r.slot_avg)}">${isM?'-':f(r.slot_avg)}</td>
+    <td class="r ${c(r.total_ret)}" data-v="${dv(r.total_ret)}">${f(r.total_ret,1)}</td>
+    <td class="r ${c(r.cagr)}" style="font-weight:800" data-v="${dv(r.cagr)}">${f(r.cagr,1)}</td>
+    <td class="r neg" data-v="${dv(r.mdd)}">${f(r.mdd,1)}</td>
+    <td class="r" data-v="${dv(r.sharpe)}">${r.sharpe==null?'-':Number(r.sharpe).toFixed(2)}</td>
+    <td class="r ${c(r.vs_mkt)}" data-v="${isM?'':dv(r.vs_mkt)}">${isM?'기준':f(r.vs_mkt,1)+'p'}</td>
+    ${years.map(y=>`<td class="r ${c((r.yearly||{})[y])}" data-v="${dv((r.yearly||{})[y])}">${f((r.yearly||{})[y],1)}</td>`).join('')}</tr>`;
   const th=(k,lab)=>`<th class="r"><span class="pbt-tip" data-tip="${_pbtEsc(_PBT_TIPS[k])}">${lab}</span></th>`;
+  if(_pbtLastRes&&_pbtLastRes.job!==d.job) delete _tblSort['pbt-res-rows'];   // [§95] 다른 계산을 열면 정렬 초기화(열 구성이 다를 수 있음)
   _pbtLastRes=d;
-  setHtml('pbt-res', `<table><thead><tr><th><span class="pbt-tip" data-tip="${_pbtEsc(_PBT_TIPS.strategy)}">전략</span></th>${th('n','매매수')}${th('win','승률')}${th('avg','신호 평균')}${th('slot','슬롯 실매매')}
+  setHtml('pbt-res', `<div style="font-size:11px;color:#64748b;margin-bottom:4px">열 제목 클릭 = 오름차순 ▲(다시 클릭 = 내림차순 ▼) · 시장 줄은 맨 위 고정</div><table class="tbl-click"><thead><tr><th><span class="pbt-tip" data-tip="${_pbtEsc(_PBT_TIPS.strategy)}">전략</span></th>${th('n','매매수')}${th('win','승률')}${th('avg','신호 평균')}${th('slot','슬롯 실매매')}
     ${th('tot','총수익')}${th('cagr','CAGR')}${th('mdd','MDD')}${th('sharpe','샤프')}${th('vs','시장 대비')}${years.map(y=>`<th class="r"><span class="pbt-tip" data-tip="${_pbtEsc(_PBT_TIPS.year)}">${y}</span></th>`).join('')}</tr></thead>
-    <tbody>${d.market?row(d.market,true):''}${rs.map(r=>row(r,false)).join('')}</tbody></table>
+    <tbody id="pbt-res-rows">${d.market?row(d.market,true):''}${rs.map(r=>row(r,false)).join('')}</tbody></table>
     <div style="font-size:11px;color:#64748b;margin-top:6px">전략마다 10슬롯 단독 · 다음날 시가 진입·보유일 만기${(p.stop!=null||p.take!=null)?'':'·손절/익절 없음'}·비용 왕복 ≈0.33%(연도별 거래세) · 상한가 시초가 미체결 · 상폐·정지는 마지막 거래가 청산 · 분할·병합 낀 신호 제외 · 일별 평가(MTM) · 시장 = 코스닥 유니버스 동일가중 · 연도별은 기간 안 각 해의 자본 증감${(p.strength||[]).length?` · <b>강도 줄(${_pbtEsc(p.strength_version||'v1')})</b> = 강도 기준 넘은 신호만, 강도 높은 순으로 담음(기본 줄은 강도 무관·전략 점수순)`:''}${(p.stop!=null||p.take!=null)?` · <b>청산</b>: ${p.stop!=null?'손절 '+p.stop+'%':''}${p.stop!=null&&p.take!=null?' / ':''}${p.take!=null?'익절 +'+p.take+'%':''} (${p.exit_mode==='intraday'?'장중 도달 → 그 가격':'종가 판정 → 다음날 시가'})`:''}${p.skip_limitup?' · <b>신호일 상한가 마감 신호 제외</b>(모든 줄)':''}</div>
     ${d.strength_info&&Object.keys(d.strength_info).length?`<div style="font-size:11px;color:#64748b;margin-top:3px">강도 ${_pbtEsc(p.strength_version||'v1')} 가중치(워크포워드) — ${
       p.strength_version==='v2'||p.strength_version==='ai'
         ? Object.entries(d.strength_info).map(([n,yy])=>`<b>${_pbtEsc(n)}</b>: `+Object.entries(yy||{}).map(([y,v])=>v.skipped||!v.n_ic?`${y} 채점 안 함`:(p.strength_version==='ai'?`${y} 학습 ${Number(v.n_train).toLocaleString()}건`:`${y} 지표 ${v.n_ic}개`)).join(', ')).join(' · ')
         : Object.entries(d.strength_info).map(([y,v])=>v.skipped?`${y}: 학습 ${v.n_train}건 부족 → 채점 안 함`:`${y}: ${y}년 이전 매매 ${Number(v.n_train).toLocaleString()}건으로 학습(${_pbtEsc((v.top||[]).join(', '))})`).join(' · ')}</div>`:''}`);
+  _tblReapply(['pbt-res-rows']);
   const L=d.luck;
   if(L&&!L.error&&L.pbo!=null){
     const pass=(L.spa_cash!=null&&L.spa_cash<0.05)||(L.dsr!=null&&L.dsr>=0.95);
@@ -4994,25 +4983,26 @@ function fillStrategyFull(sf){
   const f=(v,d)=>{const x=n(v);return x===null||isNaN(x)?'-':(x>0?'+':'')+x.toFixed(d===undefined?2:d)+'%';};
   const c=v=>{const x=n(v);return x===null||isNaN(x)?'':clr(x);};
   const done=rows.filter(r=>n(r.n_trades)!==null).length;
+  const _dv=v=>{const x=n(v);return x===null||isNaN(x)?'':x;};   // [§95] 정렬값(빈칸은 맨 뒤)
   setHtml('sfull-meta', sf&&sf.updated?`— ${sf.updated} 계산 · 기간 ${sf.period||'-'} · 최근2년 기준 ${sf.oos_cutoff||'-'}~ · ${done}/${rows.length}전략`+
     (done<rows.length?' <span style="color:#fbbf24">(미계산 '+(rows.length-done)+'개 — 다시 계산 필요)</span>':''):'');
   setHtml('sfull-rows', rows.length?rows.map(r=>{
-    if(n(r.n_trades)===null) return `<tr><td style="color:#94a3b8">${r.live?'★ ':''}${r.strategy}</td><td colspan="11" style="color:#64748b;font-size:12px">${r.error||'미계산'}</td></tr>`;
+    if(n(r.n_trades)===null) return `<tr><td style="color:#94a3b8" data-v="${r.strategy}">${r.live?'★ ':''}${r.strategy}</td><td colspan="11" style="color:#64748b;font-size:12px">${r.error||'미계산'}</td></tr>`;
     const live=r.live?`<span title="${r.live}" style="color:#fbbf24">★ </span>`:'';
     const gap=n(r.slot_avg_net)!==null&&n(r.avg_net)!==null&&(n(r.avg_net)-n(r.slot_avg_net))>=1;
     return `<tr${r.live?' style="background:rgba(251,191,36,0.06)"':''}>
-      <td style="font-weight:500">${live}${r.strategy}${r.live?`<div style="font-size:10px;color:#94a3b8">${r.live}</div>`:''}</td>
-      <td class="r" style="color:#94a3b8">${Number(r.n_trades).toLocaleString()}</td>
-      <td class="r">${n(r.win_rate)!==null?Number(r.win_rate).toFixed(1)+'%':'-'}</td>
-      <td class="r ${c(r.avg_net)}">${f(r.avg_net)}</td>
-      <td class="r ${c(r.slot_avg_net)}" style="font-weight:600${gap?';text-decoration:underline dotted':''}" title="${gap?'신호 평균보다 1%p 이상 낮음 — 슬롯이 사는 매매가 더 나쁘다':''}">${f(r.slot_avg_net)}</td>
-      <td class="r ${c(r.real_cagr_pct)}" style="font-weight:800">${f(r.real_cagr_pct,1)}</td>
-      <td class="r neg">${f(r.real_mdd_pct,1)}</td>
-      <td class="r">${n(r.real_sharpe)!==null?Number(r.real_sharpe).toFixed(2):'-'}</td>
-      <td class="r ${c(r.is_avg_net)}">${f(r.is_avg_net)}</td>
-      <td class="r ${c(r.oos_avg_net)}" style="font-weight:600">${f(r.oos_avg_net)}</td>
-      <td class="r ${c(r.oos_cagr_pct)}">${f(r.oos_cagr_pct,1)}</td>
-      <td class="r" style="color:#94a3b8">${n(r.avg_hold)!==null?Number(r.avg_hold).toFixed(0)+'d':'-'}</td></tr>`;
+      <td style="font-weight:500" data-v="${r.strategy}">${live}${r.strategy}${r.live?`<div style="font-size:10px;color:#94a3b8">${r.live}</div>`:''}</td>
+      <td class="r" style="color:#94a3b8" data-v="${_dv(r.n_trades)}">${Number(r.n_trades).toLocaleString()}</td>
+      <td class="r" data-v="${_dv(r.win_rate)}">${n(r.win_rate)!==null?Number(r.win_rate).toFixed(1)+'%':'-'}</td>
+      <td class="r ${c(r.avg_net)}" data-v="${_dv(r.avg_net)}">${f(r.avg_net)}</td>
+      <td class="r ${c(r.slot_avg_net)}" style="font-weight:600${gap?';text-decoration:underline dotted':''}" title="${gap?'신호 평균보다 1%p 이상 낮음 — 슬롯이 사는 매매가 더 나쁘다':''}" data-v="${_dv(r.slot_avg_net)}">${f(r.slot_avg_net)}</td>
+      <td class="r ${c(r.real_cagr_pct)}" style="font-weight:800" data-v="${_dv(r.real_cagr_pct)}">${f(r.real_cagr_pct,1)}</td>
+      <td class="r neg" data-v="${_dv(r.real_mdd_pct)}">${f(r.real_mdd_pct,1)}</td>
+      <td class="r" data-v="${_dv(r.real_sharpe)}">${n(r.real_sharpe)!==null?Number(r.real_sharpe).toFixed(2):'-'}</td>
+      <td class="r ${c(r.is_avg_net)}" data-v="${_dv(r.is_avg_net)}">${f(r.is_avg_net)}</td>
+      <td class="r ${c(r.oos_avg_net)}" style="font-weight:600" data-v="${_dv(r.oos_avg_net)}">${f(r.oos_avg_net)}</td>
+      <td class="r ${c(r.oos_cagr_pct)}" data-v="${_dv(r.oos_cagr_pct)}">${f(r.oos_cagr_pct,1)}</td>
+      <td class="r" style="color:#94a3b8" data-v="${_dv(r.avg_hold)}">${n(r.avg_hold)!==null?Number(r.avg_hold).toFixed(0)+'d':'-'}</td></tr>`;
   }).join(''):'<tr><td colspan="12" style="color:#9ca3af;text-align:center">[다시 계산] 버튼 또는 python strategy_engine.py --full</td></tr>');
 }
 
@@ -5345,7 +5335,10 @@ function fillPreview(d){
   ).join('');
 }
 
-// ── 표 정렬(헤더 더블클릭) ─────────────────────────────────────────────────
+// ── 표 정렬(헤더 클릭) ─────────────────────────────────────────────────────
+// [2026-11-02 §95] 더블클릭 → **한 번 클릭**으로 통일(첫 클릭 오름차순 ▲, 다시 클릭 내림차순 ▼). 강도 기록 표의 별도 정렬(sortSt)도 이걸로 합침.
+//   나중에 그려지는 표(완료 매매내역·기간 백테스트 결과)는 DYN_SORT_TBODIES — 그린 뒤 _tblReapply 로 정렬을 다시 건다.
+//   정렬값: 칸에 data-v 가 있으면 그 값(숫자면 수치), 없으면 보이는 글자. data-pin 줄(예: 시장 기준 줄)은 맨 위 고정.
 // [2026-08-09 신설] 천억이 활성신호 / 모의계좌 매매내역·보유포지션 표를 정렬 가능하게.
 // 강도매매 표(sortSt)는 컬럼마다 onclick 을 배선하는 방식이라 표가 늘 때마다 손이 가서,
 // 여기서는 '헤더 위치(index)로 DOM 행을 정렬'하는 범용 방식을 쓴다 — 새 표가 생겨도
@@ -5360,13 +5353,17 @@ const SORTABLE_TBODIES = [
   'kis-pos','kis-orders','kis-stratperf',      // 모의계좌(KIS)
   'st-rows','st-bystrat','ap-pos',  // 강도매매
   'sc-rows','bt-rows','lab-rows',   // 전략/백테스트/전략랩
+  'sfull-rows',                     // [§95] 백테스트: 전체 전략 과거 백테스트
   'dl-files',                       // 데이터+로그: 파일 목록
 ];
+const DYN_SORT_TBODIES = ['ap-trades-ai','ap-trades-strength','pbt-res-rows'];   // [§95] 나중에 그려지는 표(정렬만)
 const _tblSort = {};      // tbodyId -> {idx, asc}
 const _tblFilter = {};    // tbodyId -> 소문자 검색어
 let _tblSorting = false;
 
 function _cellKey(td){
+  const dv=(td&&td.dataset)?td.dataset.v:undefined;      // [§95] 칸에 적은 정렬값 우선(글자에 아이콘·괄호가 섞인 칸)
+  if(dv!==undefined){ const x=Number(dv); return (dv!==''&&!isNaN(x))?{n:x,s:dv}:{n:null,s:dv}; }
   const t=(td?td.textContent:'').trim();
   if(!t||t==='-') return {n:null,s:''};
   // "1,234" "+5.20%" "-12,345원" "6.11" 같은 표기를 숫자로 인식(빈칸·기호 제거)
@@ -5378,15 +5375,16 @@ function _cellKey(td){
 function _applyTblSort(id){
   const st=_tblSort[id]; if(!st) return;
   const tb=document.getElementById(id); if(!tb) return;
-  const rows=Array.from(tb.children).filter(r=>r.tagName==='TR'&&r.children.length>st.idx);
+  const rows=Array.from(tb.children).filter(r=>r.tagName==='TR'&&r.children.length>st.idx&&!r.dataset.pin);
   if(rows.length<2) return;   // '데이터 없음' 안내행(colspan)은 자동 제외됨
   const orig=rows.slice();
   rows.sort((a,b)=>{
     const A=_cellKey(a.children[st.idx]), B=_cellKey(b.children[st.idx]);
     let c;
     if(A.n!==null&&B.n!==null) c=A.n-B.n;                 // 숫자는 수치 비교
-    else if(A.n!==null) c=-1;                              // 숫자를 빈값보다 앞에
-    else if(B.n!==null) c=1;
+    else if(A.n!==null) return -1;                         // 숫자는 늘 빈값·글자보다 앞(오름·내림 무관 — [§95] 내림차순에서 빈칸이 맨 위로 오던 것 수정)
+    else if(B.n!==null) return 1;
+    else if(!A.s!==!B.s) return A.s?-1:1;                  // 빈칸은 늘 맨 뒤
     else c=A.s.localeCompare(B.s,'ko');                    // 한글 사전순
     return st.asc?c:-c;
   });
@@ -5401,11 +5399,36 @@ function _applyTblSort(id){
 }
 
 function _markTblHeaders(tbl,id){
+  // [§95] 머리글 안의 설명(마우스오버 span 등)을 지우지 않게 ▲▼ 는 작은 span 으로 붙였다 뗀다
   const st=_tblSort[id];
   tbl.querySelectorAll('thead th').forEach((th,i)=>{
-    if(th.dataset.orig===undefined) th.dataset.orig=th.textContent;
-    th.textContent=th.dataset.orig+((st&&st.idx===i)?(st.asc?' ▲':' ▼'):'');
+    let m=th.querySelector('.sort-mark');
+    const want=(st&&st.idx===i)?(st.asc?' ▲':' ▼'):'';
+    if(!m&&!want) return;
+    if(!m){ m=document.createElement('span'); m.className='sort-mark'; th.appendChild(m); }
+    m.textContent=want;
   });
+}
+
+function _tblClick(th){
+  const tbl=th.closest('table'); const tb=tbl?tbl.querySelector('tbody'):null;
+  if(!tb||!(SORTABLE_TBODIES.includes(tb.id)||DYN_SORT_TBODIES.includes(tb.id))) return;
+  const i=Array.prototype.indexOf.call(th.parentNode.children, th);
+  const cur=_tblSort[tb.id];
+  _tblSort[tb.id]=(cur&&cur.idx===i)?{idx:i,asc:!cur.asc}:{idx:i,asc:true};
+  _markTblHeaders(tbl,tb.id);
+  _applyTblSort(tb.id);
+}
+// 한 곳에서 받는다(위임) — 나중에 그려지는 표도 따로 배선할 필요 없음. 머리글 안 링크·버튼·입력은 그대로 둔다.
+document.addEventListener('click',e=>{
+  const t=e.target; if(!t||!t.closest) return;
+  const th=t.closest('thead th'); if(!th || t.closest('a,button,input,select')) return;
+  _tblClick(th);
+});
+// 표를 새로 그린 뒤 정렬·표시를 다시 건다(나중에 그려지는 표용)
+function _tblReapply(ids){
+  ids.forEach(id=>{ const tb=document.getElementById(id); if(!tb||!_tblSort[id]) return;
+    _markTblHeaders(tb.closest('table'),id); _applyTblSort(id); });
 }
 
 // ── 필터: 표 위 검색창으로 행 숨기기(정렬과 독립적으로 동작) ──
@@ -5434,16 +5457,11 @@ function initTableSort(){
     const tb=document.getElementById(id); if(!tb) return;
     const tbl=tb.closest('table'); if(!tbl) return;
 
-    // ① 헤더 더블클릭 정렬
-    tbl.querySelectorAll('thead th').forEach((th,i)=>{
+    // ① 머리글 클릭 정렬(처리는 위 document 클릭 위임) — 여기선 손가락 커서·안내만
+    tbl.querySelectorAll('thead th').forEach(th=>{
       th.style.cursor='pointer';
-      th.title='더블클릭: 오름차순 정렬 (한 번 더: 내림차순)';
-      th.addEventListener('dblclick',()=>{
-        const cur=_tblSort[id];
-        _tblSort[id]=(cur&&cur.idx===i)?{idx:i,asc:!cur.asc}:{idx:i,asc:true};
-        _markTblHeaders(tbl,id);
-        _applyTblSort(id);
-      });
+      const hint='클릭: 오름차순 정렬 (한 번 더: 내림차순)';
+      if(!(th.title||'').includes(hint)) th.title=(th.title?th.title+' · ':'')+hint;
     });
 
     // ② 표 위에 필터 입력창 자동 삽입(HTML 수정 없이 모든 대상 표에 동일 적용)
