@@ -141,9 +141,27 @@ def _fetch_symbol(ticker, market=None):
     return _YAHOO_TICKER_FIX.get(ticker, ticker)
 
 
-def collect_all():
+# [2026-11-02 §92] 한국 일봉 '확정' 기준 — 정규장 15:30 마감 + 여유. 이 시각 전(장 전·장중)의 오늘 일봉은 미완성.
+KRX_FINAL_HHMM = "15:40"
+
+
+def korea_cutoff(now=None):
+    """한국 일봉을 받을 마지막 날(YYYY-MM-DD) — 15:40 전이면 어제, 뒤면 오늘.
+
+    [§92] 종전엔 목표일 = 오늘이고 '마지막 저장일+1 >= 오늘'이면 건너뛰어서
+      ① 16:15 기술지표 갱신 앞의 주가 수집이 오늘 가격을 끝내 못 받았고(10-22 이후 매일 '80분 대기 후 생략'),
+      ② 마지막 저장일이 그보다 오래된 종목은 [마지막+1 ~ 오늘]을 받아, 06:30 수집이 09:00 를 넘기면
+         오늘 '장중 미완성 일봉'까지 저장한 뒤 다시는 안 고쳤다(10-08 코스닥 1,708종목·10-29 643·11-02 453 실측)."""
+    now = now or datetime.now()
+    d = now.date() if now.strftime("%H:%M") >= KRX_FINAL_HHMM else now.date() - timedelta(days=1)
+    return d.strftime("%Y-%m-%d")
+
+
+def collect_all(now=None):
     """전체 종목 증분 업데이트"""
-    end = datetime.today().strftime('%Y-%m-%d')
+    now = now or datetime.now()
+    end = now.strftime('%Y-%m-%d')          # 미국: 종전대로 오늘 날짜는 안 받음(미국장은 한국 새벽에 끝남)
+    end_kr = korea_cutoff(now)              # [§92] 한국: 확정된 날까지만
     all_tickers = get_all_tickers()
     total = len(all_tickers)
 
@@ -163,12 +181,13 @@ def collect_all():
         logger.warning(f"시장 달력 로드 실패 - 안쪽 공백 검사 생략: {e}")
         kr_cal, us_cal = [], []
 
-    logger.info(f"총 {total}개 종목 증분 업데이트 시작 (목표일: {end})")
+    logger.info(f"총 {total}개 종목 증분 업데이트 시작 (목표일: 한국 {end_kr} · 미국 {end} 전날까지)")
 
     failed_tickers = []
     gap_repaired = 0
     n_updated = 0
     n_skipped = 0
+    n_new, n_fixed = 0, 0
     log_step = max(1, total // 20)   # 5% 단위 로그 (최대 20줄)
 
     for seq, (i, row) in enumerate(all_tickers.iterrows(), 1):
@@ -178,9 +197,16 @@ def collect_all():
         sector = row['sector']
 
         # 시작 날짜 결정 (없으면 START_DATE, 있으면 마지막 날짜 +1일)
+        is_kr = market == 'korea'
+        refresh = None
         if ticker in latest_dates and latest_dates[ticker]:
             last = datetime.strptime(latest_dates[ticker][:10], '%Y-%m-%d')
-            fetch_start = (last + timedelta(days=1)).strftime('%Y-%m-%d')
+            if is_kr:
+                # [§92] 한국은 마지막 저장일을 하루 겹쳐 다시 받아 가격 칸을 덮어쓴다(미완성 일봉 자동 치유, 호출 수는 같음)
+                fetch_start = last.strftime('%Y-%m-%d')
+                refresh = fetch_start
+            else:
+                fetch_start = (last + timedelta(days=1)).strftime('%Y-%m-%d')
 
             # 안쪽 공백이 있으면 거기부터 다시 받는다 (결측치 우선)
             stock_table = 'korea_stocks' if market == 'korea' else 'usa_stocks'
@@ -196,8 +222,9 @@ def collect_all():
         else:
             fetch_start = START_DATE
 
-        # 이미 최신이면 스킵
-        if fetch_start >= end:
+        # 이미 최신이면 스킵 — [§92] 한국: 받을 날(확정일)보다 뒤면 / 미국: 종전대로 오늘 이상이면
+        fetch_end = end_kr if is_kr else end
+        if (fetch_start > end_kr) if is_kr else (fetch_start >= end):
             n_skipped += 1
             if seq % log_step == 0 or seq == total:
                 logger.info(f"진행 [{seq}/{total}] {seq/total*100:.0f}% | 갱신 {n_updated} | 스킵 {n_skipped} | 실패 {len(failed_tickers)}")
@@ -208,8 +235,8 @@ def collect_all():
 
         for attempt in range(3):
             try:
-                logger.debug(f"[{seq}/{total}] [{sector}] {name} ({ticker}) | {fetch_start} ~ {end}")
-                df = fdr.DataReader(_fetch_symbol(ticker, market), fetch_start, end)
+                logger.debug(f"[{seq}/{total}] [{sector}] {name} ({ticker}) | {fetch_start} ~ {fetch_end}")
+                df = fdr.DataReader(_fetch_symbol(ticker, market), fetch_start, fetch_end)
 
                 if df is None or len(df) == 0:
                     logger.debug(f"새로운 데이터 없음: {ticker}")
@@ -220,8 +247,13 @@ def collect_all():
                 df['sector'] = sector
                 df.index.name = 'date'
                 df.reset_index(inplace=True)
-                save_stock(df, market=market)
-                n_updated += 1
+                if is_kr:      # [§92] 혹시 소스가 확정일 뒤(장중 오늘) 행을 주더라도 저장하지 않음
+                    df = df[pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d') <= end_kr]
+                ins, fixed = save_stock(df, market=market, refresh_dates=(refresh,) if refresh else ())
+                n_new += ins
+                n_fixed += fixed
+                if ins or fixed:
+                    n_updated += 1
                 break
 
             except Exception as e:
@@ -241,7 +273,8 @@ def collect_all():
 
     if gap_repaired:
         logger.info(f"안쪽 공백 재수집: {gap_repaired}종목")
-    logger.info(f"전체 수집 완료! 갱신 {n_updated} / 스킵 {n_skipped} / 실패 {len(failed_tickers)}")
+    logger.info(f"전체 수집 완료! 갱신 {n_updated} / 스킵 {n_skipped} / 실패 {len(failed_tickers)}"
+                f" · 새 행 {n_new} · 덮어쓴 행 {n_fixed}(미완성 일봉 치유)")
 
 if __name__ == "__main__":
     collect_all()

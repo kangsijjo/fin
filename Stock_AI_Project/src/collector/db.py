@@ -23,16 +23,24 @@ def _ensure_table(conn, table):
         f'CREATE INDEX IF NOT EXISTS idx_{table}_ticker_date ON {table}(ticker, date)'
     )
 
-def save_stock(df, market='korea'):
+# [2026-11-02 §92] 다시 받아 덮어쓸 가격 칸(이름·업종 등 나머지 칸은 그대로)
+PRICE_COLS = ("Open", "High", "Low", "Close", "Volume", "Change")
+
+
+def save_stock(df, market='korea', refresh_dates=()):
     """
     주식 데이터 저장.
     - read→diff→insert 의 race condition 제거 → INSERT OR IGNORE 원자 upsert
     - 예외 발생해도 커넥션 항상 닫힘 (with 컨텍스트)
     - Python 3.12+ 에서 sqlite3 가 Timestamp/datetime 의 기본 adapter 를
       제거했기 때문에, datetime 타입 컬럼은 미리 ISO 문자열로 변환한다.
+    - [§92] refresh_dates 의 날짜 행은 이미 있어도 가격 칸(PRICE_COLS)을 새 값으로 덮어쓴다(값이 다를 때만) —
+      장중·마감 직후에 들어간 미완성 일봉을 다음 수집이 바로잡게. 그 밖의 날짜는 종전처럼 있는 행을 건드리지 않음
+      (과거 행을 다시 받은 값으로 덮으면 액면분할 등 수정주가가 섞일 수 있어서).
+    반환: (새로 넣은 행 수, 덮어쓴 행 수)
     """
     if df.empty:
-        return
+        return 0, 0
 
     table = 'korea_stocks' if market == 'korea' else 'usa_stocks'
 
@@ -54,16 +62,34 @@ def save_stock(df, market='korea'):
 
     rows = [tuple(x) for x in df[cols].itertuples(index=False, name=None)]
 
+    refresh = {str(d)[:10] for d in (refresh_dates or ()) if d}
+    upd_cols = [c for c in PRICE_COLS if c in cols]
+    upd_rows = []
+    if refresh and upd_cols and 'date' in cols and 'ticker' in cols:
+        di, ti = cols.index('date'), cols.index('ticker')
+        ci = [cols.index(c) for c in upd_cols]
+        for r in rows:
+            if str(r[di])[:10] in refresh:
+                vals = [r[i] for i in ci]
+                upd_rows.append(tuple(vals) + (r[ti], r[di]) + tuple(vals))
+    sql_u = (f'UPDATE {table} SET ' + ','.join(f'"{c}"=?' for c in upd_cols) +
+             ' WHERE ticker=? AND date=? AND (' + ' OR '.join(f'"{c}" IS NOT ?' for c in upd_cols) + ')')
+
     with closing(get_connection()) as conn:
         _ensure_table(conn, table)
         cur = conn.executemany(sql, rows)
         inserted = cur.rowcount if cur.rowcount is not None else 0
+        changed = 0
+        if upd_rows:
+            cu = conn.executemany(sql_u, upd_rows)
+            changed = cu.rowcount if cu.rowcount is not None and cu.rowcount > 0 else 0
         conn.commit()
 
-    if inserted > 0:
-        print(f"  {inserted}행 저장완료")
-    else:
+    if inserted > 0 or changed > 0:
+        print(f"  {inserted}행 저장완료" + (f" · {changed}행 덮어씀(미완성 일봉 치유)" if changed else ""))
+    elif not refresh:
         print(f"  이미 최신 데이터")
+    return inserted, changed
 
 def load_sector(sector, market='korea'):
     """섹터 데이터 불러오기"""

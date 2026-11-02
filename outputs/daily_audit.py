@@ -10,6 +10,7 @@ daily_audit.py — 매일 자동화 자가점검. 2026-06-20 신설.
 """
 import os
 from fin_paths import STOCK_DB as _FIN_STOCK_DB   # 절대경로 단일 출처(2026-09-04)
+import fresh_fix as FF                             # [§92] 정체 경고에 누를 버튼
 import re
 import sys
 import glob
@@ -149,7 +150,8 @@ def main():
                         chk(False, f"{tbl}", "데이터 없음")
                         continue
                     ad = _age_days(latest)
-                    chk(ad <= maxd, f"{tbl}", f"최신 {str(latest)[:10]} ({ad}일)")
+                    _h = "" if ad <= maxd else " → " + FF.hint(tbl)
+                    chk(ad <= maxd, f"{tbl}", f"최신 {str(latest)[:10]} ({ad}일){_h}")
                 except Exception as e:
                     chk(False, f"{tbl}", f"조회실패 {str(e)[:40]}")
             con.close()

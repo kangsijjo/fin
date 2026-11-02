@@ -272,13 +272,14 @@ def check_data():
     # 달력일 기준은 연휴 주간에 이를 넘겨 10-03 07:45 에 오경보(수집은 08:00 정상 완료)
     # → 사용자가 run_credit 수동 실행(55분, 0행 추가). 영업일 기준이면 연휴 길이와 무관.
     # 한 주 수집이 실패하면 다음 주 월요일쯤 9영업일을 넘겨 경보 — 감지력은 유지.
+    import fresh_fix as FF                   # [§92] 정체 경고에 '대시보드 어느 버튼' 안내
     for tbl, col, thr, use_bday in specs:
         latest = _max_date(con, tbl, col)
         age = _age_bdays(latest) if use_bday else _age_days(latest)
         unit = "영업일" if use_bday else "일"
         ok = age <= thr
-        out.append((f"data_{tbl}", f"데이터 {tbl}", ok,
-                    f"{age}{unit} 정체(최신 {latest})" if not ok else f"최신 {latest}"))
+        out.append((f"data_{tbl}", f"데이터 {FF.label(tbl)}", ok,
+                    f"{age}{unit} 정체(최신 {latest}) → {FF.hint(tbl)}" if not ok else f"최신 {latest}"))
     con.close()
     return out
 
@@ -296,6 +297,11 @@ def check_data():
 # -0.35. 폴백 덕에 영향은 작지만, 여러 주 연속 방치는 잡아야 한다.
 INDICATOR_FULL_MIN = 500        # 이 이상이면 '전섹터 갱신됨'(한 섹터 최대 169종목)
 INDICATOR_STALE_BDAYS = 6       # 마지막 full 이 이보다 오래면 경고(주간 정상주기 5 → 6 통과)
+
+
+def _ind_hint():
+    import fresh_fix as FF
+    return FF.hint("korea_indicators")      # [§92] 'python -m …' 대신 누를 버튼
 
 
 def check_indicator_coverage():
@@ -328,8 +334,7 @@ def check_indicator_coverage():
     if not full:
         return [("indicator_cov", "전섹터 지표", False,
                  "korea_indicators 에 전섹터(>=%d종목) 갱신 기록이 최근 15일 내 없음 "
-                 "— 지표 파이프라인 점검(python -m src.processor.indicators all)"
-                 % INDICATOR_FULL_MIN)]
+                 "— 복구: 대시보드 %s" % (INDICATOR_FULL_MIN, _ind_hint()))]
     last_full = full[0]
     age = _age_bdays(last_full)
     if age <= INDICATOR_STALE_BDAYS:
@@ -337,7 +342,7 @@ def check_indicator_coverage():
     return [("indicator_cov", "전섹터 지표", False,
              f"전섹터 지표가 {age}영업일째 미갱신(마지막 full {last_full}) — "
              f"주간 갱신(일요일) 실패 의심. 강도가 오래된 폴백 지표로 계산돼 눌릴 수 "
-             f"있음. 복구: python -m src.processor.indicators all")]
+             f"있음. 복구: 대시보드 {_ind_hint()}")]
 
 
 def check_holiday_calendar():

@@ -262,7 +262,9 @@ def daily_indicators_job():
     [2026-10-26 수정] 종전엔 '천억이 KIS_Paper 15:50 pykrx_collector 가 korea_stocks 에 넣는다'고 보고 80분을 기다렸는데,
     그 쓰기는 2026-06-20 소유권 단일화로 꺼져 있다(pykrx_collector._SYNC_STOCK_DB=False). 오늘 가격은 다음날 06:30
     daily_data_job 에서야 들어와 **평일 갱신이 매번 '80분 대기 후 생략'**이었다(10-22·10-26 로그). → 먼저 이 시점에
-    주가 수집(main_collector, FDR — 증권사 키 안 씀, 약 20분, 이미 있는 날짜는 건너뜀)을 돌려 오늘 가격을 넣고 지표를 만든다."""
+    주가 수집(main_collector, FDR — 증권사 키 안 씀, 약 20분, 이미 있는 날짜는 건너뜀)을 돌려 오늘 가격을 넣고 지표를 만든다.
+    [2026-11-02 §92] 그래도 10-27~10-29 계속 생략 — 수집기가 '마지막+1일 >= 오늘'이면 건너뛰어 오늘 가격을 안 받았다.
+    main_collector.korea_cutoff(15:40 뒤면 오늘까지) 로 고쳐 이 경로가 실제로 동작."""
     if not _is_weekday() or _is_krx_holiday():
         return
 

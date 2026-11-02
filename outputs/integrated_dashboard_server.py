@@ -417,10 +417,13 @@ def get_health():
     """조용한 실패 종합 점검 — 상단 배너용. 테이블 정체(freshness) + 신호 정체를 한데 모은다.
     오늘 세션에서 고친 버그들(2개월 0신호, 테이블 정체)이 전부 '에러 없이 조용히' 굴러갔기에,
     이상 징후를 대시보드 맨 위에서 바로 보이게 한다."""
+    import fresh_fix as FF
     issues = []
     for f in get_freshness():
+        # [§92] 표 이름만으론 어느 버튼인지 몰랐다 → 한글 이름 + fix(누르면 데이터+로그 탭의 그 버튼으로 이동·강조)
         issues.append({"sev": "warn",
-                       "msg": f"{f['table']} {f['age_days']}일 정체(최신 {f['latest']})"})
+                       "msg": f"{FF.label(f['table'])} {f['age_days']}일 정체(최신 {f['latest']})",
+                       "fix": FF.fix(f["table"])})
     # 신호 정체 — paper_signals 최신 signal_date 가 오래됐으면 신호생성/데이터 이상 신호.
     try:
         if PAPER_CSV.exists():
@@ -430,7 +433,8 @@ def get_health():
                 age = (datetime.now() - datetime.strptime(last, "%Y%m%d")).days
                 if age >= 7:
                     issues.append({"sev": "err",
-                                   "msg": f"신호 {age}일째 없음(최신 {last}) — live_signal/로더 점검"})
+                                   "msg": f"신호 {age}일째 없음(최신 {last}) — live_signal/로더 점검",
+                                   "fix": {"sig": True, "button": "·".join(FF.SIGNAL_BUTTONS), "note": ""}})
     except Exception:
         pass
     return issues
@@ -3446,6 +3450,8 @@ a:hover{color:#93c5fd}
 .runbtn.stale{background:#450a0a;border-color:#dc2626;color:#fca5a5;animation:stalepulse 1.6s ease-in-out infinite}
 .runbtn.stale::before{content:"\\26A0 ";color:#ef4444}
 @keyframes stalepulse{0%,100%{box-shadow:0 0 2px 0 #dc2626}50%{box-shadow:0 0 10px 2px #dc2626}}
+.runbtn.fix-focus{outline:3px solid #fbbf24;outline-offset:3px}
+.fix-link{color:#fbbf24;text-decoration:underline;cursor:pointer;margin-left:4px;white-space:nowrap}
 /* header */
 header{background:rgba(15,23,42,.85);backdrop-filter:blur(8px);padding:12px 20px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #1e293b;position:sticky;top:0;z-index:20;box-shadow:0 4px 6px -1px rgba(0,0,0,.1)}
 header h1{font-size:18px;font-weight:700;letter-spacing:-.02em;color:#f8fafc}
@@ -3993,6 +3999,7 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
   <div class="section">
     <h2>&#xC218;&#xB3D9; &#xC2E4;&#xD589; (&#xC81C;&#xC5B4;&#xD310;)</h2>
     <div style="color:#8b949e;font-size:12px;margin-bottom:6px">정체된 데이터가 있으면 해당 버튼이 &#xF85149;빨갛게 깜빡입니다 &mdash; 그 버튼을 누르세요.</div>
+    <div id="fix-list" style="font-size:12px;margin-bottom:6px"></div>
     <div style="display:flex;flex-direction:column;gap:8px">
       <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
         <span style="color:#8b949e;font-size:12px;min-width:72px">데이터수집</span>
@@ -4306,7 +4313,24 @@ function fillMock(mock, kis){
   }
 }
 
+// [§92] 정체 경고 → 어느 버튼인지: 상단 경고·이 탭 목록에 '[버튼]' 표시, 누르면 그 버튼으로 이동·강조(실행은 직접)
+function _fixTxt(f){ return `데이터+로그 탭 [${f.button}] 버튼${f.note?'('+f.note+')':''}`; }
+function _fixBtns(f){
+  if(f.sig) return [...document.querySelectorAll('.runbtn[data-sig]')];
+  const bs=[...document.querySelectorAll('.runbtn[data-fresh]')].filter(b=>(b.getAttribute('data-fresh')||'').split(',').includes(f.table));
+  bs.sort((a,b)=>a.getAttribute('data-fresh').split(',').length-b.getAttribute('data-fresh').split(',').length);   // 가장 콕 집은 버튼
+  return bs.slice(0,1);
+}
+function goFix(i){
+  const h=((_lastData&&_lastData.health)||[])[i], f=h&&h.fix; if(!f) return;
+  showTab('datalogs');
+  const bs=_fixBtns(f); if(!bs.length) return;
+  bs[0].scrollIntoView({behavior:'smooth',block:'center'});
+  bs.forEach(b=>{ b.classList.add('fix-focus'); setTimeout(()=>b.classList.remove('fix-focus'),6000); });
+}
 function fillRunButtons(d){
+  const fx=(d.health||[]).map((h,i)=>h.fix?`<div style="color:#fca5a5">⚠ ${h.msg} → <a href="#" class="fix-link" style="margin-left:0" onclick="goFix(${i});return false">[${h.fix.button}]</a> 버튼을 누르세요${h.fix.note?' <span style="color:#94a3b8">('+h.fix.note+')</span>':''}</div>`:'').join('');
+  setHtml('fix-list', fx);
   const stale=new Set((d.freshness||[]).map(f=>f.table));
   const sigStale=(d.health||[]).some(h=>String(h.msg||'').indexOf('신호')>=0);
   document.querySelectorAll('.runbtn[data-fresh]').forEach(b=>{
@@ -5242,7 +5266,7 @@ async function load(){
     if(hs.length){
       const hasErr=hs.some(h=>h.sev==='err');
       fb.innerHTML='<div class="'+(hasErr?'fresh-err':'fresh-warn')+'" style="display:flex;align-items:center;gap:8px;background:'+(hasErr?'rgba(239,68,68,0.1)':'rgba(245,158,11,0.1)')+';padding:8px 20px;border-bottom:1px solid '+(hasErr?'rgba(239,68,68,0.3)':'rgba(245,158,11,0.3)')+'"><span style="font-size:16px">⚠</span> 점검 필요: '
-        +hs.map(h=>h.msg).join(' &nbsp;|&nbsp; ')+'</div>';
+        +hs.map((h,i)=>h.msg+(h.fix?`<a href="#" class="fix-link" title="데이터+로그 탭의 그 버튼으로 이동해 강조합니다(실행은 직접 누르세요)" onclick="goFix(${i});return false">→ ${_fixTxt(h.fix)}</a>`:'')).join(' &nbsp;|&nbsp; ')+'</div>';
     } else {
       fb.innerHTML='<div class="fresh-ok" style="display:flex;align-items:center;gap:8px;background:rgba(16,185,129,0.1);padding:8px 20px;border-bottom:1px solid rgba(16,185,129,0.3)"><span style="font-size:16px">✓</span> 시스템 정상 (테이블·신호 이상 없음)</div>';
     }
