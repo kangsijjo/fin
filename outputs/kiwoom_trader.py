@@ -249,6 +249,9 @@ STRENGTH_VERSION = _ACC["strength_version"]   # [2026-10-22] v1(공통) / v2(전
 STRENGTH_TH = dict(_ACC["min_strength_by"])
 # [2026-10-31 §91] 상한가 마감 신호 제외 — 설정에서 켠 전략(라이브 이름)은 신호일에 상한가(+29.5%↑)로 마감한 종목을 사지 않는다
 SKIP_LIMITUP = set(_ACC.get("skip_limitup") or set())
+# [§96.6] 본계좌 전략별 총액 상한(원, 라이브 이름) — 있으면 그 전략 예산 = (상한 − 이미 산 금액) ÷ 그 전략 남은 빈 칸,
+# 없으면 종전처럼 주문가능금액 ÷ 남은 빈 칸. 모의는 항상 비어 있음.
+STRATEGY_CAP = dict(_ACC.get("cap") or {}) if REAL else {}
 
 
 def _th(strat):
@@ -1227,6 +1230,13 @@ def cmd_buy():
     # RC5006 으로 거부됐는데, [실패] 한 줄 + exit 0 이라 아무도 몰랐다. 강도 통과가
     # 드문 국면이라 '안 사는 것'과 '못 사는 것'이 겉으로 구분되지 않아 더 위험하다.
     buy_failures = []      # [(code, name, msg)]
+    # [§96.6] 전략 총액 상한용 — 이미 산 금액(프로그램 몫, 매입가 기준)과 이번 실행에서 주문한 금액
+    invested, spent = {}, {}
+    if STRATEGY_CAP:
+        for _c, _p in held.items():
+            _s = strategy_map.get(str(_c).zfill(6), "")
+            invested[_s] = invested.get(_s, 0) + _to_int(_p.get("qty", 0)) * float(_p.get("avg_price", 0) or 0)
+        print("  [금액 상한] " + " / ".join(f"{k} {v:,}원(이미 {invested.get(k, 0):,.0f}원)" for k, v in STRATEGY_CAP.items()))
 
     if SLOT_MODE == "pool":   # [§75] 한 줄로: 전략 안 순위 높은 순, 전체 빈 칸까지
         _plan = [(None, _pool_order([s for k in STRATEGY_PRIORITY for s in sigs_by_strat.get(k, [])], strength),
@@ -1278,6 +1288,16 @@ def cmd_buy():
             if total_slots_remaining <= 0:
                 break
             budget = remaining_dep / total_slots_remaining
+            _cap = STRATEGY_CAP.get(strat)
+            if _cap is not None:   # [§96.6] 전략 총액 상한 — 남은 상한을 그 전략 남은 빈 칸으로(칸 없음 모드는 균등 몫과 남은 상한 중 작은 값)
+                room = _cap - invested.get(strat, 0) - spent.get(strat, 0)
+                if room < MIN_ORDER_AMOUNT:
+                    print(f"    [skip] {code} {name} — {strat} 금액 상한 {_cap:,}원 도달(남은 {max(0, room):,.0f}원)")
+                    continue
+                if _grp is None:
+                    budget = min(budget, room)
+                else:
+                    budget = min(remaining_dep, room / max(1, slot_avail[strat] - placed_per_strat[strat]))
             _lim_msg = ""
             if REAL:   # [§96] 현재가 +2% 지정가 — 수량은 지정가 기준(현금 100%, 미수 없음). 가격을 모르면 사지 않는다.
                 _q = _quote(api, code)
@@ -1305,6 +1325,7 @@ def cmd_buy():
 
             if DRY:   # [§96] 본계좌 드라이런 — 주문·원장 변경 없이 '냈을 주문'만 기록(칸·예산은 실제처럼 차감해 다음 후보 계산)
                 _dry_record("buy", code, name, strat, qty, px, f"{_why} · {_lim_msg}")
+                spent[strat] = spent.get(strat, 0) + _need
                 remaining_dep -= _need
                 n_placed += 1
                 placed_this_strat += 1
@@ -1320,6 +1341,7 @@ def cmd_buy():
                     ord_uv=str(int(px)) if REAL else "",
                 ), "매수")
                 ono = _pick(r, "ord_no", "odno", default="")
+                spent[strat] = spent.get(strat, 0) + _need   # [§96.6] 접수 즉시 반영(아래 기록이 실패해도 상한 계산은 맞게)
                 print(f"    [매수주문] {code} {name} {qty}주 @ {int(px):,} → {ono}")
                 try:
                     import notifier

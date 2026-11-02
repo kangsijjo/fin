@@ -2936,6 +2936,9 @@ def _lc_from_request(b):
                          "stop": num(x.get("stop")), "take": num(x.get("take")), "holding": hold.get(e, 20),
                          "min_strength": num(x.get("min_strength")),       # [§71] 전략별 강도 기준(비우면 계좌 기본)
                          "skip_limitup": bool(x.get("skip_limitup", False))})   # [§91] 상한가 마감 신호 제외
+            if a in LC.REAL_ACCOUNTS:               # [§96.6] 본계좌 전략 총액 상한(원) — 비우면 없음
+                c = num(x.get("cap"))
+                rows[-1]["cap"] = None if c is None else int(c)
         new["accounts"][a] = {"min_strength": float(A.get("min_strength", 5.7)),
                               "slot_mode": str(A.get("slot_mode") or "slots"),
                               "strength_version": str(A.get("strength_version") or "v2"), "strategies": rows}
@@ -3066,7 +3069,7 @@ def get_kiwoom_real():
     out["config"] = {"daily_loss_limit": A.get("daily_loss_limit"), "loss_action": A.get("loss_action"),
                      "loss_action_label": LC.LOSS_ACTIONS.get(A.get("loss_action"), ""),
                      "mirror": A.get("mirror"), "fallback": A.get("fallback"),
-                     "strategies": A["priority"], "slot_mode": A["slot_mode"]}
+                     "strategies": A["priority"], "slot_mode": A["slot_mode"], "cap": A.get("cap") or {}}   # [§96.6]
     out["dryrun"] = _real_dryrun_rows()
     try:
         led = pd.read_csv(REAL_DIR / "kiwoom_positions.csv", dtype=str) if (REAL_DIR / "kiwoom_positions.csv").exists() else None
@@ -5722,6 +5725,7 @@ function lcRender(){
         <td><input type="number" step="1" min="-50" max="-1" placeholder="없음" value="${s.stop==null?'':s.stop}" style="${inp};width:64px" onchange="lcSet('${a}',${i},'stop',this.value)"></td>
         <td><input type="number" step="1" min="1" max="300" placeholder="없음" value="${s.take==null?'':s.take}" style="${inp};width:64px" onchange="lcSet('${a}',${i},'take',this.value)"></td>
         <td style="text-align:center"><input type="checkbox" ${s.skip_limitup?'checked':''} onchange="lcSet('${a}',${i},'skip_limitup',this.checked)" title="체크하면 신호일 상한가 마감 종목의 이 전략 신호는 사지 않음"></td>
+        ${a==='kiwoom_real'?`<td><input type="number" min="100000" step="100000" placeholder="균등" value="${s.cap==null?'':s.cap}" style="${inp};width:110px${s.cap!=null?';border-color:#38bdf8':''}" title="이 전략에 넣을 총액 상한(원) — 비우면 주문가능금액 ÷ 남은 빈 칸(균등). 넣으면 (상한 − 이미 산 금액) ÷ 이 전략 남은 빈 칸" onchange="lcSet('${a}',${i},'cap',this.value)"></td>`:''}
         <td style="color:#94a3b8">${e.holding??s.holding}일</td>
         <td><button class="runbtn" style="padding:0 7px" title="빼기" onclick="lcDel('${a}',${i})">✕</button></td></tr>`; }).join('');
     const _kw=(a==='kiwoom'||a==='kiwoom_real');   // [§96] 본계좌도 키움 트레이더 규칙
@@ -5745,7 +5749,7 @@ function lcRender(){
           <option value="pool"${A.slot_mode==='pool'?' selected':''}>칸 없음(전체 10종목)</option></select>
         ${A.slot_mode==='pool'?`<span style="font-size:12px;color:#38bdf8">칸 없음 · 전체 ${L.slots_total}종목</span>`:`<span style="font-size:12px;color:${tot===L.slots_total?'#10b981':'#ef4444'}">슬롯 합 ${tot}/${L.slots_total}</span>`}</div>
       <table style="font-size:12px;margin-top:6px;width:100%"><thead><tr><th>순서</th><th>전략</th><th>슬롯</th>
-        <th title="강도 기준과 상관없이 삼">강도 면제</th><th title="전략마다 다른 강도 기준 — 비우면 위의 계좌 기본값">강도 기준</th><th title="${_lcEsc(stopSem)}">손절 %</th><th title="${_lcEsc(takeSem)}">익절 %</th><th title="신호일에 상한가로 마감(등락률 ≥ +29.5%)한 종목의 이 전략 신호는 사지 않음 — 전략마다 효과가 갈려(§91 검증 — 좋아짐: 52주 신고가·외국인 계열·MACD / 나빠짐: 500일 신고가·신용·스토캐스틱) 전략별로 고름. 토요일 탐색이 해마다 검증해 권장/유지를 알려 줌(§91)">상한가 제외</th><th>보유</th><th></th></tr></thead>
+        <th title="강도 기준과 상관없이 삼">강도 면제</th><th title="전략마다 다른 강도 기준 — 비우면 위의 계좌 기본값">강도 기준</th><th title="${_lcEsc(stopSem)}">손절 %</th><th title="${_lcEsc(takeSem)}">익절 %</th><th title="신호일에 상한가로 마감(등락률 ≥ +29.5%)한 종목의 이 전략 신호는 사지 않음 — 전략마다 효과가 갈려(§91 검증 — 좋아짐: 52주 신고가·외국인 계열·MACD / 나빠짐: 500일 신고가·신용·스토캐스틱) 전략별로 고름. 토요일 탐색이 해마다 검증해 권장/유지를 알려 줌(§91)">상한가 제외</th>${a==='kiwoom_real'?'<th title="전략 총액 상한(원) — 비우면 주문가능금액을 남은 빈 칸으로 균등, 넣으면 (상한 − 이미 산 금액) ÷ 이 전략 남은 빈 칸">금액 상한(원)</th>':''}<th>보유</th><th></th></tr></thead>
         <tbody>${rows}</tbody></table>
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
         ${A.strategies.length<L.max_strategies?`<button class="runbtn" onclick="lcAdd('${a}')">+ 전략 추가</button>`:`<span style="font-size:11px;color:#64748b">전략은 최대 ${L.max_strategies}개</span>`}
@@ -5785,7 +5789,7 @@ function lcSet(a,i,k,v){
   const s=_lcDraft[a].strategies[i];
   if(k==='slots') s.slots=parseInt(v||'0',10)||0;
   else if(k==='exempt'){ s.exempt=!!v; if(s.exempt) s.min_strength=null; }   // 면제면 전략별 기준은 의미 없음
-  else if(k==='stop'||k==='take'||k==='min_strength') s[k]=(v===''||v==null)?null:Number(v);
+  else if(k==='stop'||k==='take'||k==='min_strength'||k==='cap') s[k]=(v===''||v==null)?null:Number(v);   // [§96.6] cap = 본계좌 전략 총액 상한
   else if(k==='skip_limitup') s.skip_limitup=!!v;                              // [§91] 상한가 마감 신호 제외
   else if(k==='engine'){ s.engine=v; const e=_lcEng(v); s.holding=e.holding; }
   lcRender();
@@ -5848,6 +5852,7 @@ function realRender(){
     :`<div style="margin-top:8px;font-size:12px;color:#94a3b8">신규 매수: 정상 <button class="runbtn" style="margin-left:6px" onclick="realHalt('engage')">⏸ 신규 매수 정지(매도는 계속)</button></div>`;
   const ks=K.on?`<div style="margin-top:6px;color:#fca5a5;font-size:12px">⚠ 전체 정지 스위치 작동 중(${_lcEsc(K.reason||'')}) — 본계좌도 신규 매수 안 함(매도는 계속). 해제: python kill_switch.py release "확인 내용"</div>`:'';
   const lim=C.daily_loss_limit?`-${fmt(C.daily_loss_limit)}원 (${_lcEsc(C.loss_action_label||'')})`:'없음';
+  const capTxt=Object.keys(C.cap||{}).length?Object.entries(C.cap).map(([k,v])=>_lcEsc(k)+' '+fmt(v)+'원').join(', ')+' (나머지 균등)':'없음(전부 균등)';
   const lc=L.time?`마지막 판정 ${_lcEsc(L.time)} · 프로그램 몫 오늘 손익 <b class="${clr(L.pnl)}">${fmt(L.pnl)}원</b> (종목 ${L.n||0}개)${L.hit?' → <b style="color:#ef4444">한도 도달</b>':''}`:'아직 판정 기록 없음(매매 실행 때 판정)';
   const hist=(R.mode_history||[]).slice(0,5).map(h=>`<div>· ${_lcEsc(h.changed_at)} ${_lcEsc(h.prev||'')} → <b>${_lcEsc(h.mode)}</b>${h.note?' — '+_lcEsc(h.note):''}</div>`).join('');
   const wMir=C.mirror?'<div style="margin-top:6px;color:#fbbf24;font-size:12px">ℹ 본계좌 설정을 아직 저장한 적 없음 — 지금은 키움 안C(모의) 설정을 그대로 따릅니다. 아래 칸에서 고치고 저장하면 그때부터 따로.</div>':'';
@@ -5861,6 +5866,7 @@ function realRender(){
       <button class="runbtn" onclick="realLoad()" title="다시 불러오기">↺</button></div>
     <div style="margin-top:8px;font-size:12px">${conn}</div>
     <div style="margin-top:6px;font-size:12px;color:#cbd5e1">일일 손실 한도: <b>${lim}</b> · ${lc}</div>
+    <div style="margin-top:4px;font-size:12px;color:#cbd5e1">전략 총액 상한: <b>${capTxt}</b></div>
     ${halt}${ks}${wMir}${wFb}${wRun}
     <details style="margin-top:8px"><summary style="cursor:pointer;font-size:12px;color:#94a3b8">모드 변경 기록 · 동작 방식</summary>
       <div style="font-size:12px;color:#cbd5e1;margin-top:4px;line-height:1.7">${hist||'<span style="color:#64748b">아직 없음</span>'}
@@ -5913,6 +5919,7 @@ async function realSetMode(mode){
     if(!confirm('[1/2] 🔴 키움 본계좌 실주문을 켭니다.\\n\\n다음 매매 시각(평일 09:00 매수 · 15:21 매도)부터 실제 돈으로 주문합니다.'
       +'\\n· 전략: '+(C.strategies||[]).join(', ')+(C.mirror?' (본계좌 설정 저장 전 — 안C 설정을 따름)':'')
       +'\\n· 주문가능금액(100% 현금)을 빈 칸 수로 나눠 매수(현재가 +2% 지정가)'
+      +(Object.keys(C.cap||{}).length?'\\n· 전략 총액 상한: '+Object.entries(C.cap).map(([k,v])=>k+' '+fmt(v)+'원').join(', ')+' (나머지 전략은 균등)':'')
       +'\\n· 일일 손실 한도: '+lim
       +'\\n· 직접 산 종목은 건드리지 않음 · 계좌의 주문가능 현금 전부가 매수 예산'
       +'\\n· 장중(09:00 뒤)에 켜면 오늘 오후 보조 매수는 건너뛰고 다음 거래일 09:00 부터 삽니다\\n\\n계속할까요?')) return;

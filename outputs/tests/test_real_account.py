@@ -218,6 +218,60 @@ def test_real_never_buys_user_holding_and_counts_only_own_slots(real_kt):
     assert codes == ["111111"], "직접 보유 13종목은 칸을 차지하지 않고(연속조회로 다 읽음), 직접 보유 종목은 새로 사지 않는다"
 
 
+def test_strategy_cap_limits_only_that_strategy(real_kt, monkeypatch):
+    """§96.6 전략 총액 상한 — 넣은 전략은 (상한 − 이미 산 금액) ÷ 그 전략 남은 빈 칸, 비운 전략은 종전처럼 균등."""
+    kt, RA, tmp = real_kt
+    monkeypatch.setattr(kt, "STRATEGY_CAP", {"high_500d_filt": 1_000_000})
+    kt.save_kiwoom_position("777001", 10_000, "high_500d_filt", SIG_DATE, 20, qty=40)     # 이미 40만원 투입
+    _signals(tmp, [("111111", "high_500d_filt", 10_000), ("222222", "high_500d_filt", 10_000),
+                   ("333333", "high_52w_filt", 10_000)])
+    api = FakeApi(pages=[[_item("777001", 40, 10_000, 10_000)]], deposit=10_000_000,
+                  quotes={c: (10_000, 13_000) for c in ("111111", "222222", "333333")})
+    kt._API_BUNDLE = api
+    kt.cmd_buy()                                              # 드라이런
+    dr = pd.read_csv(tmp / "db" / "kiwoom_real" / f"dryrun_{TODAY}.csv", dtype={"code": str}).set_index("code")
+    q1 = int(600_000 / 5 * kt.REAL_BUDGET_PAD // 10_200)       # 남은 60만 ÷ 이 전략 남은 칸 5
+    assert int(dr.loc["111111", "qty"]) == q1
+    spent = q1 * 10_200
+    assert int(dr.loc["222222", "qty"]) == int((600_000 - spent) / 4 * kt.REAL_BUDGET_PAD // 10_200)
+    assert int(dr.loc["333333", "qty"]) > 5 * q1, "상한 없는 전략은 주문가능금액 ÷ 남은 빈 칸(균등) 그대로"
+    assert sum(int(dr.loc[c, "qty"]) * 10_200 for c in ("111111", "222222")) + 400_000 <= 1_000_000
+
+
+def test_strategy_cap_reached_skips(real_kt, monkeypatch):
+    kt, RA, tmp = real_kt
+    monkeypatch.setattr(kt, "STRATEGY_CAP", {"high_500d_filt": 300_000})
+    kt.save_kiwoom_position("777001", 10_000, "high_500d_filt", SIG_DATE, 20, qty=40)
+    _signals(tmp, [("111111", "high_500d_filt", 10_000)])
+    kt._API_BUNDLE = FakeApi(pages=[[_item("777001", 40, 10_000, 10_000)]], quotes={"111111": (10_000, 13_000)})
+    kt.cmd_buy()
+    assert not (tmp / "db" / "kiwoom_real" / f"dryrun_{TODAY}.csv").exists(), "상한(30만) 이미 넘음(40만) → 이 전략은 안 삼"
+
+
+def test_live_config_strategy_cap(tmp_path, monkeypatch):
+    monkeypatch.setenv("LIVE_CONFIG_PATH", str(tmp_path / "lc.json"))
+    import live_config as LC
+    c = LC.load()
+    R = dict(c["accounts"]["kiwoom_real"])
+    R.pop("_mirror")
+    R["strategies"] = [dict(s) for s in R["strategies"]]
+    R["strategies"][0]["cap"] = 3_000_000
+    c["accounts"]["kiwoom_real"] = R
+    cfg, ch = LC.save(c)
+    assert cfg["accounts"]["kiwoom_real"]["strategies"][0]["cap"] == 3_000_000
+    assert LC.account("kiwoom_real")["cap"] == {LC.live_name(R["strategies"][0]["engine"]): 3_000_000}
+    c2 = LC.load()
+    c2["accounts"]["kiwoom_real"]["strategies"][0]["cap"] = 5_000_000
+    assert any("금액 상한 3,000,000원→5,000,000원" in x for x in LC.diff(LC.load(), c2))
+    bad = LC.load()
+    bad["accounts"]["kiwoom"]["strategies"][0]["cap"] = 1_000_000
+    assert LC.validate(bad), "모의계좌엔 금액 상한 없음"
+    bad = LC.load()
+    bad["accounts"]["kiwoom_real"]["strategies"][0]["cap"] = 50_000
+    assert LC.validate(bad), "10만원 미만은 거부"
+    assert LC.account("kiwoom")["cap"] == {}
+
+
 def test_real_cash_basis_and_uncl_blocks_buy(real_kt, captured_notifications):
     kt, RA, tmp = real_kt
     kt.MODE, kt.DRY = "live", False

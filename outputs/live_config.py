@@ -38,6 +38,7 @@ ACCOUNT_LABEL = {"kiwoom": "키움 안C", "kis": "KIS 안D", "kiwoom_real": "키
 REAL_MIRROR = {"kiwoom_real": "kiwoom"}            # 본계좌 설정을 저장한 적 없으면 이 모의계좌 설정을 따른다
 LOSS_ACTIONS = {"halt": "내가 다시 켤 때까지 신규 매수 정지", "day": "그날만 신규 매수 정지(다음 거래일 자동 재개)"}
 LOSS_LIMIT_RANGE = (10_000, 10_000_000_000)       # 일일 손실 한도(원) 허용 범위 — 비우면 끔
+CAP_RANGE = (100_000, 10_000_000_000)             # [§96.6] 본계좌 전략별 총액 상한(원) — 비우면 '주문가능금액 ÷ 남은 빈 칸'
 ALIAS = {"star_high_52w_20_filt": "high_52w_filt", "star_high_500d_20": "high_500d_filt"}   # engine → live
 SLOT_MODES = {"slots": "전략별 칸", "pool": "칸 없음(전체 10종목, 전략 안 순위 높은 순)"}
 STRENGTH_VERSIONS = {"v1": "공통(라이브 6전략 풀 학습, 예전 방식)", "v2": "전략별(그 전략 자신의 과거 매매로 학습, §62)"}
@@ -164,6 +165,10 @@ def validate(cfg, engine_names=None):
                 errs.append(f"{lab}: {e} 전략별 강도 기준은 0~10 또는 비움")
             if "skip_limitup" in s and not isinstance(s.get("skip_limitup"), bool):
                 errs.append(f"{lab}: {e} 상한가 마감 신호 제외 값 오류")
+            cp = s.get("cap")                       # [§96.6] 본계좌 전략 총액 상한(원, 비우면 없음)
+            if cp is not None and (a not in REAL_ACCOUNTS or not isinstance(cp, (int, float)) or isinstance(cp, bool)
+                                   or not CAP_RANGE[0] <= cp <= CAP_RANGE[1]):
+                errs.append(f"{lab}: {e} 금액 상한은 본계좌에서만 {CAP_RANGE[0]:,}~{CAP_RANGE[1]:,}원 또는 비움")
         if tot != SLOTS_TOTAL and A.get("slot_mode", "slots") == "slots":     # 칸 없음이면 전략별 칸 수는 안 씀
             errs.append(f"{lab}: 슬롯 합이 {tot} — {SLOTS_TOTAL} 이어야 합니다")
     return errs
@@ -204,7 +209,8 @@ def account(acct, cfg=None):
            "min_strength_by": {}, "skip_limitup": set(),
            # [§96] 본계좌만의 값(모의계좌는 None/halt 고정) + 설정 상태(기본값 대체·아직 모의 설정을 따르는 중)
            "daily_loss_limit": A.get("daily_loss_limit"), "loss_action": A.get("loss_action", "halt"),
-           "mirror": bool(A.get("_mirror")), "fallback": cfg.get("_fallback")}
+           "mirror": bool(A.get("_mirror")), "fallback": cfg.get("_fallback"),
+           "cap": {}}                                  # [§96.6] 본계좌 전략별 총액 상한(원) — 비운 전략은 없음
     # 누적 규칙 먼저(옛 보유분), 그 위에 현재 규칙
     for ln, r in (cfg.get("exit_rules") or {}).items():
         if r.get("stop") is not None:
@@ -225,6 +231,8 @@ def account(acct, cfg=None):
             out["exempt"].add(ln)
         if s.get("skip_limitup"):                       # [§91] 상한가 마감 신호 제외
             out["skip_limitup"].add(ln)
+        if acct in REAL_ACCOUNTS and s.get("cap") is not None:
+            out["cap"][ln] = int(s["cap"])
         out["stop"].pop(ln, None)
         out["take"].pop(ln, None)
         if s.get("stop") is not None:
@@ -298,7 +306,8 @@ def diff(old, new):
                            f"{', 강도 기준 ' + format(s['min_strength'], 'g') if s.get('min_strength') is not None else ''}"
                            f"{', 손절 ' + format(s['stop'], 'g') + '%' if s['stop'] is not None else ''}"
                            f"{', 익절 +' + format(s['take'], 'g') + '%' if s['take'] is not None else ''}"
-                           f"{', 상한가 마감 신호 제외' if s.get('skip_limitup') else ''})")
+                           f"{', 상한가 마감 신호 제외' if s.get('skip_limitup') else ''}"
+                           f"{', 금액 상한 ' + format(int(s['cap']), ',') + '원' if s.get('cap') is not None else ''})")
         for e in om:
             if e not in nm:
                 out.append(f"{lab} − {e} (보유분은 만기까지 그대로)")
@@ -306,15 +315,18 @@ def diff(old, new):
             if e in om:
                 def _v(x, k):
                     return bool(x.get(k)) if k == "skip_limitup" else x.get(k)     # 없음 = 끔
-                ch = [f"{ {'min_strength': '강도기준', 'skip_limitup': '상한가 제외'}.get(k, k)} {_fmt(_v(om[e], k))}→{_fmt(_v(nm[e], k))}"
-                      for k in ("slots", "exempt", "stop", "take", "min_strength", "skip_limitup")
+                ch = [f"{ {'min_strength': '강도기준', 'skip_limitup': '상한가 제외', 'cap': '금액 상한'}.get(k, k)} "
+                      f"{_fmt(_v(om[e], k), k)}→{_fmt(_v(nm[e], k), k)}"
+                      for k in ("slots", "exempt", "stop", "take", "min_strength", "skip_limitup", "cap")
                       if _v(om[e], k) != _v(nm[e], k)]
                 if ch:
                     out.append(f"{lab} {e}: " + ", ".join(ch))
     return out
 
 
-def _fmt(v):
+def _fmt(v, k=None):
+    if k == "cap" and v is not None:               # [§96.6] 금액은 쉼표(3e+06 같은 표기 방지)
+        return f"{int(v):,}원"
     return "없음" if v is None else ("예" if v is True else "아니오" if v is False else f"{v:g}")
 
 
@@ -331,6 +343,8 @@ def _acct_block(A, real=False):
         dl = A.get("daily_loss_limit")
         out["daily_loss_limit"] = int(dl) if dl is not None else None
         out["loss_action"] = A.get("loss_action", "halt")
+        for row, s in zip(out["strategies"], A["strategies"]):                       # [§96.6] 전략 총액 상한
+            row["cap"] = int(s["cap"]) if s.get("cap") is not None else None
     return out
 
 
