@@ -151,34 +151,49 @@ def load_macro_daily(start_date=None, end_date=None, data_dir=None) -> pd.DataFr
     # 개인 순매수 조인 - supply_demand.individual_net_value (2026-09-08 신설)
     # CSV(macro_data/daily)엔 외국인/기관만 있어, 개인은 stock.db 에서 date+code 로 조인한다.
     # 백필 전(개인 NULL)이면 individual_net 은 NaN → supply_reversal 전략이 폴백(신호 0).
-    try:
-        import sqlite3
+    # [2026-11-02 §93] 조인이 **실패**(DB 잠김·읽기 불가)하면 캐시를 저장하지 않는다 — 실패한 한 프로세스가 개인 순매수 없는
+    #   캐시를 남기면, 다음 일봉이 들어올 때까지 모든 프로세스가 supply 계열 매매 0건으로 계산했다(10-31 실사고: 분석 환경이
+    #   stock.db 를 못 읽은 채 캐시를 다시 만들어 11-02 파이프라인의 supply_abc v2·AI 학습·전체 백테스트가 틀어짐).
+    join_ok = False
+    for _try in range(3):
         try:
-            from fin_paths import STOCK_DB as _SDB
-            _sdb = str(_SDB)
-        except Exception:
-            _sdb = os.path.join(os.path.dirname(__file__), "..", "..",
-                                "Stock_AI_Project", "data", "stock.db")
-        _con = sqlite3.connect(f"file:{_sdb}?mode=ro", uri=True)
-        _ind = pd.read_sql(
-            "SELECT date, ticker, individual_net_value FROM supply_demand "
-            "WHERE individual_net_value IS NOT NULL", _con)
-        _con.close()
-        if len(_ind):
-            _ind["date"] = _ind["date"].astype(str).str.replace("-", "", regex=False)
-            _ind["code"] = _ind["ticker"].astype(str).str.zfill(6)
-            full = full.merge(_ind[["date", "code", "individual_net_value"]],
-                              on=["date", "code"], how="left")
-            full = full.rename(columns={"individual_net_value": "individual_net"})
-            print(f"  [loader] 개인 순매수 조인: {_ind['individual_net_value'].notna().sum():,}건")
-    except Exception as _e:
-        print(f"  [loader] 개인 순매수 조인 실패(무시): {str(_e)[:70]}")
+            import sqlite3
+            try:
+                from fin_paths import STOCK_DB as _SDB
+                _sdb = str(_SDB)
+            except Exception:
+                _sdb = os.path.join(os.path.dirname(__file__), "..", "..",
+                                    "Stock_AI_Project", "data", "stock.db")
+            _con = sqlite3.connect(f"file:{_sdb}?mode=ro", uri=True)
+            try:
+                _ind = pd.read_sql(
+                    "SELECT date, ticker, individual_net_value FROM supply_demand "
+                    "WHERE individual_net_value IS NOT NULL", _con)
+            finally:
+                _con.close()
+            join_ok = True
+            if len(_ind):
+                _ind["date"] = _ind["date"].astype(str).str.replace("-", "", regex=False)
+                _ind["code"] = _ind["ticker"].astype(str).str.zfill(6)
+                full = full.merge(_ind[["date", "code", "individual_net_value"]],
+                                  on=["date", "code"], how="left")
+                full = full.rename(columns={"individual_net_value": "individual_net"})
+                print(f"  [loader] 개인 순매수 조인: {_ind['individual_net_value'].notna().sum():,}건")
+            break
+        except Exception as _e:
+            _err = str(_e)[:70]
+            if _try < 2:
+                import time as _time
+                _time.sleep(5)
+    if not join_ok:
+        print(f"  [loader][경고] 개인 순매수 조인 실패({_err}) — 이번 실행은 supply 계열(개인 순매수) 전략이 매매 0건. "
+              f"캐시는 저장하지 않음(다음 실행이 다시 시도)")
     if "individual_net" not in full.columns:
         full["individual_net"] = float("nan")
 
     full = full.sort_values(["code", "date"]).reset_index(drop=True)
 
-    if use_cache:
+    if use_cache and join_ok:                       # [§93] 조인 실패한 표는 캐시하지 않음
         try:
             import pickle
             tmp = _cache_path + ".tmp"

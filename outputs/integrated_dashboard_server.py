@@ -1737,19 +1737,18 @@ def get_ai_jobs_status(now=None):
     rows.append(r)
 
     # 5) 강도 v2 주간 학습(파이프라인 [7])
-    r = {"name": "강도 v2 학습(전략별)", "next": _next_weekly(6, 3, 0, now) + " (파이프라인 [7])", "status": "none",
+    r = {"name": "강도 v2 학습(전략별)", "next": _next_weekly(6, 3, 0, now) + " (파이프라인 [7] · 수동 [강도 v2 학습])", "status": "none",
          "when": "-", "detail": "모델 없음", "took": "", "log": str(BASE / "db" / "strength_v2")}
     try:
-        import live_config as LC
-        cfg = LC.load()
-        engs = sorted({s_["engine"] for a_ in LC.ACCOUNTS for s_ in cfg["accounts"][a_]["strategies"]})
+        import strength_model as SM
+        engs = SM.configured_engines()          # [§93] 모의계좌 + 강도매매 탭(v2) 전략
         ms = [(e_, (BASE / "db" / "strength_v2" / f"{e_}.json")) for e_ in engs]
         have = [(e_, p_.stat().st_mtime) for e_, p_ in ms if p_.exists()]
         miss = [e_ for e_, p_ in ms if not p_.exists()]
         if have:
             oldest = min(t_ for _, t_ in have)
             r["when"] = fmt(max(t_ for _, t_ in have))
-            r["detail"] = f"모의계좌 전략 {len(have)}/{len(engs)}개 모델 · 가장 오래된 것 {fmt(oldest)}" + (f" · 없음: {', '.join(miss)}" if miss else "")
+            r["detail"] = f"쓰는 전략 {len(have)}/{len(engs)}개 모델 · 가장 오래된 것 {fmt(oldest)}" + (f" · 없음: {', '.join(miss)}" if miss else "")
             r["status"] = "stale" if age_days(oldest) > 8 else ("fail" if miss else "ok")
     except Exception:
         pass
@@ -2450,6 +2449,7 @@ _RUN_TASKS = {
                       str(BASE.parent / "Stock_AI_Project" / "run_backfill.ps1")],   # Stock_AI 수집기 일괄(자체 cwd/venv)
     "ai_dataset":    [_VENV_PYTHON, str(BASE / "make_trades_history_v3.py")],        # AI 학습 데이터셋 생성
     "ai_train":      [_VENV_PYTHON, str(BASE / "ai_model.py"), "--train"],           # [§85] 개선 AI 재학습(옛 meta_model_v4 는 학습 중단)
+    "strength_v2":   [_VENV_PYTHON, str(BASE / "strength_model.py"), "--train"],     # [§93] 강도 v2 재학습(모의계좌 + 강도매매 탭 전략)
     "setting_sweep": [_VENV_PYTHON, str(BASE / "setting_sweep.py"), "--fine"],       # [§87·88] 강도·손절·익절 촘촘 탐색(1~2시간)
     "ai_pipeline":   ["cmd", "/c", str(BASE / "run_ai_pipeline.bat"), "auto"],       # 주1회 경량 AI 갱신(수집→데이터셋→학습, 게이팅)
     "strategy_lab":  [_VENV_PYTHON, str(BASE / "strategy_lab.py")],                  # 전략 랩 forward 집계
@@ -2522,7 +2522,7 @@ _RUN_CWD = {
 _RUN_PROCS: dict = {}   # task -> 마지막 Popen. 중복실행 가드용(2026-07-17).
 # ai_data/ 산출물(historical_features·trades_history·meta_model)을 공유하는 작업군 —
 # 동시 실행 시 학습이 재작성 중인 파일을 읽는 오염 발생(12:44 실사례) → 상호배제.
-_AI_GROUP = {"ai_dataset", "ai_train", "ai_pipeline", "setting_sweep"}   # [§87] 설정 탐색도 무거워 함께 배타
+_AI_GROUP = {"ai_dataset", "ai_train", "ai_pipeline", "setting_sweep", "strength_v2"}   # [§87] 설정 탐색 · [§93] v2(학습표 공유)도 배타
 
 
 @app.after_request
@@ -2599,6 +2599,7 @@ def api_run(task):
             _resolve_cmd(_RUN_TASKS[task]), cwd=_RUN_CWD.get(task, str(BASE)),
             stdout=logf, stderr=_sp.STDOUT,
             creationflags=_NO_WIN,
+            env=dict(os.environ, PYTHONUNBUFFERED="1"),   # [§93] 파이썬 출력을 바로 로그에(종전엔 끝날 때 한꺼번에 → 도는 동안 빈 로그)
         )
         _RUN_PROCS[task] = proc
         return jsonify({"ok": True, "msg": f"시작됨 (PID {proc.pid}) → logs/run_{task}.log 에 기록"})
@@ -4032,6 +4033,7 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
         <button class="runbtn" onclick="runTask('ai_pipeline','AI 파이프라인(수집→학습)')">AI 파이프라인</button>
         <button class="runbtn" onclick="runTask('ai_dataset','AI 학습 데이터셋')">AI 데이터셋</button>
         <button class="runbtn" title="개선 AI 재학습 + 해마다 검증(수 분) — 평소엔 일요일 AI 파이프라인이 자동" onclick="runTask('ai_train','개선 AI 학습')">AI 학습</button>
+        <button class="runbtn" title="강도 v2 재학습 — 모의계좌 두 계좌 + 강도매매 탭 전략(전략당 1~3분). 학습할 매매가 모자라면 기존 학습표·모델을 그대로 둠 · 평소엔 일요일 AI 파이프라인 [7]이 자동. 끝난 뒤 [AI 학습]을 누르면 개선 AI 도 새 학습표로 학습" onclick="runTask('strength_v2','강도 v2 학습')">강도 v2 학습</button>
         <button class="runbtn" title="고른 전략 + 추천 전략마다 강도×손절×익절 촘촘 탐색(강도 0.1·손절 1%p·익절 2%p) + 해마다 검증(1~2시간) → 설정 화면 '🎯 권장' — 평소엔 토요일 02:00 자동(StockAI\\SettingSweep)" onclick="runTask('setting_sweep','강도·손절·익절 탐색')">설정 탐색</button>
         <button class="runbtn" onclick="runTask('strategy_lab','전략 랩')">전략 랩</button>
         <button class="runbtn" onclick="runTask('paper_tracker','페이퍼 추적')">페이퍼 추적</button>

@@ -94,7 +94,8 @@ def test_wiring():
     assert 'StockAI\\SettingSweep' in ps and "-DaysOfWeek Saturday" in ps and "run_setting_sweep.bat" in ps
     src = open(os.path.join(HERE, "integrated_dashboard_server.py"), encoding="utf-8").read()
     assert '"setting_sweep": [_VENV_PYTHON, str(BASE / "setting_sweep.py"), "--fine"]' in src
-    assert "runTask('setting_sweep'" in src and '"setting_sweep"}' in src
+    grp = next(l for l in src.splitlines() if l.startswith("_AI_GROUP = {"))
+    assert "runTask('setting_sweep'" in src and '"setting_sweep"' in grp, "AI 그룹(동시 실행 막음)에 포함"
     assert "function lcApplyAdv" in src and "function vcApplyAdv" in src and "function _advHtml" in src
 
 

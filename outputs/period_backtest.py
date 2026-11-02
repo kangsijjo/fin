@@ -111,6 +111,7 @@ def aux_coverage(cal, df=None, force=False):
             items[key] = [str(ok.index.min()), str(ok.index.max())] if len(ok) else None
     sf = sorted(os.path.basename(p)[:8] for p in glob.glob(os.path.join(HERE, "macro_data", "shortfund_kosdaq", "*.csv")))
     items["short"] = [sf[0], sf[-1]] if sf else None
+    db_ok = True
     try:
         import sqlite3
         from strategies.high52w_credit_decrease import _default_stock_db
@@ -121,6 +122,9 @@ def aux_coverage(cal, df=None, force=False):
         items["credit"] = [str(a).replace("-", "")[:8], str(b).replace("-", "")[:8]] if a else None
     except Exception:
         items["credit"] = None
+        db_ok = False
+    if not db_ok:          # [§93] DB 를 못 읽은 결과(개인·신용 '없음')는 저장하지 않음 — 다른 프로세스까지 '부족' 경고를 보지 않게
+        return items
     os.makedirs(OUT_DIR, exist_ok=True)
     with open(COVERAGE_JSON, "w", encoding="utf-8") as f:
         json.dump({"data_max": cal[-1], "built": datetime.now().strftime("%Y-%m-%d %H:%M"),

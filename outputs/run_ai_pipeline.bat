@@ -126,9 +126,10 @@ if errorlevel 1 ( echo [WARN] full strategy backtest failed ^(exit !ERRORLEVEL!^
 echo [%time%] [6] done.
 
 REM ---- 7 (NOT gated) strength v2 weekly retrain (2026-10-22, see system doc 62) ----
-REM   strength_model.py --train : per-strategy IC weights for every strategy in db\live_config.json
-REM   (both accounts). Live signals score with the new weights from Monday. Failure = warning only
-REM   (the previous model file stays; strategies without a model fall back to v1 scores).
+REM   strength_model.py --train : per-strategy IC weights for every strategy in use - db\live_config.json
+REM   (both accounts) + the strength tab v2 portfolio (2026-11-02, system doc 93). Live signals score with
+REM   the new weights from Monday. Failure = warning only (the previous model file stays; a strategy whose
+REM   new table is unusable keeps its previous table and model; no model at all = v1 scores).
 echo [%time%] [7] Strength v2 retrain (strength_model --train)...
 echo [7] strength_model.py --train ... >> "%LOG%"
 cd /d "%OUT%"

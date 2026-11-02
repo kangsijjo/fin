@@ -16,7 +16,7 @@ v2 방식
   강도순 + v2≥5.5 의 5전략 평균 CAGR +6.6% vs 엔진 기본 −3.7% / v1 강도순 −5.9% (v1 ≥5.7 은 거의 매수 0건).
 
 저장: db/strength_v2/{엔진이름}.json(가중치·기준분포 1001분위) + {엔진이름}_train.pkl(학습 표본: 매매+피처, 백테스트 재사용)
-사용: python strength_model.py --train            # 설정(live_config)의 양 계좌 전략 전부
+사용: python strength_model.py --train            # 쓰는 전략 전부(모의계좌 두 계좌 + 강도매매 탭 강도 포트, §93)
       python strength_model.py --train gc_for3d,star_high_500d_20
 """
 import argparse
@@ -205,6 +205,14 @@ def build_train_table(engine, df, log=print):
     return T
 
 
+def _usable_table(p):
+    """[§93] 그 학습표가 학습에 쓸 만한가(행 수 ≥ MIN_TRAIN)."""
+    try:
+        return os.path.exists(p) and len(pd.read_pickle(p)) >= MIN_TRAIN
+    except Exception:
+        return False
+
+
 def train(engines, df=None, log=print):
     """전략별 학습·저장 → {엔진: 요약}. 표본 부족이면 모델을 만들지 않고 이유를 남긴다."""
     from strategies.daily_loader import load_macro_daily
@@ -217,11 +225,18 @@ def train(engines, df=None, log=print):
     for e in engines:
         try:
             T = build_train_table(e, df, log=log)
-            T.to_pickle(train_path(e))
             m = fit(T)
             if m is None:
-                out[e] = {"ok": False, "why": f"학습 매매 {len(T)}건 < {MIN_TRAIN} — v1 로 대체"}
+                # [§93] 학습할 수 없는 표(매매 부족)로 쓸 수 있던 학습표를 덮지 않는다 — 11-02 supply_abc 가 데이터 캐시 문제로
+                #   매매 0건이 되자 학습표를 빈 표로 덮어 개선 AI·설정 탐색에서 빠졌다. 기존 표·모델이 있으면 그대로 둔다.
+                keep = _usable_table(train_path(e))
+                if not keep:
+                    T.to_pickle(train_path(e))
+                out[e] = {"ok": False, "why": f"학습 매매 {len(T)}건 < {MIN_TRAIN} — "
+                                              + ("기존 학습표·모델 유지(데이터 확인 필요)" if keep else "v1 로 대체")}
+                log(f"[strength_v2] {e}: {out[e]}")            # [§93] 실패도 기록(종전엔 continue 로 이 줄을 건너뜀)
                 continue
+            T.to_pickle(train_path(e))
             m.update(engine=e, version=VERSION, trained=datetime.now().strftime("%Y-%m-%d %H:%M"),
                      data_max=str(df["date"].max()))
             try:                                   # [§75] 점수 분포(101분위) — '칸 없음' 모드의 전략 간 비교(백분위)용
@@ -262,9 +277,21 @@ def walk_forward(T_train, X, years):
 
 
 def configured_engines():
+    """v2 를 쓰는 전략 — 모의계좌 두 계좌 + [§93] 강도매매 탭 강도 포트(지금·예약, v2 일 때).
+    종전엔 모의계좌만이라 강도매매 탭 전략은 처음 저장할 때 한 번만 학습되고 주간 재학습에서 빠졌다."""
     import live_config as LC
     cfg = LC.load()
-    return sorted({s["engine"] for a in LC.ACCOUNTS for s in cfg["accounts"][a]["strategies"]})
+    out = {s["engine"] for a in LC.ACCOUNTS for s in cfg["accounts"][a]["strategies"]}
+    try:
+        import virtual_config as VC
+        for e in VC.state():
+            if e and not e.get("legacy"):
+                P = e["portfolios"].get("strength") or {}
+                if (P.get("strength_version") or "v2") == "v2":
+                    out |= {s["engine"] for s in P.get("strategies") or []}
+    except Exception:
+        pass
+    return sorted(out)
 
 
 def status():
