@@ -277,11 +277,11 @@ def walk_forward(T_train, X, years):
 
 
 def configured_engines():
-    """v2 를 쓰는 전략 — 모의계좌 두 계좌 + [§93] 강도매매 탭 강도 포트(지금·예약, v2 일 때).
+    """v2 를 쓰는 전략 — 모의계좌 두 계좌 + [§96] 키움 본계좌 + [§93] 강도매매 탭 강도 포트(지금·예약, v2 일 때).
     종전엔 모의계좌만이라 강도매매 탭 전략은 처음 저장할 때 한 번만 학습되고 주간 재학습에서 빠졌다."""
     import live_config as LC
     cfg = LC.load()
-    out = {s["engine"] for a in LC.ACCOUNTS for s in cfg["accounts"][a]["strategies"]}
+    out = {s["engine"] for a in LC.ALL_ACCOUNTS for s in cfg["accounts"][a]["strategies"]}
     try:
         import virtual_config as VC
         for e in VC.state():

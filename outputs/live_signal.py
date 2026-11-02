@@ -158,12 +158,17 @@ def _rsi(series, period=14):
 
 
 # ─── CSV 관리 ─────────────────────────────────────────────────────────────────
-def _migrate_signals_csv():
+# [2026-11-02 §96] path 인자 — 키움 본계좌 신호(db/kiwoom_real/signals.csv)도 같은 함수로 쓴다(기본값은 종전 그대로).
+REAL_SIGNALS_CSV = os.path.join("db", "kiwoom_real", "signals.csv")
+
+
+def _migrate_signals_csv(path=None):
     """구버전 CSV(strategy/holding_days 컬럼 없음) → 신버전으로 마이그레이션."""
-    if not os.path.exists(SIGNALS_CSV):
+    path = path or SIGNALS_CSV
+    if not os.path.exists(path):
         return
     try:
-        df = pd.read_csv(SIGNALS_CSV, dtype={"code": str})
+        df = pd.read_csv(path, dtype={"code": str})
     except Exception:
         return
     changed = False
@@ -174,16 +179,17 @@ def _migrate_signals_csv():
         df["holding_days"] = 40
         changed = True
     if changed:
-        df.to_csv(SIGNALS_CSV, index=False, encoding="utf-8-sig")
-        print(f"[migrate] paper_signals.csv — strategy/holding_days 컬럼 추가 완료")
+        df.to_csv(path, index=False, encoding="utf-8-sig")
+        print(f"[migrate] {os.path.basename(path)} — strategy/holding_days 컬럼 추가 완료")
 
 
-def load_existing_signals():
+def load_existing_signals(path=None):
     """(signal_date, code, strategy) 집합 → 멱등성 중복 방지."""
-    if not os.path.exists(SIGNALS_CSV):
+    path = path or SIGNALS_CSV
+    if not os.path.exists(path):
         return set()
     try:
-        df = pd.read_csv(SIGNALS_CSV, dtype={"code": str})
+        df = pd.read_csv(path, dtype={"code": str})
         df["code"] = df["code"].astype(str).str.zfill(6)
         if "strategy" not in df.columns:
             df["strategy"] = "high_52w_filt"
@@ -196,27 +202,29 @@ def load_existing_signals():
         return set()
 
 
-def append_signals(new_rows):
-    """신호 행을 paper_signals.csv에 append (헤더 없으면 생성).
+def append_signals(new_rows, path=None):
+    """신호 행을 paper_signals.csv(또는 path)에 append (헤더 없으면 생성).
 
     [2026-07-11] 0바이트 파일(직전 실행이 쓰다 죽은 잔재)은 '없음'으로 취급 — 기존엔
     존재만 보고 헤더 없이 데이터를 append 해 트레이더 todays_signals 가 KeyError 로
     죽는 손상 CSV 를 만들었음(strength_logger 는 이미 getsize 검사, 비대칭 해소)."""
-    file_exists = os.path.exists(SIGNALS_CSV) and os.path.getsize(SIGNALS_CSV) > 0
+    path = path or SIGNALS_CSV
+    file_exists = os.path.exists(path) and os.path.getsize(path) > 0
     if file_exists:
-        _migrate_signals_csv()
+        _migrate_signals_csv(path)
     # 기존 파일이 있으면 그 헤더 순서대로 쓴다 — CSV_FIELDS 와 헤더 순서가 달라도
     # 행 컬럼이 어긋나지 않게(과거 회귀 재발 방지). 컬럼 집합이 같을 때만 헤더 순서 채택.
     fields = CSV_FIELDS
     if file_exists:
         try:
-            with open(SIGNALS_CSV, encoding="utf-8-sig") as hf:
+            with open(path, encoding="utf-8-sig") as hf:
                 cols = [c.strip() for c in hf.readline().lstrip("﻿").strip().split(",") if c.strip()]
             if set(cols) == set(CSV_FIELDS):
                 fields = cols
         except Exception:
             pass
-    with open(SIGNALS_CSV, "a" if file_exists else "w",
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "a" if file_exists else "w",
               newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         if not file_exists:
@@ -369,6 +377,59 @@ def detect_rsi_reversal(df, last_date, all_dates, name_cache):
     return rows
 
 
+# ─── [2026-11-02 §96] 키움 본계좌 신호 ──────────────────────────────────────────
+def _real_account_signals(df, last_date, all_dates, name_cache, known, groups):
+    """본계좌 전용 설정(live_config 'kiwoom_real')의 전략으로 오늘 신호를 따로 저장 — db/kiwoom_real/signals.csv.
+
+    모의(안C)에서 이미 만든 전략은 그 행을 그대로 쓰고(같은 전략 = 같은 신호), 본계좌에만 있는 전략만 새로 계산한다.
+    강도는 계좌 'real_kiwoom' 으로 기록(본계좌 트레이더가 이 기록만 읽음 — 모의 집계와 섞이지 않게).
+    본계좌 모드가 '끔'이면 건너뛴다. 어떤 실패도 모의 신호를 막지 않는다(전부 흡수 + 알림)."""
+    try:
+        import real_account as RA
+        if RA.get_mode() == "off":
+            print("\n[본계좌] 모드 '끔' — 본계좌 신호 생략")
+            return
+        import live_config as LC
+        import engine_signals as ES
+        ra = LC.account("kiwoom_real")
+        mock_rows = {ln: rows for ln, rows in groups}
+        known2 = dict(known)
+        for ln in ra["priority"]:
+            if ln in mock_rows:                                   # 모의에서 이미 만든 전략 — 다시 계산하지 않음
+                known2[ln] = (lambda rows: (lambda *a, **k: [dict(r) for r in rows]))(mock_rows[ln])
+        rgroups, rskipped = ES.run_configured("kiwoom_real", df, str(last_date), [str(x) for x in all_dates],
+                                              name_cache, known2, is_excluded, _offset_date)
+        rows = [r for _, rs in rgroups for r in rs]
+        existing = load_existing_signals(REAL_SIGNALS_CSV)
+        new = [s for s in rows
+               if (str(s["signal_date"]), str(s["code"]).zfill(6), s["strategy"]) not in existing]
+        print(f"\n[본계좌] 신호 {len(rows)}건 (새 신호 {len(new)}건)"
+              + ("" if not ra.get("mirror") else " — 본계좌 설정을 아직 저장 안 함: 키움 안C 설정을 따름") + " · "
+              + " / ".join(f"{ln} {len(rs)}" for ln, rs in rgroups))
+        if rskipped:
+            try:
+                import notifier
+                notifier.safe_send("⚠ [키움 본계좌 신호] 오늘 신호를 만들지 못한 전략: "
+                                   + " / ".join(f"{n} — {w}" for n, w in rskipped))
+            except Exception:
+                pass
+        if new:
+            append_signals(new, REAL_SIGNALS_CSV)
+            print(f"[본계좌] {REAL_SIGNALS_CSV} 에 {len(new)}건 추가")
+            try:
+                import strength_logger
+                strength_logger.log_strength("real_kiwoom", df, last_date, new)
+            except Exception as _e:
+                print(f"[본계좌][strength_logger][warn] {_e}")
+    except Exception as e:
+        print(f"[본계좌][warn] 본계좌 신호 생성 실패(모의 신호엔 영향 없음): {type(e).__name__}: {e}")
+        try:
+            import notifier
+            notifier.safe_send(f"⚠ [키움 본계좌 신호] 생성 실패 — 내일 본계좌 매수 없음: {type(e).__name__}: {str(e)[:120]}")
+        except Exception:
+            pass
+
+
 # ─── 메인 ─────────────────────────────────────────────────────────────────────
 def main():
     import live_config as LC
@@ -412,6 +473,8 @@ def main():
                                + " / ".join(f"{n} — {w}" for n, w in skipped))
         except Exception:
             pass
+    # [§96] 키움 본계좌 — 본계좌 설정 전략의 신호를 따로(모의 신호가 0건이어도). 실패는 내부에서 흡수.
+    _real_account_signals(df, last_date, all_dates, name_cache, known, groups)
     all_signals = [r for _, rows in groups for r in rows]
 
     # 5) 기존 신호와 대조 — (date, code, strategy) 기준 중복 제거

@@ -783,7 +783,30 @@ def check_trading():
         out.append(("trade_kis_pm", "KIS 만기매도(15:21)",
                     _any_log_contains_today("kis_trader_*.log", "[daily-pm] 완료"),
                     "오늘 15:21 만기매도(daily-pm) 완주 흔적 없음(미실행 또는 도중 크래시)"))
+    # [2026-11-02 §96] 키움 본계좌 — 작업을 등록해 한 번이라도 돈 적이 있고(최근 7일 로그) 모드가 '끔'이 아닐 때만
+    # (등록 전엔 매일 '미실행' 오경보가 나지 않게). 로그는 real_kiwoom_YYYYMMDD.log(모의 kiwoom_*.log 와 겹치지 않는 이름).
+    if IS_TRADING_DAY and _real_active():
+        if _after("09:10"):
+            out.append(("trade_real", "본계좌 매매(09:00)", _ran_today(f"real_kiwoom_{TODAY_STR}.log"),
+                        "오늘 본계좌 트레이더 미실행"))
+        if _after("15:35"):
+            out.append(("trade_real_pm", "본계좌 매도(15:21)",
+                        _log_contains_today(f"real_kiwoom_{TODAY_STR}.log", "오후 모드 완료"),
+                        "오늘 본계좌 15:21 매도(만기·손절) 완주 흔적 없음(미실행 또는 도중 크래시)"))
     return out
+
+
+def _real_active():
+    """본계좌 감시 대상인가 — 모드가 '끔'이 아니고 최근 7일 안에 본계좌 실행 로그가 있음."""
+    try:
+        import real_account as _ra
+        if _ra.get_mode() == "off":
+            return False
+    except Exception:
+        pass
+    from datetime import timedelta
+    days = {(TODAY - timedelta(days=i)).strftime("%Y%m%d") for i in range(1, 8)}
+    return any(os.path.exists(os.path.join(r, f"real_kiwoom_{d}.log")) for r in (_LOGS, _OUT_LOGS) for d in days)
 
 
 def check_snapshots():

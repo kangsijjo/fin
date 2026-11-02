@@ -1028,9 +1028,11 @@ def _apply_net_pnl(positions, snapshot):
     return positions
 
 
-def get_kiwoom_mock(date_from="", date_to=""):
+def get_kiwoom_mock(date_from="", date_to="", base_dir=None, acct="kiwoom", sidx_prefix="kiwoom"):
+    """키움 계좌 화면 데이터. [§96] base_dir/acct/sidx_prefix 로 본계좌(db/kiwoom_real, kiwoom_real, real_kiwoom)도 같은 함수."""
+    bd = base_dir or KIWOOM_DIR
     out = {"snapshot": {}, "equity": [], "orders": [], "order_total": 0, "positions": []}
-    snap_path = KIWOOM_DIR / "snapshot.json"
+    snap_path = bd / "snapshot.json"
     if snap_path.exists():
         try:
             out["snapshot"] = json.loads(snap_path.read_text(encoding="utf-8"))
@@ -1041,21 +1043,22 @@ def get_kiwoom_mock(date_from="", date_to=""):
                  "qty": p.get("qty", 0), "avg_price": p.get("avg_price", 0),
                  "cur_price": p.get("price", 0),
                  "evlt_amt": p.get("evlt_amt", (p.get("qty", 0) or 0) * (p.get("price", 0) or 0)),
-                 "pnl": p.get("pnl", 0), "pnl_pct": p.get("pnl_pct", 0)}
+                 "pnl": p.get("pnl", 0), "pnl_pct": p.get("pnl_pct", 0),
+                 **({"bot": bool(p.get("bot")), "bot_qty": p.get("bot_qty", 0)} if "bot" in p else {})}
                 for p in out["snapshot"].get("positions", [])
             ]
             _apply_net_pnl(out["positions"], out["snapshot"])      # [§83] 비용 차감 미실현 손익
         except Exception:
             pass
-    eq_path = KIWOOM_DIR / "equity_history.csv"
+    eq_path = bd / "equity_history.csv"
     if eq_path.exists():
         try:
             out["equity"] = pd.read_csv(eq_path).tail(120).fillna("").to_dict("records")
         except Exception:
             pass
-    if KIWOOM_DIR.exists():
+    if bd.exists():
         frames = []
-        for f in sorted(KIWOOM_DIR.glob("orders_*.csv")):
+        for f in sorted(bd.glob("orders_*.csv")):
             date_str = f.stem.replace("orders_", "")
             if date_from and date_str < date_from.replace("-",""):
                 continue
@@ -1090,12 +1093,13 @@ def get_kiwoom_mock(date_from="", date_to=""):
             except Exception:
                 pass
             out["strategy_perf"] = _strategy_perf(combined, out["positions"])   # 전략별 실현+미실현
-            _sidx = _signal_strength_index("kiwoom")
+            _sidx = _signal_strength_index(sidx_prefix)
             out["trades"] = _round_trip_trades(combined, _sidx)   # 라운드트립 매매내역(한 줄)
             out["trade_total"] = len(out["trades"])
             for p in out["positions"]:   # 보유 포지션 강도 부착
                 p["score_ic"] = _pick_strength(_sidx, p.get("code"), p.get("strategy"), p.get("entry_date"))
-    out["slot_status"] = _kiwoom_slot_status()   # 키움 모의투자 슬롯(진입/청산 조건 포함)
+    out["slot_status"] = (_kiwoom_slot_status() if acct == "kiwoom"   # 키움 모의투자 슬롯(진입/청산 조건 포함)
+                          else _slot_status_detail(bd / "kiwoom_positions.csv", *_live_tables(acct)))
     return out
 
 
@@ -1141,11 +1145,12 @@ def _live_tables(acct):
         st, tk = A["stop"].get(ln), A["take"].get(ln)
         stops[ln] = round(st * 100) if st is not None else ""
         parts = []
+        _kw = acct in ("kiwoom", "kiwoom_real")         # [§96] 본계좌도 키움 트레이더 규칙
         if tk is not None:
-            parts.append(f"익절 +{tk * 100:g}% " + ("장중 지정가(매일 아침 발주)" if acct == "kiwoom"
+            parts.append(f"익절 +{tk * 100:g}% " + ("장중 지정가(매일 아침 발주)" if _kw
                                                    else "(전일 종가 판정 → 다음날 시가 매도)"))
         if st is not None:
-            parts.append(f"{st * 100:g}% 손절" + (" (15:21 평가손익 판정 → 마감 동시호가 매도)" if acct == "kiwoom"
+            parts.append(f"{st * 100:g}% 손절" + (" (15:21 평가손익 판정 → 마감 동시호가 매도)" if _kw
                                                   else "(전일 종가 판정 → 다음날 시가 매도)"))
         exits[ln] = " 또는 ".join(parts + [f"진입 {holds[ln]}영업일째 종가"]) + ("" if parts else " (손절·익절 없음)")
     return slots, labels, holds, entries, exits, stops
@@ -2440,6 +2445,7 @@ _RUN_TASKS = {
     "kiwoom_buy":    [_VENV_PYTHON, str(BASE / "kiwoom_trader.py"), "buy"],
     "kiwoom_sell":   [_VENV_PYTHON, str(BASE / "kiwoom_trader.py"), "sell"],
     "kiwoom_status": [_VENV_PYTHON, str(BASE / "kiwoom_trader.py"), "status"],
+    "real_status":   [_VENV_PYTHON, str(BASE / "kiwoom_trader.py"), "status"],   # [§96] 본계좌 잔고 조회(연결 확인, 주문 없음)
     "kis_signal":    [_VENV_PYTHON, str(BASE / "kis_live_signal.py")],
     "kis_daily":     [_VENV_PYTHON, str(BASE / "kis_trader.py"), "daily"],
     "kis_status":    [_VENV_PYTHON, str(BASE / "kis_trader.py"), "status"],
@@ -2479,7 +2485,9 @@ _RUN_TASKS = {
 # [2026-10-26 §77] 증권사 API 키를 쓰는 수집 — 매매가 도는 시간(장전 예열·09:00 매수·15:05 손절·15:21 만기)에 누르면
 # 같은 키로 동시에 호출돼 서로 실패한다(10-22 07:14 신용 버튼 → 09:02~09:15 '네트워크 실패' 146건, 키움 토큰 재발급은
 # 트레이더 토큰도 무효로 만들 수 있음). 이 시간엔 버튼을 막고 이유를 알려 준다.
-_BROKER_TASKS = {"backfill", "supply_demand", "credit", "program", "after_market", "recheck"}
+# [§96] market_grid·real_status 추가 — 키움 데이터키(=실서버 키)를 쓰는데, 같은 키로 본계좌 자동매매가 09:00·15:21 에 돈다
+_BROKER_TASKS = {"backfill", "supply_demand", "credit", "program", "after_market", "recheck", "market_grid", "real_status"}
+_RUN_ENV = {"real_status": {"KIWOOM_PROFILE": "real"}}   # [§96] 작업별 환경변수(본계좌 프로필)
 _TRADE_WINDOWS = (("0840", "0925"), ("1500", "1545"))
 
 
@@ -2599,7 +2607,9 @@ def api_run(task):
             _resolve_cmd(_RUN_TASKS[task]), cwd=_RUN_CWD.get(task, str(BASE)),
             stdout=logf, stderr=_sp.STDOUT,
             creationflags=_NO_WIN,
-            env=dict(os.environ, PYTHONUNBUFFERED="1"),   # [§93] 파이썬 출력을 바로 로그에(종전엔 끝날 때 한꺼번에 → 도는 동안 빈 로그)
+            # [§93] 파이썬 출력을 바로 로그에 · [§96] 작업별 환경 — 본계좌 프로필은 그 작업에만(다른 작업엔 절대 안 샘)
+            env=dict({k: v for k, v in os.environ.items() if k != "KIWOOM_PROFILE"},
+                     PYTHONUNBUFFERED="1", **_RUN_ENV.get(task, {})),
         )
         _RUN_PROCS[task] = proc
         return jsonify({"ok": True, "msg": f"시작됨 (PID {proc.pid}) → logs/run_{task}.log 에 기록"})
@@ -2863,12 +2873,17 @@ def _lc_engine_list():
 def _lc_view(cfg):
     import live_config as LC
     view = {"updated": cfg.get("updated"), "note": cfg.get("note"), "fallback": cfg.get("_fallback"), "accounts": {}}
-    for a in LC.ACCOUNTS:
-        A = cfg["accounts"][a]
+    for a in LC.ALL_ACCOUNTS:                       # [§96] 본계좌 칸 포함(설정 저장 전이면 짝 모의계좌 값 + mirror 표시)
+        A = cfg["accounts"].get(a)
+        if not A:
+            continue
         view["accounts"][a] = {"label": LC.ACCOUNT_LABEL[a], "min_strength": A["min_strength"],
                                "slot_mode": A.get("slot_mode", "slots"),
                                "strength_version": A.get("strength_version", "v2"),
                                "strategies": [dict(x, live=LC.live_name(x["engine"])) for x in A["strategies"]]}
+        if a in LC.REAL_ACCOUNTS:
+            view["accounts"][a].update(daily_loss_limit=A.get("daily_loss_limit"),
+                                       loss_action=A.get("loss_action", "halt"), mirror=bool(A.get("_mirror")))
     return view
 
 
@@ -2895,16 +2910,20 @@ def api_live_config():
     return jsonify({"ok": True, "config": _lc_view(LC.load()), "engines": _lc_engine_list(), "v2_models": v2,
                     "locked": locked, "lock_msg": why, "regen_after_save": LC.needs_regen(),
                     "regen_running": bool(p is not None and p.poll() is None),
-                    "slots_total": LC.SLOTS_TOTAL, "max_strategies": LC.MAX_STRATEGIES, "history": hist})
+                    "slots_total": LC.SLOTS_TOTAL, "max_strategies": LC.MAX_STRATEGIES, "history": hist,
+                    "loss_actions": LC.LOSS_ACTIONS, "loss_limit_range": list(LC.LOSS_LIMIT_RANGE)})   # [§96]
 
 
 def _lc_from_request(b):
-    """요청 본문 → 저장용 설정(보유일은 엔진 값으로 강제 — 화면 값은 믿지 않는다)."""
+    """요청 본문 → 저장용 설정(보유일은 엔진 값으로 강제 — 화면 값은 믿지 않는다).
+    [§96] 본계좌 칸은 요청에 있을 때만(화면에서 안 건드렸으면 빠짐 → 저장 안 함 = 계속 짝 모의계좌를 따름)."""
     import live_config as LC
     hold = {e["engine"]: e["holding"] for e in _lc_engine_list()}
     acc = (b or {}).get("accounts") or {}
     new = {"accounts": {}}
-    for a in LC.ACCOUNTS:
+    for a in LC.ALL_ACCOUNTS:
+        if a in LC.REAL_ACCOUNTS and not isinstance(acc.get(a), dict):
+            continue
         A = acc.get(a) or {}
         rows = []
         for x in (A.get("strategies") or [])[:LC.MAX_STRATEGIES + 1]:
@@ -2920,6 +2939,10 @@ def _lc_from_request(b):
         new["accounts"][a] = {"min_strength": float(A.get("min_strength", 5.7)),
                               "slot_mode": str(A.get("slot_mode") or "slots"),
                               "strength_version": str(A.get("strength_version") or "v2"), "strategies": rows}
+        if a in LC.REAL_ACCOUNTS:                   # [§96] 일일 손실 한도(원, 비우면 끔)·도달 시 동작
+            dl = A.get("daily_loss_limit")
+            new["accounts"][a]["daily_loss_limit"] = None if dl in (None, "") else int(float(dl))
+            new["accounts"][a]["loss_action"] = str(A.get("loss_action") or "halt")
     return new
 
 
@@ -2973,8 +2996,10 @@ def api_live_config_save():
     # 강도 v2 를 쓰는 계좌의 전략 중 모델이 없는 것은 학습(전략당 1~3분). 재생성이 필요하면 regen_signals 가 먼저 학습한다.
     try:
         import strength_model as SM
-        v2_missing = sorted({s["engine"] for a in LC.ACCOUNTS if cfg["accounts"][a].get("strength_version") == "v2"
-                             for s in cfg["accounts"][a]["strategies"] if not SM.load_model(s["engine"])})
+        _full = LC.load()                           # [§96] 본계좌(저장 안 했으면 짝 모의계좌 값)까지
+        v2_missing = sorted({s["engine"] for a in LC.ALL_ACCOUNTS
+                             if (_full["accounts"].get(a) or {}).get("strength_version") == "v2"
+                             for s in _full["accounts"][a]["strategies"] if not SM.load_model(s["engine"])})
     except Exception:
         v2_missing = []
     if v2_missing and not regen:
@@ -2993,11 +3018,130 @@ def api_live_config_save():
         msg = "저장됨 — 오늘 신호를 새 설정으로 다시 만드는 중(1~3분) → 다음 거래일 09:00 매수부터 적용"
     try:
         import notifier
-        notifier.safe_send("🛠 [모의매매 전략 설정 변경]\n" + ("\n".join("· " + c for c in changes) or "· 변경 없음")
-                           + "\n" + msg)
+        notifier.safe_send(("💰🛠 [전략 설정 변경 — 본계좌 포함]\n" if any("본계좌" in c for c in changes)
+                            else "🛠 [모의매매 전략 설정 변경]\n")
+                           + ("\n".join("· " + c for c in changes) or "· 변경 없음") + "\n" + msg)
     except Exception:
         pass
     return jsonify({"ok": True, "msg": msg, "changes": changes, "config": _lc_view(cfg), "regen": regen})
+
+
+# ══ 2026-11-02 §96 키움 본계좌(실계좌) — 💰 본계좌 탭 ══════════════════════════════════════════
+# 모드(드라이런/실주문/끔)·신규매수 정지·잔고·드라이런 기록·매매내역. 상태를 바꾸는 POST 는 로컬 + CSRF 헤더 + 두 번 확인.
+# 실주문은 사람이 이 화면에서 켤 때만(프로그램·스케줄러는 모드를 바꾸지 않는다). 처음 켜려면 본계좌 연결(스냅샷)이 한 번은 있어야 한다.
+REAL_DIR = BASE / "db" / "kiwoom_real"
+
+
+def _real_dryrun_rows(days=5):
+    rows = []
+    for f in sorted(REAL_DIR.glob("dryrun_*.csv"))[-days:][::-1]:
+        try:
+            d = f.stem.replace("dryrun_", "")
+            df = pd.read_csv(f, dtype={"code": str}, encoding="utf-8-sig").fillna("")
+            for r in df.to_dict("records")[::-1]:
+                r["date"] = d
+                rows.append(r)
+        except Exception:
+            pass
+    return rows[:200]
+
+
+def get_kiwoom_real():
+    import real_account as RA
+    import live_config as LC
+    import kill_switch as KS
+    out = get_kiwoom_mock(base_dir=REAL_DIR, acct="kiwoom_real", sidx_prefix="real_kiwoom")
+    snap = out.get("snapshot") or {}
+    out["connected"] = snap.get("profile") == "real"
+    out["mode"] = RA.mode_info()
+    out["mode_history"] = RA.mode_history(8)
+    on, st = RA.halt_status()
+    out["halt"] = dict(st or {}, on=on)
+    kon, kst, kerr = KS.status()
+    out["kill_switch"] = {"on": kon, "reason": (kst or {}).get("reason_text"), "at": (kst or {}).get("engaged_at"),
+                          "error": kerr}
+    lc, _ = RA.read_json("loss_check.json")
+    out["loss_check"] = lc or {}
+    A = LC.account("kiwoom_real")
+    out["config"] = {"daily_loss_limit": A.get("daily_loss_limit"), "loss_action": A.get("loss_action"),
+                     "loss_action_label": LC.LOSS_ACTIONS.get(A.get("loss_action"), ""),
+                     "mirror": A.get("mirror"), "fallback": A.get("fallback"),
+                     "strategies": A["priority"], "slot_mode": A["slot_mode"]}
+    out["dryrun"] = _real_dryrun_rows()
+    try:
+        led = pd.read_csv(REAL_DIR / "kiwoom_positions.csv", dtype=str) if (REAL_DIR / "kiwoom_positions.csv").exists() else None
+        out["bot_positions"] = 0 if led is None else int(len(led))
+    except Exception:
+        out["bot_positions"] = None
+    out["ever_ran"] = any(LOG_DIR.glob("real_kiwoom_*.log"))
+    out["log"] = tail_log(LOG_DIR / f"real_kiwoom_{datetime.now():%Y%m%d}.log", 40)
+    out["status_log"] = tail_log(LOG_DIR / "run_real_status.log", 25)
+    return out
+
+
+@app.route("/api/real")
+def api_real():
+    try:
+        return jsonify(_json_safe({"ok": True, **get_kiwoom_real()}))
+    except Exception as e:
+        return jsonify({"ok": False, "msg": f"{type(e).__name__}: {str(e)[:200]}"}), 500
+
+
+def _real_guard(req):
+    if not _same_origin_action(req):
+        return jsonify({"ok": False, "msg": "대시보드 페이지에서만 실행할 수 있습니다(CSRF 차단)"}), 403
+    if not _is_local(req):
+        return jsonify({"ok": False, "msg": "로컬에서만 허용(원격 변경 불가)"}), 403
+    return None
+
+
+@app.route("/api/real/mode", methods=["POST"])
+def api_real_mode():
+    """본계좌 모드 변경 — confirm=2(두 번 확인) 필수. 실주문(live)은 본계좌 연결(스냅샷)이 한 번은 확인된 뒤에만."""
+    g = _real_guard(request)
+    if g:
+        return g
+    import real_account as RA
+    b = request.get_json(silent=True) or {}
+    mode = str(b.get("mode", ""))
+    if mode not in RA.MODES:
+        return jsonify({"ok": False, "msg": "모드는 dryrun / live / off"}), 400
+    if b.get("confirm") != 2:
+        return jsonify({"ok": False, "msg": "두 번 확인이 필요합니다"}), 400
+    if mode == "live":
+        try:
+            snap = json.loads((REAL_DIR / "snapshot.json").read_text(encoding="utf-8"))
+        except Exception:
+            snap = {}
+        if snap.get("profile") != "real":
+            return jsonify({"ok": False, "msg": "본계좌 연결이 아직 확인되지 않았습니다 — 드라이런을 한 번 이상 돌리거나 "
+                                                "[본계좌 잔고 조회] 버튼으로 잔고가 보이는지 먼저 확인하세요"}), 409
+    rec = RA.set_mode(mode, note=str(b.get("note", ""))[:200], who="dashboard")
+    return jsonify({"ok": True, "mode": RA.mode_info(), "msg": f"모드: {RA.MODES[mode]}",
+                    "changed_at": rec.get("changed_at")})
+
+
+@app.route("/api/real/halt", methods=["POST"])
+def api_real_halt():
+    """본계좌 신규 매수 정지/재개 — release 는 confirm=2, engage(지금 정지)는 confirm=1 이면 충분(안전한 쪽)."""
+    g = _real_guard(request)
+    if g:
+        return g
+    import real_account as RA
+    b = request.get_json(silent=True) or {}
+    act = str(b.get("action", ""))
+    note = str(b.get("note", ""))[:200]
+    if act == "release":
+        if b.get("confirm") != 2:
+            return jsonify({"ok": False, "msg": "두 번 확인이 필요합니다"}), 400
+        ok = RA.halt_release(note or "대시보드에서 재개")
+        return jsonify({"ok": True, "changed": ok, "msg": "신규 매수 재개" if ok else "이미 정지 상태가 아닙니다"})
+    if act == "engage":
+        if not b.get("confirm"):
+            return jsonify({"ok": False, "msg": "확인이 필요합니다"}), 400
+        ok = RA.halt_engage("manual", note or "대시보드에서 직접 정지")
+        return jsonify({"ok": True, "changed": ok, "msg": "신규 매수 정지(매도는 계속)" if ok else "이미 정지 중입니다"})
+    return jsonify({"ok": False, "msg": "action 은 release / engage"}), 400
 
 
 # ══ 2026-10-22 AI·강도 가상매매 전략 설정(§68) — 강도매매 탭. 실계좌와 별개 파일(db/virtual_config.json) ══
@@ -3557,6 +3701,7 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
   <div class="tab active"  onclick="showTab('overview')">&#x1F4CA; &#xAC1C;&#xC694;</div>
   <div class="tab"         onclick="showTab('cheonok')">&#x1F4CC; &#xCC9C;&#xC5B5;&#xC774;</div>
   <div class="tab"         onclick="showTab('mock')">&#x1F3E6; &#xBAA8;&#xC758;&#xACC4;&#xC88C;</div>
+  <div class="tab"         onclick="showTab('real')">&#x1F4B0; &#xBCF8;&#xACC4;&#xC88C;</div>
   <div class="tab"         onclick="showTab('strength')">&#x1F4AA; &#xAC15;&#xB3C4;&#xB9E4;&#xB9E4;</div>
   <div class="tab"         onclick="showTab('cutmon')">&#x1F9EA; &#xC784;&#xACC4;&#xBAA8;&#xB2C8;&#xD130;</div>
   <div class="tab"         onclick="showTab('backtest')">&#x1F4C8; &#xBC31;&#xD14C;&#xC2A4;&#xD2B8;</div>
@@ -3717,6 +3862,55 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
     </tr></thead>
     <tbody id="kis-stratperf"><tr><td colspan="7" style="color:#8b949e;text-align:center">데이터 없음</td></tr></tbody>
     </table>
+  </div>
+</div>
+
+<!-- ===== 💰 본계좌 (2026-11-02 §96) — 실제 돈. 실주문은 아래 스위치를 사용자가 직접 켤 때만 ===== -->
+<div id="tab-real" class="tab-content">
+  <div class="section">
+    <h2>💰 키움 본계좌 자동매매 <span style="color:#8b949e;font-size:11px;font-weight:400">— 모의(안C)와 같은 매매 로직을 본계좌 전용 설정으로. 실주문은 아래에서 직접 켤 때만(두 번 확인), 그 전엔 드라이런(주문 안 냄)</span></h2>
+    <div id="real-mode"><span style="color:#64748b;font-size:12px">불러오는 중…</span></div>
+  </div>
+  <div class="section" id="lc-real-sec">
+    <h2>🛠 본계좌 전용 설정 <span style="color:#8b949e;font-size:11px;font-weight:400">— 전략·칸·강도·손절·익절 + 일일 손실 한도. 저장은 모의계좌 설정과 같은 규칙(장중 잠금·두 번 확인)</span></h2>
+    <div id="lc-real"><span style="color:#64748b;font-size:12px">불러오는 중…</span></div>
+  </div>
+  <div class="section">
+    <h2>본계좌 잔고 <span id="real-bal-note" style="color:#8b949e;font-size:11px;font-weight:400"></span></h2>
+    <div class="stats-row" id="real-bal"></div>
+  </div>
+  <div class="section">
+    <h2>본계좌 슬롯 <span style="color:#8b949e;font-size:11px;font-weight:400">— 프로그램이 산 종목만 칸을 차지(직접 산 종목은 제외)</span></h2>
+    <div class="stats-row" id="real-slots"></div>
+  </div>
+  <div class="section">
+    <h2>본계좌 보유 종목 <span style="color:#8b949e;font-size:11px;font-weight:400">— '자동매매' 표시만 프로그램이 사고팝니다. '직접 보유'는 절대 건드리지 않음</span></h2>
+    <table><thead><tr>
+      <th>종목</th><th>구분</th><th class="r">수량(자동매매분)</th><th class="r">평균단가</th><th class="r">현재가</th><th class="r">평가금액</th><th class="r">손익(원)</th><th class="r">손익률</th>
+    </tr></thead>
+    <tbody id="real-pos"><tr><td colspan="8" style="color:#8b949e;text-align:center">스냅샷 없음</td></tr></tbody>
+    </table>
+  </div>
+  <div class="section">
+    <h2>드라이런 기록 <span style="color:#8b949e;font-size:11px;font-weight:400">— 실주문이었다면 냈을 주문(최근 5거래일). 실제로는 아무 주문도 나가지 않았습니다</span></h2>
+    <table><thead><tr>
+      <th class="r">날짜</th><th class="r">시각</th><th>구분</th><th>종목</th><th>전략</th><th class="r">수량</th><th class="r">가격</th><th>내용</th>
+    </tr></thead>
+    <tbody id="real-dry"><tr><td colspan="8" style="color:#8b949e;text-align:center">기록 없음</td></tr></tbody>
+    </table>
+  </div>
+  <div class="section">
+    <h2>본계좌 매매내역 <span id="real-ord-cnt" style="color:#8b949e;font-size:11px;font-weight:400"></span></h2>
+    <table><thead><tr>
+      <th>종목</th><th class="r">매수시간</th><th class="r">매도시각</th><th>전략</th><th class="r">강도</th>
+      <th class="r">수량</th><th class="r">매수가격</th><th class="r">매도가격</th><th class="r">손익(원)</th><th class="r">손익률</th><th>사유</th>
+    </tr></thead>
+    <tbody id="real-orders"><tr><td colspan="11" style="color:#8b949e;text-align:center">매매내역 없음</td></tr></tbody>
+    </table>
+  </div>
+  <div class="section">
+    <h2>오늘 본계좌 실행 기록 <span style="color:#8b949e;font-size:11px;font-weight:400">— logs/real_kiwoom_YYYYMMDD.log 끝부분</span></h2>
+    <pre id="real-log" style="max-height:320px;overflow:auto;font-size:11px;color:#cbd5e1;background:#0b1220;padding:8px;border-radius:6px;white-space:pre-wrap">-</pre>
   </div>
 </div>
 
@@ -4118,9 +4312,10 @@ function safe(v,fallback='-'){return (v===null||v===undefined||v==='')?fallback:
 function fmtB(n){const v=Number(n||0);if(v>=1e8)return (v/1e8).toFixed(1)+'억';if(v>=1e4)return (v/1e4).toFixed(0)+'만';return fmt(v)}
 
 function showTab(id){
-  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',['overview','cheonok','mock','strength','cutmon','backtest','aimodel','datalogs','intraday'][i]===id));
+  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',['overview','cheonok','mock','real','strength','cutmon','backtest','aimodel','datalogs','intraday'][i]===id));
   document.querySelectorAll('.tab-content').forEach(t=>t.classList.toggle('active',t.id==='tab-'+id));
   if(id==='backtest' && typeof pbtInit==='function') pbtInit();   // 기간 백테스트 테스트기(2026-10-18) — 처음 열 때 1회 로드
+  if(id==='real' && typeof realLoad==='function') realLoad();     // [§96] 본계좌 — 열 때마다 새로
 }
 
 // ── fill helpers ──
@@ -5281,6 +5476,7 @@ async function load(){
   fetch('/api/intraday').then(r=>r.json()).then(fillIntraday).catch(()=>{});
   fetch('/api/preview').then(r=>r.json()).then(fillPreview).catch(()=>{});
   fetch('/api/marketgrid').then(r=>r.json()).then(fillMarketGrid).catch(()=>{});
+  if(typeof realLoad==='function') realLoad();      // [§96] 본계좌 탭도 같은 주기로
 }
 
 function _pctS(v){v=Number(v||0);return '<span class="'+(v>=0?'pos':'neg')+'" style="font-weight:600">'+(v>=0?'+':'')+v.toFixed(2)+'%</span>';}
@@ -5528,8 +5724,14 @@ function lcRender(){
         <td style="text-align:center"><input type="checkbox" ${s.skip_limitup?'checked':''} onchange="lcSet('${a}',${i},'skip_limitup',this.checked)" title="체크하면 신호일 상한가 마감 종목의 이 전략 신호는 사지 않음"></td>
         <td style="color:#94a3b8">${e.holding??s.holding}일</td>
         <td><button class="runbtn" style="padding:0 7px" title="빼기" onclick="lcDel('${a}',${i})">✕</button></td></tr>`; }).join('');
-    const stopSem=a==='kiwoom'?'15:21 평가손익 판정 → 마감 동시호가 매도':'전일 종가 판정 → 다음날 09:01 시가 매도';
-    const takeSem=a==='kiwoom'?'매일 아침 장중 지정가(닿으면 그 가격)':'전일 종가 판정 → 다음날 09:01 시가 매도';
+    const _kw=(a==='kiwoom'||a==='kiwoom_real');   // [§96] 본계좌도 키움 트레이더 규칙
+    const stopSem=_kw?'15:21 평가손익 판정 → 마감 동시호가 매도':'전일 종가 판정 → 다음날 09:01 시가 매도';
+    const takeSem=_kw?'매일 아침 장중 지정가(닿으면 그 가격)':'전일 종가 판정 → 다음날 09:01 시가 매도';
+    const realRow=a!=='kiwoom_real'?'':`<div style="display:flex;gap:10px;align-items:center;margin-top:8px;flex-wrap:wrap;font-size:13px;color:#cbd5e1">
+        <label title="프로그램이 산 종목들의 오늘 손익(전일 종가 대비, 오늘 산 건 매입가 대비)이 이 금액 이상 손실이면 신규 매수를 멈춥니다(매도는 계속) — 09:00·15:21 에 판정, 비우면 끔">일일 손실 한도
+          <input type="number" min="${(L.loss_limit_range||[10000])[0]}" step="10000" placeholder="없음" value="${A.daily_loss_limit==null?'':A.daily_loss_limit}" style="${inp};width:120px" onchange="lcSetAcc('${a}','daily_loss_limit',this.value)">원</label>
+        <select style="${inp};font-size:12px" title="한도에 닿았을 때" onchange="lcSetAcc('${a}','loss_action',this.value)">${Object.entries(L.loss_actions||{}).map(([k,v])=>`<option value="${k}"${(A.loss_action||'halt')===k?' selected':''}>${_lcEsc(v)}</option>`).join('')}</select>
+        ${A.mirror?'<span style="color:#fbbf24;font-size:12px">아직 저장 전 — 키움 안C(모의) 설정을 그대로 따르는 중</span>':''}</div>`;
     return `<div style="flex:1;min-width:560px;background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:10px 12px">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
         <b style="font-size:14px">${_lcEsc(L.config.accounts[a].label)}</b>
@@ -5548,7 +5750,8 @@ function lcRender(){
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
         ${A.strategies.length<L.max_strategies?`<button class="runbtn" onclick="lcAdd('${a}')">+ 전략 추가</button>`:`<span style="font-size:11px;color:#64748b">전략은 최대 ${L.max_strategies}개</span>`}
         <span style="font-size:11px;color:#64748b">손절: ${_lcEsc(stopSem)} · 익절: ${_lcEsc(takeSem)} · 보유일은 전략 정의대로</span></div>
-      <div class="reco-box" data-place="${a}" style="margin-top:8px">${_recoHtml[a]||''}</div></div>`;
+      ${realRow}
+      ${a==='kiwoom_real'?'':`<div class="reco-box" data-place="${a}" style="margin-top:8px">${_recoHtml[a]||''}</div>`}</div>`;
   };
   const hist=(L.history||[]).slice(0,5).map(h=>`<div>· <b>${_lcEsc(h.time)}</b> ${_lcEsc((h.changes||[]).join(' / ')||'변경 없음')}</div>`).join('');
   const html=`<div style="font-size:12px;color:#94a3b8;margin-bottom:8px">
@@ -5566,9 +5769,18 @@ function lcRender(){
       <div style="font-size:12px;color:#cbd5e1;margin-top:4px;line-height:1.7">${hist||'<span style="color:#64748b">아직 없음</span>'}</div></details>
     <div style="font-size:11px;color:#64748b;margin-top:6px">빠진 전략으로 이미 산 종목은 원래 보유일·손절·익절대로 만기까지 갑니다 · 거래일 08:30~15:40 은 잠금 · 바꿀 때 두 번 확인합니다 · 백테스트 탭 '기간 백테스트'로 먼저 확인해 보세요</div>`;
   _LC_BOX.forEach(id=>setHtml(id,html.replace('id="lc-msg"',`id="lc-msg-${id}"`)));
+  if(D.kiwoom_real){   // [§96] 본계좌 탭의 전용 설정 칸 — 저장은 같은 흐름(한 번에 같이 저장)
+    setHtml('lc-real', `${L.locked?`<div style="padding:6px 10px;border-radius:6px;background:rgba(239,68,68,.08);border:1px solid #7f1d1d;color:#fca5a5;font-size:12px;margin-bottom:8px">🔒 ${_lcEsc(L.lock_msg)}</div>`:''}
+      <div style="display:flex;gap:10px;flex-wrap:wrap">${card('kiwoom_real')}</div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap">
+        <button class="runbtn" style="background:#2563eb;color:#fff;${L.locked?'opacity:.5':''}" ${L.locked?'disabled':''} onclick="lcSave()">💾 변경 확인 후 저장</button>
+        <button class="runbtn" onclick="lcLoad()">↺ 현재 설정 다시 불러오기</button>
+        <span id="lc-msg-lc-real" style="font-size:12px;color:#94a3b8"></span></div>
+      <div style="font-size:11px;color:#64748b;margin-top:6px">모의계좌 설정과 같은 저장(한 번에 같이 저장) · 본계좌 칸을 고치지 않으면 계속 키움 안C 설정을 따릅니다 · 이미 산 종목은 원래 보유일·손절·익절대로 · 거래일 08:30~15:40 잠금</div>`);
+  }
   ovRefresh(); recoRefresh();
 }
-function _lcMsg(h){ _LC_BOX.forEach(id=>setHtml('lc-msg-'+id,h)); }
+function _lcMsg(h){ _LC_BOX.concat(['lc-real']).forEach(id=>setHtml('lc-msg-'+id,h)); }
 function lcSet(a,i,k,v){
   const s=_lcDraft[a].strategies[i];
   if(k==='slots') s.slots=parseInt(v||'0',10)||0;
@@ -5578,7 +5790,7 @@ function lcSet(a,i,k,v){
   else if(k==='engine'){ s.engine=v; const e=_lcEng(v); s.holding=e.holding; }
   lcRender();
 }
-function lcSetAcc(a,k,v){ _lcDraft[a][k]=(k==='min_strength')?Number(v):v; lcRender(); }
+function lcSetAcc(a,k,v){ _lcDraft[a][k]=(k==='min_strength')?Number(v):(k==='daily_loss_limit'?((v===''||v==null)?null:Number(v)):v); lcRender(); }
 function lcMove(a,i,d){ const S=_lcDraft[a].strategies, j=i+d; if(j<0||j>=S.length) return; [S[i],S[j]]=[S[j],S[i]]; lcRender(); }
 function lcDel(a,i){ const S=_lcDraft[a].strategies; if(S.length<=1){ alert('전략은 최소 1개'); return; } S.splice(i,1); lcRender(); }
 function lcAdd(a){
@@ -5586,21 +5798,157 @@ function lcAdd(a){
   const e=_lcSorted().find(x=>!used.has(x.engine)); if(!e) return;
   S.push({engine:e.engine,slots:1,exempt:false,stop:null,take:null,min_strength:null,holding:e.holding}); lcRender();
 }
+function _lcStrip(A){ const x=JSON.parse(JSON.stringify(A||{})); delete x.mirror; delete x.label; return x; }
 async function lcSave(){
+  // [§96] 본계좌 칸을 안 고쳤고 아직 '안C 따라가기'면 보내지 않는다 → 저장 후에도 계속 안C 를 따름
+  const accounts=JSON.parse(JSON.stringify(_lcDraft));
+  const R0=((_lc&&_lc.config&&_lc.config.accounts)||{}).kiwoom_real;
+  if(accounts.kiwoom_real&&R0&&R0.mirror&&JSON.stringify(_lcStrip(accounts.kiwoom_real))===JSON.stringify(_lcStrip(R0))) delete accounts.kiwoom_real;
   const post=async(url,extra)=>{ const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Action':'1'},
-      body:JSON.stringify(Object.assign({accounts:_lcDraft},extra||{}))}); let d={}; try{ d=await r.json(); }catch(e){ d={ok:false,msg:'응답 해석 실패 ('+r.status+')'}; } return d; };
+      body:JSON.stringify(Object.assign({accounts:accounts},extra||{}))}); let d={}; try{ d=await r.json(); }catch(e){ d={ok:false,msg:'응답 해석 실패 ('+r.status+')'}; } return d; };
   const pv=await post('/api/live_config/preview');
   if(!pv.ok){ alert('저장할 수 없습니다:\\n- '+(pv.errors||[pv.msg]).join('\\n- ')); return; }
   if(pv.locked){ alert(pv.lock_msg); return; }
   if(!(pv.changes||[]).length){ alert('바뀐 내용이 없습니다'); return; }
   // ① 첫 번째 확인 — 무엇이 바뀌는지
   const _ovTxt=(pv.overlap||[]).length?'\\n\\n⚠ 겹침 경고:\\n- '+pv.overlap.join('\\n- '):'';
-  if(!confirm('[1/2] 모의매매 전략을 이렇게 바꿉니다:\\n\\n- '+pv.changes.join('\\n- ')+_ovTxt+'\\n\\n적용 시점: '+pv.effective+'\\n\\n계속할까요?')) return;
+  const _realTxt=(pv.changes||[]).some(c=>c.indexOf('본계좌')>=0)?'💰 본계좌(실제 돈) 설정 변경이 들어 있습니다.\\n\\n':'';
+  if(!confirm('[1/2] '+_realTxt+'전략 설정을 이렇게 바꿉니다:\\n\\n- '+pv.changes.join('\\n- ')+_ovTxt+'\\n\\n적용 시점: '+pv.effective+'\\n\\n계속할까요?')) return;
   // ② 두 번째 확인 — 정말로
   if(!confirm('[2/2] 정말로 적용할까요?\\n\\n다음 거래일 09:00 매수부터 이 방식으로 매매합니다.\\n되돌리려면 다시 바꿔야 합니다.')) return;
   const d=await post('/api/live_config',{confirm:2});
   _lcMsg(d.ok?`<span style="color:#10b981">✓ ${_lcEsc(d.msg)}</span>`:`<span style="color:#ef4444">${_lcEsc(d.msg||'저장 실패')}</span>`);
   if(d.ok){ await lcLoad(); _lcMsg(`<span style="color:#10b981">✓ ${_lcEsc(d.msg)}</span>`); }
+}
+
+// ══ 2026-11-02 §96 💰 키움 본계좌 — 모드(드라이런/실주문/끔)·신규매수 정지·잔고·드라이런 기록 ══
+let _real=null;
+async function realLoad(){
+  try{ _real=await fetch('/api/real').then(r=>r.json()); }
+  catch(e){ setHtml('real-mode',`<span style="color:#ef4444">본계좌 정보 로드 실패: ${_lcEsc(e.message)}</span>`); return; }
+  try{ realRender(); }catch(e){ console.error('[dashboard] realRender 오류',e); }
+}
+async function _realPost(url,body){
+  const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Action':'1'},body:JSON.stringify(body)});
+  let d={}; try{ d=await r.json(); }catch(e){ d={ok:false,msg:'응답 해석 실패 ('+r.status+')'}; } return d;
+}
+function _realMsg(d){ setHtml('real-msg', d.ok?`<span style="color:#10b981">✓ ${_lcEsc(d.msg||'완료')}</span>`:`<span style="color:#ef4444">${_lcEsc(d.msg||'실패')}</span>`); }
+function realRender(){
+  const R=_real; if(!R) return;
+  if(!R.ok){ setHtml('real-mode',`<span style="color:#ef4444">${_lcEsc(R.msg||'오류')}</span>`); return; }
+  const M=R.mode||{}, H=R.halt||{}, K=R.kill_switch||{}, L=R.loss_check||{}, C=R.config||{}, S=R.snapshot||{};
+  const live=M.mode==='live', dry=M.mode==='dryrun', off=M.mode==='off';
+  const badge=live?'<span style="background:#7f1d1d;color:#fecaca;padding:4px 10px;border-radius:6px;font-weight:700">🔴 실주문 중 (실제 돈)</span>'
+    :dry?'<span style="background:#1e3a5f;color:#bfdbfe;padding:4px 10px;border-radius:6px;font-weight:700">🧪 드라이런 (주문 안 냄)</span>'
+    :'<span style="background:#334155;color:#cbd5e1;padding:4px 10px;border-radius:6px;font-weight:700">⏸ 꺼짐</span>';
+  const conn=R.connected?`<span style="color:#10b981">✓ 본계좌 연결 확인됨 (잔고 ${_lcEsc((S.date||'')+' '+(S.time||''))})</span>`
+    :'<span style="color:#fbbf24">⚠ 아직 본계좌 연결 확인 전 — [🔎 본계좌 잔고 조회]로 잔고가 보이는지 먼저 확인하세요(실주문은 그 뒤에만 켤 수 있음)</span>';
+  const halt=H.on?`<div style="margin-top:8px;padding:8px 10px;border-radius:6px;background:rgba(239,68,68,.08);border:1px solid #7f1d1d;color:#fca5a5;font-size:13px">🛑 신규 매수 정지 중 — ${_lcEsc(H.reason_text||'')} ${_lcEsc(H.detail||'')} <span style="color:#94a3b8">(${_lcEsc(H.engaged_at||'')}${H.until?' · '+_lcEsc(H.until)+' 하루만':' · 직접 풀 때까지'})</span>
+      <button class="runbtn" style="margin-left:8px" onclick="realHalt('release')">▶ 신규 매수 재개</button></div>`
+    :`<div style="margin-top:8px;font-size:12px;color:#94a3b8">신규 매수: 정상 <button class="runbtn" style="margin-left:6px" onclick="realHalt('engage')">⏸ 신규 매수 정지(매도는 계속)</button></div>`;
+  const ks=K.on?`<div style="margin-top:6px;color:#fca5a5;font-size:12px">⚠ 전체 정지 스위치 작동 중(${_lcEsc(K.reason||'')}) — 본계좌도 신규 매수 안 함(매도는 계속). 해제: python kill_switch.py release "확인 내용"</div>`:'';
+  const lim=C.daily_loss_limit?`-${fmt(C.daily_loss_limit)}원 (${_lcEsc(C.loss_action_label||'')})`:'없음';
+  const lc=L.time?`마지막 판정 ${_lcEsc(L.time)} · 프로그램 몫 오늘 손익 <b class="${clr(L.pnl)}">${fmt(L.pnl)}원</b> (종목 ${L.n||0}개)${L.hit?' → <b style="color:#ef4444">한도 도달</b>':''}`:'아직 판정 기록 없음(매매 실행 때 판정)';
+  const hist=(R.mode_history||[]).slice(0,5).map(h=>`<div>· ${_lcEsc(h.changed_at)} ${_lcEsc(h.prev||'')} → <b>${_lcEsc(h.mode)}</b>${h.note?' — '+_lcEsc(h.note):''}</div>`).join('');
+  const wMir=C.mirror?'<div style="margin-top:6px;color:#fbbf24;font-size:12px">ℹ 본계좌 설정을 아직 저장한 적 없음 — 지금은 키움 안C(모의) 설정을 그대로 따릅니다. 아래 칸에서 고치고 저장하면 그때부터 따로.</div>':'';
+  const wFb=C.fallback?`<div style="margin-top:6px;color:#ef4444;font-size:12px">⛔ 설정 파일 문제로 기본값이 읽혔습니다 — 본계좌는 이 상태에서 새로 사지 않습니다: ${_lcEsc(C.fallback)}</div>`:'';
+  const wRun=!R.ever_ran?'<div style="margin-top:6px;color:#fbbf24;font-size:12px">ℹ 본계좌 작업이 아직 한 번도 돌지 않았습니다 — 관리자 권한으로 register_tasks.bat 를 한 번 실행해 작업(평일 09:00·15:21·15:40)을 등록하세요.</div>':'';
+  setHtml('real-mode', `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">${badge}
+      <button class="runbtn" ${dry?'disabled style="opacity:.5"':''} onclick="realSetMode('dryrun')">🧪 드라이런</button>
+      <button class="runbtn" style="background:#b91c1c;color:#fff;${live?'opacity:.5':''}" ${live?'disabled':''} onclick="realSetMode('live')">🔴 실주문 켜기</button>
+      <button class="runbtn" ${off?'disabled style="opacity:.5"':''} onclick="realSetMode('off')">⏸ 끄기</button>
+      <button class="runbtn" onclick="runRealStatus()" title="본계좌 잔고만 조회(주문 없음) — 앱키·계좌 연결 확인용. 매매 시간대(08:40~09:25·15:00~15:45)엔 막힘">🔎 본계좌 잔고 조회</button>
+      <button class="runbtn" onclick="realLoad()" title="다시 불러오기">↺</button></div>
+    <div style="margin-top:8px;font-size:12px">${conn}</div>
+    <div style="margin-top:6px;font-size:12px;color:#cbd5e1">일일 손실 한도: <b>${lim}</b> · ${lc}</div>
+    ${halt}${ks}${wMir}${wFb}${wRun}
+    <details style="margin-top:8px"><summary style="cursor:pointer;font-size:12px;color:#94a3b8">모드 변경 기록 · 동작 방식</summary>
+      <div style="font-size:12px;color:#cbd5e1;margin-top:4px;line-height:1.7">${hist||'<span style="color:#64748b">아직 없음</span>'}
+      <div style="margin-top:6px;color:#94a3b8">· 매수: 평일 09:00 — 현재가 +2% 지정가(그 안에선 즉시 체결, 미수 없음) · 주문가능금액(100% 현금 기준)을 남은 빈 칸 수로 나눠 균등
+      <br>· 매도: 15:21 만기·손절·서킷브레이커(마감 동시호가 시장가) · 익절은 매일 아침 지정가 — 프로그램이 산 수량만
+      <br>· 직접 산 종목: 칸·매도·손절 계산에서 빠지고, 이미 가진 종목은 새로 사지 않음
+      <br>· 일일 손실 한도: 09:00·15:21 에 프로그램 몫의 오늘 손익(전일 종가 대비)을 보고 넘으면 신규 매수 정지(매도는 계속)
+      <br>· 텔레그램: 본계좌 알림은 [키움 본계좌]로 시작 · 드라이런 결과는 🧪</div></div></details>
+    <div id="real-msg" style="margin-top:6px;font-size:12px"></div>`);
+  // 잔고
+  const bal=[];
+  if(S.deposit!=null){
+    bal.push(`<div class="stat"><div class="v" style="font-size:20px">${fmt(S.deposit)}원</div><div class="l">주문가능(100% 현금)</div></div>`);
+    if(S.total_eval!=null) bal.push(`<div class="stat"><div class="v">${fmt(S.total_eval)}원</div><div class="l">총평가(직접 보유 포함)</div></div>`);
+    if(S.own_eval!=null) bal.push(`<div class="stat"><div class="v" style="font-size:20px">${fmt(S.own_eval)}원</div><div class="l">자동매매 평가(${S.own_n||0}종목)</div></div>`);
+    if(S.day_pnl!=null) bal.push(`<div class="stat"><div class="v ${clr(S.day_pnl)}" style="font-size:20px">${fmt(S.day_pnl)}원</div><div class="l">자동매매 오늘 손익</div></div>`);
+    if(S.uncl) bal.push(`<div class="stat"><div class="v neg" style="font-size:20px">${fmt(S.uncl)}원</div><div class="l">현금 미수금(매수 중단)</div></div>`);
+    bal.push(`<div class="stat"><div class="v" style="font-size:14px">${_lcEsc((S.date||'')+' '+(S.time||''))}</div><div class="l">스냅샷 기준</div></div>`);
+  }
+  setHtml('real-bal', bal.join('')||'<div style="color:#9ca3af;font-size:13px">아직 본계좌 스냅샷 없음 — [🔎 본계좌 잔고 조회] 또는 첫 실행 뒤 표시</div>');
+  setHtml('real-bal-note', S.deposit_basis?'— 매수 예산 기준: '+_lcEsc(S.deposit_basis):'');
+  fillSlots('real-slots', R.slot_status||[]);
+  const pos=R.positions||[];
+  setHtml('real-pos', pos.length?pos.map(r=>{
+    const ev=(r.evlt_amt!=null&&r.evlt_amt!=='')?r.evlt_amt:(Number(r.qty)||0)*(Number(r.cur_price)||0);
+    const part=r.bot&&Number(r.bot_qty)!==Number(r.qty)?` <span style="color:#38bdf8">(자동 ${fmt(r.bot_qty)})</span>`:'';
+    return `<tr><td style="font-weight:500">${_lcEsc(r.code)} ${_lcEsc(r.name)}</td>
+      <td>${r.bot?'<b style="color:#38bdf8">자동매매</b>'+(r.strategy?' <span style="color:#94a3b8;font-size:11px">'+_lcEsc(r.strategy)+'</span>':''):'<span style="color:#94a3b8">직접 보유</span>'}</td>
+      <td class="r">${fmt(r.qty)}${part}</td><td class="r">${fmt(r.avg_price)}</td><td class="r">${fmt(r.cur_price)}</td><td class="r">${fmt(ev)}원</td>
+      <td class="r ${clr(r.pnl)}" style="font-weight:600">${r.pnl==null?'-':fmt(r.pnl)+'원'}</td>
+      <td class="r ${clr(r.pnl_pct)}" style="font-weight:600">${r.pnl_pct==null?'-':pct(r.pnl_pct)}</td></tr>`;
+  }).join(''):'<tr><td colspan="8" style="color:#9ca3af;text-align:center">보유 없음(또는 아직 스냅샷 없음)</td></tr>');
+  const sideTxt={buy:'<b style="color:#10b981">매수</b>',sell:'<b style="color:#ef4444">매도</b>',tp_sell:'<span style="color:#fbbf24">익절 지정가</span>'};
+  const dr=R.dryrun||[];
+  setHtml('real-dry', dr.length?dr.slice(0,120).map(r=>`<tr><td class="r" style="font-size:12px">${_lcEsc(_vcD(String(r.date||'')))}</td>
+      <td class="r" style="font-size:12px">${_lcEsc(String(r.time||'').slice(0,5))}</td><td>${sideTxt[r.side]||_lcEsc(r.side)}</td>
+      <td>${_lcEsc(r.name)} <span style="color:#94a3b8;font-size:12px">${_lcEsc(r.code)}</span></td><td style="color:#94a3b8;font-size:12px">${_lcEsc(r.strategy)}</td>
+      <td class="r">${fmt(r.qty)}</td><td class="r">${fmt(r.price)}</td><td style="font-size:12px;color:#94a3b8">${_lcEsc(r.msg)}</td></tr>`).join('')
+    :'<tr><td colspan="8" style="color:#9ca3af;text-align:center">드라이런 기록 없음</td></tr>');
+  fillOrders('real-orders','real-ord-cnt', R.trades, R.trade_total);
+  const lg=document.getElementById('real-log');
+  if(lg) lg.textContent=(R.log||'(오늘 본계좌 실행 기록 없음)')+(R.status_log?'\\n\\n[잔고 조회 버튼 기록]\\n'+R.status_log:'');
+}
+async function realSetMode(mode){
+  const R=_real||{}, cur=(R.mode||{}).mode, C=R.config||{};
+  let d;
+  if(mode==='live'){
+    if(!R.connected){ alert('본계좌 연결이 아직 확인되지 않았습니다.\\n[🔎 본계좌 잔고 조회]로 잔고가 보이는지 먼저 확인하세요.'); return; }
+    const lim=C.daily_loss_limit?('-'+fmt(C.daily_loss_limit)+'원'):'없음(설정 권장)';
+    if(!confirm('[1/2] 🔴 키움 본계좌 실주문을 켭니다.\\n\\n다음 매매 시각(평일 09:00 매수 · 15:21 매도)부터 실제 돈으로 주문합니다.'
+      +'\\n· 전략: '+(C.strategies||[]).join(', ')+(C.mirror?' (본계좌 설정 저장 전 — 안C 설정을 따름)':'')
+      +'\\n· 주문가능금액(100% 현금)을 빈 칸 수로 나눠 매수(현재가 +2% 지정가)'
+      +'\\n· 일일 손실 한도: '+lim
+      +'\\n· 직접 산 종목은 건드리지 않음 · 계좌의 주문가능 현금 전부가 매수 예산'
+      +'\\n· 장중(09:00 뒤)에 켜면 오늘 오후 보조 매수는 건너뛰고 다음 거래일 09:00 부터 삽니다\\n\\n계속할까요?')) return;
+    const note=prompt('[2/2] 정말로 실주문을 켭니다. 확인을 위해 "실주문" 이라고 입력하세요(뒤에 메모를 붙여도 됩니다).','');
+    if(note==null) return;
+    if(note.indexOf('실주문')<0){ alert('"실주문" 이 입력되지 않아 취소했습니다.'); return; }
+    d=await _realPost('/api/real/mode',{mode:'live',confirm:2,note:note});
+  } else {
+    const n=R.bot_positions||0;
+    const warn=(cur==='live'&&n>0)?('\\n\\n⚠ 자동매매로 산 종목이 '+n+'개 있습니다. '+(mode==='dryrun'?'드라이런':'끄기')
+      +'로 바꾸면 이 종목들의 만기·손절·익절 매도도 실제로 나가지 않습니다(직접 관리해야 함).\\n새로 사는 것만 멈추려면 취소하고 [신규 매수 정지]를 쓰세요.'):'';
+    if(!confirm('[1/2] 본계좌 모드를 '+(mode==='dryrun'?'🧪 드라이런(주문 안 냄)':'⏸ 끄기(본계좌 매매·신호를 아예 안 돌림)')+' 로 바꿉니다.'+warn+'\\n\\n계속할까요?')) return;
+    if(!confirm('[2/2] 정말로 바꿀까요?')) return;
+    d=await _realPost('/api/real/mode',{mode:mode,confirm:2});
+  }
+  await realLoad(); _realMsg(d);
+}
+async function realHalt(act){
+  let d;
+  if(act==='release'){
+    if(!confirm('[1/2] 본계좌 신규 매수를 다시 켭니다. 정지 사유를 확인하셨나요?')) return;
+    if(!confirm('[2/2] 정말로 재개할까요? 다음 매매 시각부터 다시 삽니다.')) return;
+    d=await _realPost('/api/real/halt',{action:'release',confirm:2});
+  } else {
+    if(!confirm('본계좌 신규 매수를 멈춥니다(만기·손절·익절 매도는 계속). 다시 사려면 [신규 매수 재개]를 눌러야 합니다. 계속할까요?')) return;
+    d=await _realPost('/api/real/halt',{action:'engage',confirm:1});
+  }
+  await realLoad(); _realMsg(d);
+}
+async function runRealStatus(){
+  let d={};
+  try{ const r=await fetch('/api/run/real_status',{method:'POST',headers:{'X-Dashboard-Action':'1'}}); d=await r.json(); }
+  catch(e){ d={ok:false,msg:e.message}; }
+  setHtml('real-msg', d.ok?'<span style="color:#10b981">✓ 본계좌 잔고 조회 시작(주문 없음) — 20초 뒤 자동으로 다시 불러옵니다</span>'
+                         :`<span style="color:#ef4444">${_lcEsc(d.msg||'실행 실패')}</span>`);
+  if(d.ok) setTimeout(realLoad, 20000);
 }
 
 // ══ 2026-10-22 AI·강도 가상매매 전략 설정(§68) — 강도매매 탭. 모의계좌 설정과 같은 모양, 다른 파일(실계좌 무관) ══

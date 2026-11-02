@@ -277,6 +277,33 @@ try {
         -Action $a16 -Trigger $t16 -Settings $s16 -Principal $principal -Force | Out-Null
     Write-Host "[OK] StockAI\SettingSweep (Saturday 02:00, fine strength/stop/take search)" -ForegroundColor Green
 
+    # 17. Kiwoom REAL account (2026-11-02, system doc 96): weekdays 09:00 buy / 15:21 sell / 15:40 status.
+    #     Real orders ONLY when the user switched mode to "live" on the dashboard (double confirm).
+    #     Default = dryrun (computes everything, logs would-be orders, sends nothing).
+    #     Separate process + separate lock from the mock trader -> both run at 09:00 without waiting.
+    Write-Host "[17/17] Registering Kiwoom REAL account (AM/PM/Status)..."
+    $s17 = New-ScheduledTaskSettingsSet @pw `
+               -MultipleInstances IgnoreNew `
+               -StartWhenAvailable `
+               -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 5) `
+               -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+    $a17a = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_kiwoom_real.bat" -Argument "auto am"
+    $t17a = New-ScheduledTaskTrigger -Weekly `
+                -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "09:00"
+    Register-ScheduledTask -TaskName "StockAI\KiwoomRealAM" `
+        -Action $a17a -Trigger $t17a -Settings $s17 -Principal $principal -Force | Out-Null
+    $a17b = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_kiwoom_real.bat" -Argument "auto pm"
+    $t17b = New-ScheduledTaskTrigger -Weekly `
+                -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "15:21"
+    Register-ScheduledTask -TaskName "StockAI\KiwoomRealPM" `
+        -Action $a17b -Trigger $t17b -Settings $s17 -Principal $principal -Force | Out-Null
+    $a17c = New-ScheduledTaskAction -Execute "C:\fin\outputs\run_kiwoom_real.bat" -Argument "auto status"
+    $t17c = New-ScheduledTaskTrigger -Weekly `
+                -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "15:40"
+    Register-ScheduledTask -TaskName "StockAI\KiwoomRealStatus" `
+        -Action $a17c -Trigger $t17c -Settings $s17 -Principal $principal -Force | Out-Null
+    Write-Host "[OK] StockAI\KiwoomRealAM(09:00) / KiwoomRealPM(15:21) / KiwoomRealStatus(15:40) - dryrun until you switch to live" -ForegroundColor Green
+
     Write-Host ""
     Write-Host "=== Registered Tasks ===" -ForegroundColor Cyan
     Get-ScheduledTask -TaskPath "\StockAI\" | Format-Table TaskName, State -AutoSize

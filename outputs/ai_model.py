@@ -440,12 +440,12 @@ def validate(T, log=print):
 # ── 주간 학습 ────────────────────────────────────────────────────────────────
 
 def configured_engines():
-    """모의계좌 두 계좌 + 가상매매(지금·예약) 설정의 전략."""
+    """모의계좌 두 계좌 + [§96] 키움 본계좌 + 가상매매(지금·예약) 설정의 전략."""
     out = set()
     try:
         import live_config as LC
         cfg = LC.load()
-        out |= {s["engine"] for a in LC.ACCOUNTS for s in cfg["accounts"][a]["strategies"]}
+        out |= {s["engine"] for a in LC.ALL_ACCOUNTS for s in cfg["accounts"][a]["strategies"]}
     except Exception:
         pass
     try:

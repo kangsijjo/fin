@@ -31,6 +31,11 @@
 ⚠️ 안전장치: KIWOOM_ENV=prod 면 주문 명령을 거부한다 (조회만 허용).
    실전 전환은 모의 검증 수개월 후 별도 논의 — 그때도 사용자가 직접 결정.
 
+💰 본계좌 프로필(2026-11-02 §96): KIWOOM_PROFILE=real (run_kiwoom_real.bat) — 같은 로직을 실서버 키·db/kiwoom_real·
+   본계좌 전용 설정으로 돌린다. 실제 주문은 모드 'live'(사용자가 대시보드에서 두 번 확인해 켬)일 때만, 기본은 드라이런.
+   본계좌엔 사용자가 직접 산 종목이 있을 수 있어 프로그램 원장(수량 포함)에 있는 몫만 사고판다.
+   매수는 시장가 대신 '현재가 +2% 지정가'(즉시 체결, 미수·상한가 기준 증거금 없음), 주문가능금액은 100% 현금 기준.
+
 주문유형(trde_tp): 0 지정가 / 3 시장가
 """
 
@@ -159,8 +164,25 @@ try:
 except Exception:
     pass
 
-SIGNALS_CSV = "./paper_signals.csv"
-ORDERS_DIR = "./db/kiwoom"
+# [2026-11-02 §96] 키움 본계좌(실계좌) 프로필 — KIWOOM_PROFILE=real 이면 같은 로직을 실서버 키·별도 폴더·본계좌 설정으로.
+#   실제 주문은 모드 'live'(사람이 켬)일 때만, 그 외엔 드라이런(냈을 주문만 dryrun_YYYYMMDD.csv 에 기록). real_account 참조.
+PROFILE = (os.getenv("KIWOOM_PROFILE") or "mock").strip().lower()
+REAL = PROFILE == "real"
+SIGNALS_CSV = "./db/kiwoom_real/signals.csv" if REAL else "./paper_signals.csv"
+ORDERS_DIR = "./db/kiwoom_real" if REAL else "./db/kiwoom"
+ACCOUNT_KEY = "kiwoom_real" if REAL else "kiwoom"         # live_config 계좌
+LABEL = "키움 본계좌" if REAL else "키움 안C"               # 알림 표기 — 실계좌 알림이 모의와 헷갈리지 않게
+TAG = "키움 본계좌" if REAL else "키움"
+STRENGTH_ACCOUNT = "real_kiwoom" if REAL else "kiwoom_안C"   # 강도 기록 계좌(본계좌는 'kiwoom' 으로 시작 안 함 — 모의 집계와 분리)
+if REAL:
+    import real_account as _RA
+    MODE = _RA.get_mode()            # 실행마다 한 번만 읽는다(도중에 바뀌어도 이번 실행은 같은 모드)
+    os.makedirs(ORDERS_DIR, exist_ok=True)
+    # 공용 키움 락(모의·KIS·수집기)을 기다리면 09:00 진입이 늦어진다 — 본계좌는 다른 키·서버라 자기 실행끼리만 막는다
+    _LOCK_PATH = os.path.abspath(os.path.join(ORDERS_DIR, ".real_trader.lock"))
+else:
+    MODE = "mock"
+DRY = REAL and MODE != "live"        # 드라이런 — 주문·원장 변경 없음
 HOLDING_DAYS_DEFAULT = 40   # 구버전 CSV 호환 fallback
 MAX_CONCURRENT = 10
 
@@ -168,7 +190,7 @@ MAX_CONCURRENT = 10
 # [2026-10-21] 전략 구성은 live_config(대시보드 '모의매매 전략 설정')가 단일 출처 — 파일이 없거나 깨지면
 # 현행값(기본값: high_500d_filt 6 / high_52w_filt 4, 둘 다 강도 면제, high_52w_filt 익절 +50%)과 같다.
 import live_config as _LC
-_ACC = _LC.account("kiwoom")
+_ACC = _LC.account(ACCOUNT_KEY)
 STRATEGY_MAX_SLOTS = dict(_ACC["slots"])
 # 매수 우선순위 (앞 전략이 빈 슬롯 먼저 채움) — 설정 화면의 위→아래 순서
 STRATEGY_PRIORITY = list(_ACC["priority"])
@@ -271,10 +293,11 @@ def _strength_gate(strat, sc):
 # 공용
 # ------------------------------------------------------------
 class KiwoomBundle:
-    """order/account 클라이언트 묶음."""
-    def __init__(self, order, acct):
+    """order/account(+본계좌 시세 info) 클라이언트 묶음."""
+    def __init__(self, order, acct, info=None):
         self.order = order
         self.acct = acct
+        self.info = info     # [§96] 본계좌 지정가 매수용 현재가(ka10001)
 
 
 _API_BUNDLE = None   # 프로세스 1회 인증 캐시 — 아래 get_api 토큰 재발급 방지(2026-07-21)
@@ -290,18 +313,30 @@ def get_api():
     global _API_BUNDLE
     if _API_BUNDLE is not None:
         return _API_BUNDLE
-    if not config.KIWOOM_APP_KEY or not config.KIWOOM_APP_SECRET:
-        print("[ERROR] .env 에 KIWOOM_MOCK_APP_KEY / KIWOOM_MOCK_APP_SECRET 없음")
-        sys.exit(1)
+    if REAL:
+        # [§96] 본계좌 = 실서버 키(.env KIWOOM_PROD_APP_KEY — 앱키에 계좌가 묶여 있음). .env 의 KIWOOM_ENV 와 무관.
+        _key = os.getenv("KIWOOM_PROD_APP_KEY", "").strip()
+        _sec = os.getenv("KIWOOM_PROD_APP_SECRET", "").strip()
+        _sandbox, _env = "false", "real"
+        if not _key or not _sec:
+            print("[ERROR] .env 에 KIWOOM_PROD_APP_KEY / KIWOOM_PROD_APP_SECRET 없음 — 본계좌 연결 불가")
+            sys.exit(1)
+    else:
+        _key, _sec = config.KIWOOM_APP_KEY, config.KIWOOM_APP_SECRET
+        _sandbox, _env = ("false" if config.KIWOOM_ENV == "prod" else "true"), config.KIWOOM_ENV
+        if not _key or not _sec:
+            print("[ERROR] .env 에 KIWOOM_MOCK_APP_KEY / KIWOOM_MOCK_APP_SECRET 없음")
+            sys.exit(1)
     # 라이브러리가 import 시점에 환경변수를 읽으므로 import 전에 주입
-    os.environ["KIWOOM_API_KEY"] = config.KIWOOM_APP_KEY
-    os.environ["KIWOOM_API_SECRET"] = config.KIWOOM_APP_SECRET
-    os.environ["KIWOOM_USE_SANDBOX"] = "false" if config.KIWOOM_ENV == "prod" else "true"
+    os.environ["KIWOOM_API_KEY"] = _key
+    os.environ["KIWOOM_API_SECRET"] = _sec
+    os.environ["KIWOOM_USE_SANDBOX"] = _sandbox
     try:
         from kiwoom_rest_api.config import get_base_url
         from kiwoom_rest_api.auth.token import TokenManager
         from kiwoom_rest_api.koreanstock.order import Order
         from kiwoom_rest_api.koreanstock.account import Account
+        from kiwoom_rest_api.koreanstock.stockinfo import StockInfo
     except ImportError:
         print("[ERROR] kiwoom-rest-api 미설치 → pip install kiwoom-rest-api")
         sys.exit(1)
@@ -318,13 +353,19 @@ def get_api():
                 time.sleep(3.0)
                 continue
             raise
-    print(f"[kiwoom] 토큰 발급 OK (env={config.KIWOOM_ENV}, {base})")
+    print(f"[kiwoom] 토큰 발급 OK (env={_env}, {base})")
+    if REAL and "mockapi" in str(base):      # 실계좌 프로필이 모의 서버로 붙는 일은 없어야 한다(설정 꼬임 방어)
+        print("[ABORT] 본계좌 프로필인데 모의 서버 주소 — 중단")
+        sys.exit(1)
     _API_BUNDLE = KiwoomBundle(Order(base_url=base, token_manager=tm),
-                               Account(base_url=base, token_manager=tm))
+                               Account(base_url=base, token_manager=tm),
+                               StockInfo(base_url=base, token_manager=tm))
     return _API_BUNDLE
 
 
 def guard_mock_only():
+    if REAL:
+        return   # [§96] 본계좌 프로필은 모드(드라이런/실주문 — 사람이 켬)가 주문을 통제한다
     if config.KIWOOM_ENV == "prod":
         print("[ABORT] KIWOOM_ENV=prod — 실전 계좌 주문은 이 스크립트에서 차단됨.")
         print("        모의 검증 후 실전 전환은 별도로 진행하세요 (KIWOOM_ENV=mock 으로 변경).")
@@ -353,6 +394,7 @@ def _order_with_retry(fn, what, retries=2, wait=1.5):
     거부돼 재해성 손실 종목(-49%)의 청산이 하루 밀림. 429 는 '주문 미접수' 거부라
     재시도해도 중복 체결 위험이 없다(그 외 예외는 재시도 금지 — 중복 주문 위험)."""
     last = None
+    refreshed = False
     for i in range(retries + 1):
         try:
             return _assert_order_ok(fn(), what)
@@ -362,8 +404,25 @@ def _order_with_retry(fn, what, retries=2, wait=1.5):
                 print(f"    [재시도] {what} 초당한도(429) — {wait * (i + 1):.1f}초 대기 후 {i + 2}/{retries + 1}")
                 time.sleep(wait * (i + 1))
                 continue
+            # [§96] 인증 실패(8005 토큰 무효) — 같은 앱키로 다른 프로그램이 토큰을 재발급하면 이전 토큰이 죽는다
+            # (Stock_AI kiwoom_api 2026-09-08 실측). 인증에서 거절된 주문은 접수되지 않은 것이라 토큰을 새로 받아
+            # 한 번만 재시도해도 중복 주문이 없다(접수됐다면 return_code 0 이라 여기 오지 않음).
+            if not refreshed and _is_auth_error(e) and _API_BUNDLE is not None:
+                refreshed = True
+                print(f"    [재시도] {what} 인증 실패(토큰 무효 의심) — 토큰을 새로 받아 1회 재시도")
+                try:
+                    _API_BUNDLE.order.token_manager._access_token = None
+                except Exception:
+                    pass
+                continue
             raise
     raise last
+
+
+def _is_auth_error(e):
+    """키움 인증 계열 오류(본문 return_code=3 · 8005/8050 · Token/토큰 문구) — Stock_AI kiwoom_api 와 같은 판정."""
+    m = str(e)
+    return "return_code=3 " in m or "8005" in m or "8050" in m or "Token" in m or "토큰" in m
 
 
 def _norm_stk_code(v):
@@ -405,6 +464,42 @@ def _tick_floor(p):
     return int(p // t * t)
 
 
+def _tick_ceil(p):
+    """[§96] KRX 호가단위로 올림 — 본계좌 지정가 매수가(가격대 경계값은 위 단위의 배수라 그대로 유효)."""
+    import math
+    p = float(p)
+    t = 1 if p < 2_000 else 5 if p < 5_000 else 10 if p < 20_000 else 50 if p < 50_000 \
+        else 100 if p < 200_000 else 500 if p < 500_000 else 1_000
+    return int(math.ceil(p / t - 1e-9) * t)
+
+
+# [§96] 본계좌 매수 = '현재가 +2% 지정가' — 시장가는 증거금을 상한가로 잡거나(100% 계좌) 갭 체결로 미수가 날 수 있어
+# 실계좌에선 쓰지 않는다. +2% 안에서는 즉시 체결(그때 매도호가)되고, 수량은 지정가 기준이라 현금을 넘지 않는다.
+REAL_BUY_SLIP = 0.02
+REAL_BUDGET_PAD = 0.995      # 수수료·반올림 여유 — 마지막 칸이 현금 전부를 쓸 때도 1원도 넘지 않게
+
+
+def _real_limit_price(cur, upper=0):
+    """현재가 → 지정가(호가 올림, 상한가 넘지 않게)."""
+    px = _tick_ceil(float(cur) * (1 + REAL_BUY_SLIP))
+    if upper and px > upper:
+        px = int(upper)
+    return px
+
+
+def _quote(api, code):
+    """[§96] 본계좌 현재가·상한가(ka10001). 실패하면 None — 가격을 모르면 사지 않는다."""
+    try:
+        r = _assert_order_ok(api.info.basic_stock_information_request_ka10001(stock_code=str(code).zfill(6)),
+                             "현재가 조회")
+        cur = abs(_to_int(_pick(r, "cur_prc", default=0)))
+        upl = abs(_to_int(_pick(r, "upl_pric", default=0)))
+        return {"cur": cur, "upper": upl} if cur > 0 else None
+    except Exception as e:
+        print(f"    [warn] {code} 현재가 조회 실패: {str(e)[:120]}")
+        return None
+
+
 def _to_float(v, default=0.0):
     try:
         return round(float(str(v).replace(",", "").replace("+", "").strip()), 2)
@@ -423,6 +518,56 @@ def log_order(row):
         if not exists:
             w.writeheader()
         w.writerow(row)
+
+
+def _dry_record(side, code, name, strategy, qty, price, msg=""):
+    """[§96 본계좌 드라이런] 실제 주문 대신 '냈을 주문'만 기록 — dryrun_YYYYMMDD.csv(주문로그·원장과 분리) + 텔레그램 묶음."""
+    os.makedirs(ORDERS_DIR, exist_ok=True)
+    path = f"{ORDERS_DIR}/dryrun_{datetime.today():%Y%m%d}.csv"
+    new = not os.path.exists(path)
+    with open(path, "a", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=["time", "side", "code", "name", "strategy", "qty", "price", "msg"])
+        if new:
+            w.writeheader()
+        w.writerow({"time": datetime.now().strftime("%H:%M:%S"), "side": side, "code": code, "name": name,
+                    "strategy": strategy, "qty": qty, "price": int(price or 0), "msg": msg})
+    print(f"    [드라이런] {side} {code} {name} {qty}주 @ {int(price or 0):,} — 실제 주문 안 함 ({msg})")
+    if side in ("buy", "sell"):
+        try:
+            import notifier
+            notifier.queue_fill(side, name, code, qty, price)
+        except Exception:
+            pass
+
+
+def _inflight(side, code, qty, price):
+    """[§96 본계좌 실주문] 주문 전송 '직전' 기록 — 전송 뒤 기록하다 죽어도(엑셀이 CSV 를 잡고 있는 등) 재시도가
+    같은 종목을 또 주문하지 않게 today_ordered_codes 가 이 파일도 본다. 기록이 실패하면 주문도 보내지 않는다(예외 전파)."""
+    if not REAL:
+        return
+    os.makedirs(ORDERS_DIR, exist_ok=True)
+    path = f"{ORDERS_DIR}/inflight_{datetime.today():%Y%m%d}.csv"
+    new = not os.path.exists(path)
+    with open(path, "a", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        if new:
+            w.writerow(["time", "side", "code", "qty", "price"])
+        w.writerow([datetime.now().strftime("%H:%M:%S"), side, str(code).zfill(6), int(qty), int(price or 0)])
+
+
+def _inflight_codes(side=None):
+    path = f"{ORDERS_DIR}/inflight_{datetime.today():%Y%m%d}.csv"
+    if not REAL or not os.path.exists(path):
+        return set()
+    try:
+        df = pd.read_csv(path, dtype={"code": str})
+        if side:
+            df = df[df["side"] == side]
+        return set(df["code"].astype(str).str.zfill(6))
+    except Exception as e:
+        # 읽을 수 없으면 '이미 주문했을 수도' — 본계좌는 매수를 멈추는 쪽(호출부가 처리하도록 표식)
+        print(f"[warn] 전송 기록 파싱 실패: {e}")
+        return {"__unreadable__"}
 
 
 # ─── 슬롯 관리 헬퍼 ──────────────────────────────────────────────────────────
@@ -465,6 +610,15 @@ def count_slots_by_strategy(pos_codes, strategy_map):
 
 
 def today_ordered_codes(side=None):
+    """오늘 이 side 로 주문한 종목(멱등키). [§96] 본계좌는 '전송 직전 기록(inflight)'도 포함 — 로그 쓰기 실패 뒤
+    재시도가 같은 종목을 또 주문하지 않게(이 경우 '__unreadable__' 표식이 섞이면 호출부가 그 동작을 멈춘다)."""
+    codes = _today_logged_codes(side)
+    if REAL:
+        codes |= _inflight_codes(side)
+    return codes
+
+
+def _today_logged_codes(side=None):
     path = f"{ORDERS_DIR}/orders_{datetime.today():%Y%m%d}.csv"
     if not os.path.exists(path):
         return set()
@@ -480,10 +634,10 @@ def today_ordered_codes(side=None):
         print(f"[warn] 주문로그 파싱 실패(멱등키 비활성 — 중복주문 주의): {e}")
         try:
             import notifier
-            notifier.safe_send(f"⚠ [키움] 오늘 주문로그 손상 — 중복주문 가드 비활성 상태로 진행: {str(e)[:80]}")
+            notifier.safe_send(f"⚠ [{TAG}] 오늘 주문로그 손상 — 중복주문 가드 비활성 상태로 진행: {str(e)[:80]}")
         except Exception:
             pass
-        return set()
+        return {"__unreadable__"} if REAL else set()     # [§96] 본계좌는 '모르면 주문 안 함'
 
 
 # ------------------------------------------------------------
@@ -495,6 +649,8 @@ def get_deposit(api):
         r = api.acct.deposit_detail_status_request_kt00001(qry_tp="3")
     except Exception:
         r = api.acct.deposit_detail_status_request_kt00001(qry_tp="2")
+    if REAL:
+        return _real_orderable(r)
     for key in ("ord_alow_amt", "ord_alowa", "100stk_ord_alow_amt",
                 "entr", "prsm_dpst_aset_amt", "pymn_alow_amt"):
         v = _pick(r, key)
@@ -504,34 +660,70 @@ def get_deposit(api):
     return 0
 
 
+_REAL_CASH = {"uncl": 0, "basis": ""}     # [§96] 마지막 예수금 조회의 미수금·기준(대시보드·매수 차단용)
+
+
+def _real_orderable(r):
+    """[§96] 본계좌 주문가능금액 = '100% 종목 주문가능금액'(현금만 — 미수를 쓰지 않는 금액).
+    ord_alow_amt 는 증거금률에 따라 현금보다 클 수 있어(미수 가능) 쓰지 않는다. 100% 값이 없으면
+    주문가능·D+2 추정예수금·예수금 중 가장 작은 값. 현금 미수금이 있으면 기록해 두고 매수를 막게 한다.
+    응답이 오류(return_code≠0, 예: 토큰 무효)면 예외 — 0원으로 착각해 조용히 안 사는 일을 막고 재시도에 맡긴다."""
+    _assert_order_ok(r, "예수금 조회")
+    v = _pick(r, "100stk_ord_alow_amt")
+    if v is not None:
+        amt, basis = _to_int(v), "100% 종목 주문가능금액"
+    else:
+        c = [_to_int(_pick(r, k)) for k in ("ord_alow_amt", "d2_entra", "entr") if _pick(r, k) is not None]
+        amt, basis = (min(c) if c else 0), "주문가능·D+2·예수금 중 최소(100% 값 없음)"
+        print(f"[warn] 100% 종목 주문가능금액 필드 없음 — {basis} 사용. raw keys: {list(r.keys())[:25]}")
+    _REAL_CASH["uncl"] = max(_to_int(_pick(r, "ch_uncla_tot", default=0)), _to_int(_pick(r, "ch_uncla", default=0)))
+    _REAL_CASH["basis"] = basis
+    return max(0, amt)
+
+
 def get_positions(api):
-    """보유 종목 dict: code -> {qty, name}. (kt00018) 스키마 방어적 파싱."""
-    r = api.acct.account_evaluation_balance_detail_request_kt00018(
-        query_type="1", domestic_exchange_type="KRX")
-    items = None
-    for key in ("acnt_evlt_remn_indv_tot", "stk_acnt_evlt_prst", "output", "list"):
-        if isinstance(r, dict) and isinstance(r.get(key), list):
-            items = r[key]
-            break
-    if items is None:
-        print(f"[warn] 잔고 리스트 식별 실패 — raw keys: {list(r.keys())[:20]}")
-        return {}
+    """보유 종목 dict: code -> {qty, name, ...}. (kt00018) 스키마 방어적 파싱.
+
+    [§96] 연속조회(cont-yn/next-key) — 보유가 한 번에 다 안 오면 이어 받는다. 본계좌엔 직접 산 종목이 섞여 많을 수
+    있고, 목록이 잘리면 '잘린 뒤쪽 종목 = 팔렸다'로 오판한다. 둘째 쪽부터 응답이 이상하면 예외(부분 목록으로 판단 금지)."""
     pos = {}
-    for it in items:
-        code = _norm_stk_code(_pick(it, "stk_cd", "stock_code", default=""))
-        qty = _to_int(_pick(it, "rmnd_qty", "hldg_qty", "qty", default=0))
-        name = _pick(it, "stk_nm", "stock_name", default="")
-        if code and qty > 0:
-            # 현재가/매입가는 kiwoom 이 방향부호(+/-)를 붙여 줄 때가 있어 abs 로 정규화.
-            # 평가손익/수익률은 부호 유지.
-            pos[code] = {
-                "qty": qty, "name": name,
-                "price":     abs(_to_int(_pick(it, "cur_prc", "prpr", default=0))),
-                "avg_price": abs(_to_int(_pick(it, "pur_pric", "pchs_avg_pric", "buy_uv", default=0))),
-                "evlt_amt":  abs(_to_int(_pick(it, "evlt_amt", "evlu_amt", default=0))),
-                "pnl":       _to_int(_pick(it, "evltv_prft", "evlt_pl", "evlu_pfls_amt", default=0)),
-                "pnl_pct":   _to_float(_pick(it, "prft_rt", "pl_rt", "evlu_pfls_rt", default=0)),
-            }
+    cont, nkey = "N", ""
+    for page in range(20):
+        r = api.acct.account_evaluation_balance_detail_request_kt00018(
+            query_type="1", domestic_exchange_type="KRX", cont_yn=cont, next_key=nkey)
+        items = None
+        for key in ("acnt_evlt_remn_indv_tot", "stk_acnt_evlt_prst", "output", "list"):
+            if isinstance(r, dict) and isinstance(r.get(key), list):
+                items = r[key]
+                break
+        if items is None:
+            if page or REAL:   # [§96] 본계좌는 잔고를 모르면 진행하지 않는다(빈 잔고로 착각하면 직접 산 종목을 또 사거나 칸을 잘못 셈)
+                raise RuntimeError(f"잔고 조회 {page + 1}쪽 응답 이상(return_code={r.get('return_code')} "
+                                   f"{str(r.get('return_msg', ''))[:80]}) — 부분·빈 목록으로 판단하지 않음")
+            print(f"[warn] 잔고 리스트 식별 실패 — raw keys: {list(r.keys())[:20]}")
+            return {}
+        for it in items:
+            code = _norm_stk_code(_pick(it, "stk_cd", "stock_code", default=""))
+            qty = _to_int(_pick(it, "rmnd_qty", "hldg_qty", "qty", default=0))
+            name = _pick(it, "stk_nm", "stock_name", default="")
+            if code and qty > 0:
+                # 현재가/매입가는 kiwoom 이 방향부호(+/-)를 붙여 줄 때가 있어 abs 로 정규화.
+                # 평가손익/수익률은 부호 유지.
+                pos[code] = {
+                    "qty": qty, "name": name,
+                    "price":     abs(_to_int(_pick(it, "cur_prc", "prpr", default=0))),
+                    "avg_price": abs(_to_int(_pick(it, "pur_pric", "pchs_avg_pric", "buy_uv", default=0))),
+                    "evlt_amt":  abs(_to_int(_pick(it, "evlt_amt", "evlu_amt", default=0))),
+                    "pnl":       _to_int(_pick(it, "evltv_prft", "evlt_pl", "evlu_pfls_amt", default=0)),
+                    "pnl_pct":   _to_float(_pick(it, "prft_rt", "pl_rt", "evlu_pfls_rt", default=0)),
+                    "pred_close": abs(_to_int(_pick(it, "pred_close_pric", default=0))),   # [§96] 일일 손실 판정 기준
+                }
+        c = str(r.get("cont-yn") or "").strip().upper()
+        k = str(r.get("next-key") or "").strip()
+        if c != "Y" or not k:
+            break
+        cont, nkey = "Y", k
+        time.sleep(0.3)
     return pos
 
 
@@ -561,7 +753,7 @@ def cmd_reconcile():
     drift_in = sorted(snap - broker)    # 스냅샷엔 있는데 브로커 없음
     print(f"[reconcile] 브로커 보유 {len(pos)}건 / 스냅샷대비 추가{drift_out} 누락{drift_in}")
     if not pos and snap:
-        msg = "⛔ [키움 reconcile] 브로커 잔고 0 인데 직전 스냅샷엔 보유 있음 — API 누락 의심"
+        msg = f"⛔ [{TAG} reconcile] 브로커 잔고 0 인데 직전 스냅샷엔 보유 있음 — API 누락 의심"
         print(msg)
         try:
             import notifier; notifier.safe_send(msg)
@@ -571,7 +763,7 @@ def cmd_reconcile():
     if drift_out or drift_in:
         try:
             import notifier
-            notifier.safe_send(f"⚠ [키움 잔고] 스냅샷 대비 변동 추가{drift_out}/누락{drift_in} — 확인 권장")
+            notifier.safe_send(f"⚠ [{TAG} 잔고] 스냅샷 대비 변동 추가{drift_out}/누락{drift_in} — 확인 권장")
         except Exception:
             pass
     return True
@@ -598,13 +790,22 @@ def cmd_status():
         os.makedirs(ORDERS_DIR, exist_ok=True)
         snap = {"date": datetime.today().strftime("%Y%m%d"),
                 "time": datetime.now().strftime("%H:%M"),
-                "env": config.KIWOOM_ENV,
+                "env": "real" if REAL else config.KIWOOM_ENV,
                 "deposit": dep,
                 "total_eval": total_eval, "securities": securities, "eval_pnl": eval_pnl,
                 "positions": [{"code": c, "name": p["name"], "qty": p["qty"],
                                "price": p.get("price", 0), "avg_price": p.get("avg_price", 0),
                                "pnl": p.get("pnl", 0), "pnl_pct": p.get("pnl_pct", 0)}
                               for c, p in pos.items()]}
+        if REAL:   # [§96] 어떤 종목이 프로그램 몫인지·오늘 손익·주문가능금액 기준을 함께 남긴다(대시보드 본계좌 탭)
+            own = _own(pos)
+            for x in snap["positions"]:
+                x["bot_qty"] = int(own.get(x["code"], {}).get("qty", 0))
+                x["bot"] = x["bot_qty"] > 0
+            pnl, n = _RA.day_pnl(own, today_ordered_codes("buy"), _prev_close_map())
+            snap.update(profile="real", mode=MODE, deposit_basis=_REAL_CASH["basis"], uncl=_REAL_CASH["uncl"],
+                        own_n=len(own), day_pnl=pnl,
+                        own_eval=int(sum(_to_int(p.get("qty", 0)) * float(p.get("price", 0) or 0) for p in own.values())))
         with open(f"{ORDERS_DIR}/snapshot.json", "w", encoding="utf-8") as f:
             json.dump(snap, f, ensure_ascii=False, indent=1)
         hist = f"{ORDERS_DIR}/equity_history.csv"
@@ -647,8 +848,9 @@ def _strength_map(sigs):
         df = pd.read_csv(path, dtype={"code": str}, encoding="utf-8-sig")
         df["signal_date"] = df["signal_date"].astype(str).str.replace("-", "")
         df = df[df["signal_date"].isin(dates)]
-        if "account" in df.columns:   # 키움 계좌 기록만 (KIS 기록과 혼동 방지)
-            df = df[df["account"].astype(str).str.lower().str.startswith("kiwoom")]
+        if "account" in df.columns:   # 키움 계좌 기록만 (KIS 기록과 혼동 방지) — [§96] 본계좌는 자기 기록(real_kiwoom)만
+            _acc = df["account"].astype(str).str.lower()
+            df = df[(_acc == STRENGTH_ACCOUNT) if REAL else _acc.str.startswith("kiwoom")]
         df["code"] = df["code"].astype(str).str.zfill(6)
         df["score_ic"] = pd.to_numeric(df["score_ic"], errors="coerce")
         # [2026-10-22] 강도 방식(설정): v2 면 전략별 점수(score_v2)를 쓰고, v2 모델이 없는 전략만 v1 로 대체
@@ -665,7 +867,7 @@ def _strength_map(sigs):
         return {}
 
 
-def verify_strength(sigs, strength, account="kiwoom_안C"):
+def verify_strength(sigs, strength, account=STRENGTH_ACCOUNT):
     """[매매 전 사전점검] 강도 재확인 — 후보 전원의 score_ic 가 확보됐는지 검증한다.
 
     (2026-07-21 사용자 요청 "매매 시행 전 강도 재확인 후 매매")
@@ -739,7 +941,7 @@ def todays_signals():
     if target_raw == today_raw:
         return []
     print(f"[buy] 신호 기준일: {target}")
-    if not _signals_fresh(target_raw, "키움 안C"):
+    if not _signals_fresh(target_raw, LABEL):
         return []
     return s[s["signal_date"] == target].to_dict("records")
 
@@ -785,7 +987,7 @@ def _signals_fresh(latest_date, label):
 #   Phase 1 **모니터 전용 2~4주**(차단하지 않고 '걸렸을 것'만 기록) -> Phase 2 상수 1줄로 활성화.
 GATE_MIN_CANDIDATES = 12      # 후보가 이 수 미만이면 '게이트 걸림'으로 기록
 GATE_ENFORCE = False          # True 로 바꾸면 실제 차단. Phase 1 동안 False 유지.
-GATE_LOG = "./db/gate_monitor.csv"
+GATE_LOG = f"{ORDERS_DIR}/gate_monitor.csv" if REAL else "./db/gate_monitor.csv"   # [§96] 본계좌는 따로
 
 
 def _gate_check(n_pass: int, n_signals: int) -> bool:
@@ -829,12 +1031,13 @@ def _alert_buy_failures(failures, n_placed):
     if len(failures) > 5:
         lines.append(f"  … 외 {len(failures) - 5}건")
     all_failed = (n_placed == 0)
-    head = (f"🚨 [키움 안C] 매수 주문 {len(failures)}건 **전부 실패** — 계좌 단위 사고 의심"
+    head = (f"🚨 [{LABEL}] 매수 주문 {len(failures)}건 **전부 실패** — 계좌 단위 사고 의심"
             if all_failed else
-            f"⚠ [키움 안C] 매수 주문 {len(failures)}건 실패 (성공 {n_placed}건)")
-    tail = ("\n  강도 임계를 통과한 종목을 **살 수 없는 상태**입니다. 모의계좌 기간만료·"
-            "재발급·계좌성격 변경을 확인하세요." if all_failed else "")
-    print(f"⚠ [키움] 매수 실패 {len(failures)}건")
+            f"⚠ [{LABEL}] 매수 주문 {len(failures)}건 실패 (성공 {n_placed}건)")
+    tail = (("\n  강도 임계를 통과한 종목을 **살 수 없는 상태**입니다. "
+             + ("본계좌 주문가능금액·주문 제한·앱키(실서버) 상태를 키움 HTS/앱에서 확인하세요." if REAL else
+                "모의계좌 기간만료·재발급·계좌성격 변경을 확인하세요.")) if all_failed else "")
+    print(f"⚠ [{TAG}] 매수 실패 {len(failures)}건")
     try:
         import notifier
         notifier.safe_send(head + "\n" + "\n".join(lines) + tail)
@@ -842,11 +1045,39 @@ def _alert_buy_failures(failures, n_placed):
         pass
 
 
+def _real_buy_allowed():
+    """[§96] 본계좌 신규 매수 관문 — 본계좌 정지(손실 한도·수동·상태파일 이상) / 설정 파일 문제 / 전체 정지 스위치.
+    막혀도 프로세스를 끝내지 않는다(익절 지정가·잔고 스냅샷은 그대로 — 모의의 guard_buy 는 exit 0)."""
+    on, st = _RA.halt_status()
+    if on:
+        print(f"[buy] 본계좌 신규 매수 정지 중 — {(st or {}).get('reason_text', '?')} {(st or {}).get('detail', '')} → 매수 생략(매도는 계속)")
+        return False
+    if _ACC.get("fallback"):
+        msg = (f"⛔ [{LABEL}] 설정 파일 문제로 기본값이 대신 읽혔습니다({_ACC['fallback'][:120]}) — "
+               "본계좌는 고른 적 없는 설정으로 사지 않습니다. 대시보드 설정을 확인·저장하세요(매도는 계속).")
+        print(msg)
+        try:
+            import notifier
+            notifier.safe_send_once(msg, f"real_cfg_fallback:{datetime.now():%Y%m%d}")
+        except Exception:
+            pass
+        return False
+    on, st, err = kill_switch.status()
+    if on:
+        print(f"[buy] 전체 정지 스위치 작동 중({(st or {}).get('reason_text', '?')}) — 본계좌 매수도 생략(매도는 계속)")
+        return False
+    return True
+
+
 def cmd_buy():
     guard_mock_only()
     # [2026-08-27] 3층 안전장치 — 계좌 단위 정지 상태면 신규매수만 건너뛴다.
     #   매도·만기청산·손절은 이 게이트를 타지 않는다.
-    kill_switch.guard_buy("키움 안C")
+    if REAL:
+        if not _real_buy_allowed():
+            return
+    else:
+        kill_switch.guard_buy(LABEL)
     sigs = todays_signals()
     if not sigs:
         print("[buy] 오늘 신호 없음 — 종료")
@@ -868,13 +1099,34 @@ def cmd_buy():
         print("[buy] 잔고 응답 의심(브로커 0 / 스냅샷 또는 원장엔 보유 있음) — 오주문 방지 위해 매수 중단")
         try:
             import notifier
-            notifier.safe_send("⛔ [키움 buy 중단] 잔고 응답이 비어 있음(스냅샷은 보유). API 누락 의심 → 매수 스킵.")
+            notifier.safe_send(f"⛔ [{TAG} buy 중단] 잔고 응답이 비어 있음(스냅샷은 보유). API 누락 의심 → 매수 스킵.")
         except Exception:
             pass
         return
 
     already = today_ordered_codes("buy")
     dep = get_deposit(api)
+    if REAL:
+        if "__unreadable__" in already:
+            msg = f"⛔ [{LABEL}] 오늘 주문 기록을 읽지 못해 중복 주문 위험 — 오늘 신규 매수 중단(파일 확인 요망)"
+            print(msg)
+            try:
+                import notifier
+                notifier.safe_send(msg)
+            except Exception:
+                pass
+            return
+        if _REAL_CASH["uncl"] > 0:
+            msg = (f"⛔ [{LABEL}] 현금 미수금 {_REAL_CASH['uncl']:,}원이 있습니다 — 미수가 정리될 때까지 신규 매수 중단"
+                   "(반대매매 위험). 키움 HTS/앱에서 확인하세요.")
+            print(msg)
+            try:
+                import notifier
+                notifier.safe_send_once(msg, f"real_uncl:{datetime.now():%Y%m%d}")
+            except Exception:
+                pass
+            return
+        print(f"[buy] 본계좌 주문가능금액 {dep:,}원 ({_REAL_CASH['basis']}) · 모드 {MODE}{' — 드라이런(주문 안 냄)' if DRY else ''}")
     strength = _strength_map(sigs)   # {(code,strategy): score_ic} — 강도 필터용
     if strength:
         n_weak = sum(1 for s in sigs
@@ -905,18 +1157,20 @@ def cmd_buy():
     for _c, _v in load_kiwoom_positions().items():
         if _v.get("strategy"):
             strategy_map[_c] = _v["strategy"]
-    slot_used = count_slots_by_strategy(pos.keys(), strategy_map)
+    # [§96] 칸은 '프로그램 몫'으로만 센다 — 본계좌에서 사용자가 직접 산 종목은 칸을 차지하지 않는다(모의는 계좌 전체가 프로그램 몫)
+    held = _own(pos)
+    slot_used = count_slots_by_strategy(held.keys(), strategy_map)
     legacy_used = slot_used.get("_legacy", 0)   # 레거시 전략(for_high20_mkt 등) 보유 수
     slot_avail = {k: max(0, STRATEGY_MAX_SLOTS[k] - slot_used[k])
                   for k in STRATEGY_MAX_SLOTS}
     # 전체 가용 슬롯 = 총 슬롯 상한 - 현재 사용(현 전략 + 레거시)
     total_avail = max(0, sum(slot_avail.values()) - legacy_used)
     if SLOT_MODE == "pool":                      # 칸 없음: 전략 구분 없이 전체 상한까지(보유 전부 포함)
-        total_avail = max(0, MAX_CONCURRENT - len(pos))
+        total_avail = max(0, MAX_CONCURRENT - len(held))
 
     print(f"[buy] 오늘 신호 {len(sigs)}건  예수금 {dep:,}원")
     if SLOT_MODE == "pool":
-        print(f"  칸 방식: 칸 없음 — 보유 {len(pos)}/{MAX_CONCURRENT}, 빈 칸 {total_avail}개 (전략별 보유 "
+        print(f"  칸 방식: 칸 없음 — 보유 {len(held)}/{MAX_CONCURRENT}, 빈 칸 {total_avail}개 (전략별 보유 "
               + " / ".join(f"{k}={slot_used[k]}" for k in STRATEGY_PRIORITY) + ")")
     else:
         print(f"  전략별 슬롯: "
@@ -1024,60 +1278,85 @@ def cmd_buy():
             if total_slots_remaining <= 0:
                 break
             budget = remaining_dep / total_slots_remaining
-            qty = int((budget * 0.97) // close)   # 갭상승 대비 3% 여유
-            if qty < 1 or qty * close < MIN_ORDER_AMOUNT:
+            _lim_msg = ""
+            if REAL:   # [§96] 현재가 +2% 지정가 — 수량은 지정가 기준(현금 100%, 미수 없음). 가격을 모르면 사지 않는다.
+                _q = _quote(api, code)
+                if not _q:
+                    buy_failures.append((code, name, "현재가 조회 실패 — 주문 안 함"))
+                    continue
+                px = _real_limit_price(_q["cur"], _q.get("upper"))
+                qty = int((budget * REAL_BUDGET_PAD) // px)
+                _lim_msg = f"지정가 {px:,} (현재가 {_q['cur']:,} +{REAL_BUY_SLIP * 100:g}%)"
+            else:
+                px = close
+                qty = int((budget * 0.97) // close)   # 갭상승 대비 3% 여유
+            if qty < 1 or qty * px < MIN_ORDER_AMOUNT:
                 print(f"    [skip] {code} {name} — 예산 부족 ({budget:,.0f}원)")
                 continue
 
             # 주문 직전 잔고 충분성 최종 확인(2026-07-21) — 슬롯 균등분배 예산은 계산값이라
             # 반올림·앞선 체결로 실제 잔여를 넘어설 수 있다. 넘으면 주문하지 않는다.
-            _need = qty * close
+            _need = qty * px
             if _need > remaining_dep:
                 print(f"    [skip] {code} {name} — 잔고 부족(필요 {_need:,.0f} > 잔여 {remaining_dep:,.0f})")
                 continue
             print(f"    [verify] {code} {name} — {_why} / "
-                  f"잔여 {remaining_dep:,.0f} ≥ 주문 {_need:,.0f} → 주문 실행")
+                  f"잔여 {remaining_dep:,.0f} ≥ 주문 {_need:,.0f} → 주문 실행" + (f" ({_lim_msg})" if _lim_msg else ""))
+
+            if DRY:   # [§96] 본계좌 드라이런 — 주문·원장 변경 없이 '냈을 주문'만 기록(칸·예산은 실제처럼 차감해 다음 후보 계산)
+                _dry_record("buy", code, name, strat, qty, px, f"{_why} · {_lim_msg}")
+                remaining_dep -= _need
+                n_placed += 1
+                placed_this_strat += 1
+                placed_per_strat[strat] += 1
+                already.add(code)
+                continue
 
             try:
+                _inflight("buy", code, qty, px)   # [§96] 본계좌: 전송 직전 기록(실패하면 주문하지 않음)
                 r = _order_with_retry(lambda: api.order.stock_buy_order_request_kt10000(
                     dmst_stex_tp="KRX", stk_cd=code, ord_qty=str(qty),
-                    trde_tp=ORDER_TYPE_BUY,
-                    ord_uv="",
+                    trde_tp=ORDER_TYPE_LIMIT if REAL else ORDER_TYPE_BUY,
+                    ord_uv=str(int(px)) if REAL else "",
                 ), "매수")
                 ono = _pick(r, "ord_no", "odno", default="")
-                print(f"    [매수주문] {code} {name} {qty}주 @ {int(close):,} → {ono}")
+                print(f"    [매수주문] {code} {name} {qty}주 @ {int(px):,} → {ono}")
                 try:
                     import notifier
-                    notifier.queue_fill("buy", name, code, qty, close)
+                    notifier.queue_fill("buy", name, code, qty, px)
                 except Exception:
                     pass
                 log_order({
                     "time": datetime.now().strftime("%H:%M:%S"), "side": "buy",
                     "code": code, "name": name, "strategy": strat,
                     "qty": qty, "price": int(close),
-                    "order_type": ORDER_TYPE_BUY, "ok": True, "order_no": ono, "msg": "",
+                    "order_type": ORDER_TYPE_LIMIT if REAL else ORDER_TYPE_BUY, "ok": True, "order_no": ono,
+                    "msg": _lim_msg,
                 })
-                remaining_dep -= qty * close
+                remaining_dep -= _need
                 n_placed += 1
                 placed_this_strat += 1
                 placed_per_strat[strat] += 1
                 already.add(code)
-                try:   # 진입가 원장 기록(참조가=신호 종가; 실체결 평균은 ensure 가 이후 보정)
+                try:   # 진입가 원장 기록(참조가=신호 종가; 실체결 평균은 ensure 가 이후 보정) — [§96] 수량도(본계좌는 이 수량만 관리)
                     save_kiwoom_position(code, close, strat,
                                          str(sig.get("signal_date", "")),
-                                         _to_int(sig.get("holding_days"), 20))
+                                         _to_int(sig.get("holding_days"), 20), qty=qty)
                 except Exception as e:
                     print(f"    [warn] 원장 기록 실패(무시): {e}")
             except Exception as e:
                 print(f"    [실패] {code} {name}: {e}")
                 buy_failures.append((code, name, str(e)[:160]))
-                log_order({
-                    "time": datetime.now().strftime("%H:%M:%S"), "side": "buy",
-                    "code": code, "name": name, "strategy": strat,
-                    "qty": qty, "price": int(close),
-                    "order_type": ORDER_TYPE_BUY, "ok": False, "order_no": "",
-                    "msg": str(e)[:200],
-                })
+                try:
+                    log_order({
+                        "time": datetime.now().strftime("%H:%M:%S"), "side": "buy",
+                        "code": code, "name": name, "strategy": strat,
+                        "qty": qty, "price": int(close),
+                        "order_type": ORDER_TYPE_LIMIT if REAL else ORDER_TYPE_BUY, "ok": False, "order_no": "",
+                        "msg": str(e)[:200],
+                    })
+                except Exception as _le:   # 로그 파일이 잠겨도(엑셀 등) 다음 후보·실패 알림은 계속
+                    print(f"    [warn] 주문로그 기록 실패: {_le}")
             time.sleep(0.5)   # 주문 간 간격 — 연속 발사 429 예방(2026-07-14)
 
     print(f"\n[buy] 주문 {n_placed}건 완료")
@@ -1127,6 +1406,7 @@ def _held_buy_map():
                     "strategy": str(r.get("strategy", "") or ""),
                     "date": date,
                     "ref_px": _to_int(r.get("price", 0)),
+                    "qty": _to_int(r.get("qty", 0)),          # [§96] 본계좌 원장 복구용
                 }
     except Exception:
         pass
@@ -1161,11 +1441,16 @@ def load_kiwoom_positions():
                 holding = int(float(str(r.get("holding_days", "") or 0)))
             except (TypeError, ValueError):
                 holding = 20
+            try:
+                qty = int(float(str(r.get("qty", "") or 0)))
+            except (TypeError, ValueError):
+                qty = 0
             out[r["code"]] = {
                 "entry_px":     _to_float(r.get("entry_px", 0), 0.0),
                 "strategy":     str(r.get("strategy", "") or ""),
                 "signal_date":  _re.sub(r"\.0$", "", str(r.get("signal_date", "") or "")),
                 "holding_days": holding if holding > 0 else 20,
+                "qty":          qty,     # [§96] 프로그램이 산 수량(본계좌는 이 수량만 팔고 센다). 옛 행은 0
             }
         return out
     except Exception as e:
@@ -1176,21 +1461,22 @@ def load_kiwoom_positions():
 def _write_kiwoom_positions(pos_dict):
     """원자적 재작성(tmp + os.replace) — 도중 크래시 시 0바이트/부분행 방지(2026-07-10)."""
     os.makedirs(ORDERS_DIR, exist_ok=True)
-    fields = ["code", "entry_px", "strategy", "signal_date", "holding_days"]
+    fields = ["code", "entry_px", "strategy", "signal_date", "holding_days", "qty"]   # [§96] qty 추가(맨 뒤)
     tmp = KIWOOM_POSITIONS_CSV + ".tmp"
     with open(tmp, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=fields)
+        w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         w.writeheader()
         for code, d in pos_dict.items():
             w.writerow({"code": code, **d})
     os.replace(tmp, KIWOOM_POSITIONS_CSV)
 
 
-def save_kiwoom_position(code, entry_px, strategy, signal_date, holding_days):
+def save_kiwoom_position(code, entry_px, strategy, signal_date, holding_days, qty=None):
     existing = load_kiwoom_positions()
     existing[str(code).zfill(6)] = {
         "entry_px": entry_px, "strategy": strategy,
         "signal_date": signal_date, "holding_days": holding_days,
+        "qty": int(qty) if qty else "",
     }
     _write_kiwoom_positions(existing)
 
@@ -1199,6 +1485,148 @@ def remove_kiwoom_position(code):
     existing = load_kiwoom_positions()
     if existing.pop(str(code).zfill(6), None) is not None:
         _write_kiwoom_positions(existing)
+
+
+def _own(pos):
+    """[§96] 브로커 잔고 중 '이 프로그램이 산 몫'만 → {code: 잔고 dict(qty=프로그램 수량)}.
+
+    본계좌엔 사용자가 직접 산 종목이 있을 수 있다 — 원장에 있는 종목만, 수량은 원장 수량까지(사용자가 같은 종목을
+    더 샀으면 그 몫은 빼고), 그때 매입가는 섞인 브로커 평균 대신 원장 진입가. 만기·손절·익절·칸 계산은 전부 이 몫만 본다.
+    모의계좌는 계좌 전체가 프로그램 몫이라 그대로 돌려준다."""
+    if not REAL:
+        return pos
+    led = load_kiwoom_positions()
+    out = {}
+    for code, p in pos.items():
+        r = led.get(str(code).zfill(6))
+        if not r:
+            continue
+        lq, bq = int(r.get("qty") or 0), _to_int(p.get("qty", 0))
+        q = min(lq, bq)
+        if q <= 0:
+            continue
+        d = dict(p)
+        d["qty"] = q
+        if bq != lq and float(r.get("entry_px") or 0) > 0:
+            d["avg_price"] = float(r["entry_px"])
+        out[code] = d
+    return out
+
+
+def _real_sold_dates():
+    """{code: 마지막 '성공 매도' 날짜} — 본계좌 원장 복구 때 '이미 판 종목'을 되살리지 않게(주문로그 기준)."""
+    out = {}
+    for f in sorted(_glob.glob(f"{ORDERS_DIR}/orders_*.csv")):
+        try:
+            df = pd.read_csv(f, dtype={"code": str})
+        except Exception:
+            continue
+        if "side" not in df.columns:
+            continue
+        s = df[(df["side"] == "sell") & df["ok"].astype(str).str.lower().isin(("true", "1"))]
+        for c in s["code"].astype(str).str.zfill(6):
+            out[c] = os.path.basename(f)[7:15]
+    return out
+
+
+def _ensure_real_ledger(pos):
+    """[§96] 본계좌 원장 정리 — 모의(ensure_kiwoom_ledger)와 달리 브로커에만 있는 종목을 **절대 끌어오지 않는다**
+    (사용자가 직접 산 종목일 수 있음). 하는 일:
+      ① 정리: 원장 종목이 잔고에 없으면 삭제(오늘 산 종목은 체결 전일 수 있어 보존, 잔고가 통째로 비었으면 오늘 판 것만)
+      ② 수량: 잔고 수량 < 원장 수량이면 원장을 잔고에 맞춘다(일부 체결·사용자가 일부 매도). 많으면 사용자 몫 → 경고 1회
+      ③ 매입가: 섞이지 않았을 때만 브로커 매입평균(실체결)으로 보정
+      ④ 복구: 원장엔 없지만 '이 프로그램의 매수 기록'(주문로그)이 마지막 매도보다 뒤인 종목만 그 기록으로 되살림"""
+    try:
+        led = load_kiwoom_positions()
+        sold_today = today_ordered_codes("sell")
+        bought_today = today_ordered_codes("buy")
+        changed, mixed = False, []
+        # 잔고가 통째로 비었을 때: 일시 글리치와 '정말 다 판 것'(사용자가 직접 전부 매도)을 구분 — 1시간 넘게 떨어진 두 실행에서
+        # 계속 비어 있어야 정리한다. 정리하지 않으면 '잔고 0 vs 원장 보유' 매수 중단이 영영 풀리지 않는다(모의의 좀비 행 연쇄와 같은 꼴).
+        empty_ok = False
+        first = ((_RA.read_json("empty_seen.json")[0]) or {}).get("first")
+        if not pos and led:
+            if first:
+                try:
+                    empty_ok = (datetime.now() - datetime.fromisoformat(first)).total_seconds() >= 3600
+                except Exception:
+                    empty_ok = False
+            else:
+                _RA.write_json("empty_seen.json", {"first": datetime.now().isoformat(timespec="seconds")})
+        elif first:                                   # 잔고가 다시 보이거나 원장이 비면 처음부터
+            _RA.write_json("empty_seen.json", {})
+        gone = []
+        for code in list(led.keys()):
+            r = led[code]
+            p = pos.get(code)
+            if not p:
+                if code in bought_today:
+                    continue
+                if code in sold_today or pos or empty_ok:
+                    led.pop(code, None)
+                    changed = True
+                    gone.append(code)
+                    print(f"[ledger] 본계좌 원장 정리: {code} — "
+                          + ("오늘 매도 체결" if code in sold_today else "잔고에 없음(체결 안 됨·직접 매도)"))
+                continue
+            bq, lq = _to_int(p.get("qty", 0)), int(r.get("qty") or 0)
+            if code not in bought_today and (lq <= 0 or bq < lq):
+                print(f"[ledger] 본계좌 원장 수량 보정: {code} {lq} → {bq}")
+                r["qty"] = bq
+                lq = bq
+                changed = True
+            elif bq > lq > 0:
+                mixed.append(code)
+            avg = float(p.get("avg_price", 0) or 0)
+            if bq == lq and avg > 0 and float(r.get("entry_px", 0) or 0) != avg:
+                r["entry_px"] = avg
+                changed = True
+        buys, sells, restored, unknown = _held_buy_map(), None, [], []
+        today = datetime.today().strftime("%Y%m%d")
+        for code, info in buys.items():
+            if code in led or code not in pos or code in sold_today:
+                continue
+            if sells is None:
+                sells = _real_sold_dates()
+            if sells.get(code, "") >= info.get("date", ""):
+                continue                      # 산 뒤에 판 기록이 있음 → 이미 끝난 매매(지금 잔고는 사용자 몫)
+            q = min(int(info.get("qty") or 0), _to_int(pos[code].get("qty", 0)))
+            if q <= 0:
+                continue
+            if info.get("date") != today:
+                # 오늘 산 것만 자동 복구 — 며칠 지난 기록은 그 사이 정리된 뒤 사용자가 새로 샀을 수도 있어 알리기만
+                unknown.append(code)
+                continue
+            strat = info.get("strategy", "")
+            led[code] = {"entry_px": float(pos[code].get("avg_price", 0) or 0) or float(info.get("ref_px", 0) or 0),
+                         "strategy": strat,
+                         "signal_date": _signal_date_lookup(code, strat, info.get("date", "")) or info.get("date", ""),
+                         "holding_days": _HEAL_HOLDING.get(strat, 20), "qty": q}
+            restored.append(code)
+            changed = True
+        if changed:
+            _write_kiwoom_positions(led)
+        if mixed or restored or unknown or (empty_ok and gone):
+            try:
+                import notifier
+                if empty_ok and gone:
+                    notifier.safe_send(f"ℹ️ [{LABEL}] 계좌 잔고가 1시간 넘게 비어 있어 자동매매 원장 {gone} 을(를) 정리했습니다 — "
+                                       "직접 전부 매도하셨으면 정상입니다(다음 매매부터 빈 칸으로 다시 삽니다).")
+                if restored:
+                    notifier.safe_send(f"⚠ [{LABEL}] 원장에서 빠진 프로그램 매수 {restored} 를 주문 기록으로 복구했습니다 — "
+                                       "만기·손절은 복구된 수량만 관리합니다.")
+                if unknown:
+                    notifier.safe_send_once(f"⚠ [{LABEL}] 프로그램이 예전에 산 기록이 있는데 원장에 없는 보유 {unknown} — "
+                                            "자동매매가 관리하지 않습니다(직접 산 것일 수도 있어 함부로 가져오지 않음). 확인해 주세요.",
+                                            f"real_unknown:{datetime.now():%Y%m%d}:{','.join(unknown)}")
+                if mixed:
+                    notifier.safe_send_once(f"ℹ️ [{LABEL}] 자동매매 종목 {mixed} 을(를) 직접 더 사셨네요 — 자동매매는 "
+                                            "자기가 산 수량만 팔고, 직접 산 몫은 건드리지 않습니다.",
+                                            f"real_mixed:{datetime.now():%Y%m%d}:{','.join(mixed)}")
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[warn] 본계좌 원장 정리 실패(무시): {e}")
 
 
 # 자가치유 시 전략별 보유일 (안C 라이브 파라미터와 일치 — 20 고정이던 것을 수정 2026-07-10)
@@ -1240,6 +1668,8 @@ def ensure_kiwoom_ledger(pos):
     ③ 치유 메타데이터 정확화: holding_days 전략별(_HEAL_HOLDING), signal_date 는
        신호CSV 역추적(_signal_date_lookup) 우선.
     entry_px = 브로커 매입평균(실체결) 우선, 없으면 주문 참조가."""
+    if REAL:                          # [§96] 본계좌: 브로커에만 있는 종목을 끌어오지 않는 별도 규칙
+        return _ensure_real_ledger(pos)
     try:
         led = load_kiwoom_positions()
         sold_today = today_ordered_codes("sell")
@@ -1439,6 +1869,7 @@ def cmd_place_targets(api=None, pos=None):
     guard_mock_only()
     api = api or get_api()
     pos = pos if pos is not None else get_positions(api)
+    pos = _own(pos)                   # [§96] 본계좌: 프로그램 몫만(수량도 원장 수량) — 직접 산 종목엔 익절 주문 안 냄
     if not pos:
         print("[target] 보유 없음 — 종료")
         return
@@ -1464,7 +1895,11 @@ def cmd_place_targets(api=None, pos=None):
         if pc > 0 and tgt_px > pc * 1.295:   # 오늘 상한가 밖 — 도달 불가
             print(f"  [skip] {code} {name} — 목표 {tgt_px:,} > 오늘 상한가(≈{int(pc * 1.3):,})")
             continue
+        if DRY:                               # [§96] 본계좌 드라이런
+            _dry_record("tp_sell", code, name, strat, qty, tgt_px, f"익절 지정가 +{tgt * 100:.0f}%")
+            continue
         try:
+            _inflight("tp_sell", code, qty, tgt_px)
             r = _order_with_retry(lambda: api.order.stock_sell_order_request_kt10001(
                 dmst_stex_tp="KRX", stk_cd=code, ord_qty=str(qty),
                 trde_tp=ORDER_TYPE_LIMIT, ord_uv=str(tgt_px)), "익절지정가")
@@ -1545,11 +1980,12 @@ def codes_due_for_exit():
     if undecidable:
         try:
             import notifier
-            notifier.safe_send(f"⚠ [키움 만기] 판정불가 보유 {undecidable} — 원장 signal_date 확인 필요(청산 경로 없음)")
+            notifier.safe_send(f"⚠ [{TAG} 만기] 판정불가 보유 {undecidable} — 원장 signal_date 확인 필요(청산 경로 없음)")
         except Exception:
             pass
 
-    if not os.path.exists(SIGNALS_CSV):
+    # [§96] 본계좌는 원장(프로그램이 산 몫)만 — 신호CSV 폴백은 '원장에 없는 종목 = 사용자가 직접 산 종목'까지 팔 수 있어 금지
+    if REAL or not os.path.exists(SIGNALS_CSV):
         return due
     s = pd.read_csv(SIGNALS_CSV, dtype={"code": str})
     s["signal_date"] = s["signal_date"].astype(str)
@@ -1627,6 +2063,7 @@ def cmd_sell():
     api = get_api()
     pos = get_positions(api)
     _reconcile_tp_fills(pos)   # 오늘 익절 지정가 체결분 기록/알림 (만기 없어도 매 오후 수행)
+    pos = _own(pos)            # [§96] 본계좌: 아래 만기·손절·서킷브레이커·수량은 전부 프로그램 몫만(모의는 그대로)
     due = codes_due_for_exit()
     cb = _circuit_breaker_codes(pos)   # 재해성 손실(-40%) 서킷브레이커(2026-07-10)
     _smap0 = get_signal_strategy_map()
@@ -1640,11 +2077,21 @@ def cmd_sell():
         print("[sell] 청산 대상 없음 — 종료")
         try:
             import notifier
-            notifier.flush_fills("📌 키움 익절 체결")
+            notifier.flush_fills(f"📌 {TAG} 익절 체결")
         except Exception:
             pass
         return
     already = today_ordered_codes("sell")
+    if REAL and "__unreadable__" in already:
+        msg = (f"🚨 [{LABEL}] 오늘 주문 기록을 읽지 못해 매도를 보류했습니다(중복 매도 위험) — "
+               f"만기·손절 대상 {sorted((due | set(cb)) & set(pos))}. 파일 확인 후 직접 처리하거나 다음 실행을 기다리세요.")
+        print(msg)
+        try:
+            import notifier
+            notifier.safe_send(msg)
+        except Exception:
+            pass
+        return
     close_map = _today_close_map()
     tp_open = _today_tp_orders()   # 만기청산 전 취소할 미체결 익절 지정가
 
@@ -1667,10 +2114,10 @@ def cmd_sell():
     if cb:
         try:
             import notifier
-            notifier.safe_send("🚨 [키움 서킷브레이커/손절] "
+            notifier.safe_send(f"🚨 [{TAG} 서킷브레이커/손절] "
                                + ", ".join(f"{c} {pos[c]['name']}({v:+.1f}%{', 전략손절' if c in sl else ''})"
                                            for c, v in cb.items() if c in pos)
-                               + f" ≤ {CIRCUIT_BREAKER_PCT:.0f}% — 시장가 청산")
+                               + f" ≤ {CIRCUIT_BREAKER_PCT:.0f}% — 시장가 청산" + (" (드라이런 — 실제 주문 안 함)" if DRY else ""))
         except Exception:
             pass
     n_placed = 0
@@ -1683,6 +2130,9 @@ def cmd_sell():
         ref_px = int(_cp) if (_cp and _cp == _cp) else 0   # NaN(자기비교 False) 크래시 방어
         reason = (f"stop({cb[code]:+.1f}% ≤ {STRATEGY_STOP.get(strat, 0) * 100:.0f}%)" if code in sl
                   else f"circuit_breaker({cb[code]:+.1f}%)" if code in cb else "")
+        if DRY:                    # [§96] 본계좌 드라이런 — 취소·매도·원장 변경 없음
+            _dry_record("sell", code, name, strat, qty, ref_px or pos[code].get("price", 0), reason or "만기")
+            continue
         # 미체결 익절 지정가가 물량을 잠그고 있으면 먼저 취소(잔량 전부) 후 시장가 청산
         if code in tp_open:
             try:
@@ -1694,6 +2144,7 @@ def cmd_sell():
             except Exception as e:
                 print(f"  [warn] {code} 익절 지정가 취소 실패({e}) — 시장가 매도 시도 계속")
         try:
+            _inflight("sell", code, qty, ref_px)   # [§96] 본계좌: 전송 직전 기록
             r = _order_with_retry(lambda: api.order.stock_sell_order_request_kt10001(
                 dmst_stex_tp="KRX", stk_cd=code, ord_qty=str(qty),
                 trde_tp=ORDER_TYPE_SELL,
@@ -1720,11 +2171,14 @@ def cmd_sell():
         except Exception as e:
             print(f"  [실패] {code} {name}: {e}")
             failures.append((code, name, str(e)[:120]))
-            log_order({"time": datetime.now().strftime("%H:%M:%S"), "side": "sell",
-                       "code": code, "name": name, "strategy": strat,
-                       "qty": qty, "price": ref_px,
-                       "order_type": ORDER_TYPE_SELL, "ok": False, "order_no": "",
-                       "msg": (reason + " | " if reason else "") + str(e)[:180]})
+            try:
+                log_order({"time": datetime.now().strftime("%H:%M:%S"), "side": "sell",
+                           "code": code, "name": name, "strategy": strat,
+                           "qty": qty, "price": ref_px,
+                           "order_type": ORDER_TYPE_SELL, "ok": False, "order_no": "",
+                           "msg": (reason + " | " if reason else "") + str(e)[:180]})
+            except Exception as _le:   # 로그 파일이 잠겨도 나머지 청산·실패 알림은 계속
+                print(f"  [warn] 주문로그 기록 실패: {_le}")
         time.sleep(0.7)   # 주문 간 간격 — 연속 발사 시 429 예방(2026-07-14, 실사례 07-13)
     print(f"[sell] 주문 {n_placed}건 완료")
     # [2026-08-20] 청산 실패 = 계획 밖 보유 연장(리스크 사건). 종전엔 [실패] 한 줄만
@@ -1736,11 +2190,47 @@ def cmd_sell():
         try:
             import notifier
             notifier.safe_send(
-                f"🚨 [키움 안C] 청산 실패 {len(failures)}건 — 만기/서킷브레이커 매도가 "
+                f"🚨 [{LABEL}] 청산 실패 {len(failures)}건 — 만기/서킷브레이커 매도가 "
                 f"집행되지 않았습니다\n" + "\n".join(_lines) +
                 "\n  해당 종목은 계획보다 오래 보유 중입니다. 원인 확인 필요.")
         except Exception:
             pass
+
+
+def _real_loss_check():
+    """[§96] 본계좌 일일 손실 한도 — 프로그램 몫의 오늘 손익(전일 종가 대비, 오늘 산 건 매입가 대비)이 -한도 이하이면
+    신규 매수 정지(real_account.halt). 매도(만기·손절·익절)는 막지 않는다. 결과는 loss_check.json(대시보드 표시).
+    AM(09:00 — 시가 갭 손실)·PM(15:21 매도 직후·보조 매수 직전 — 하루 거의 전부) 두 번 본다. 조회 실패는 판정 생략."""
+    lim = _ACC.get("daily_loss_limit")
+    try:
+        pos = get_positions(get_api())
+    except Exception as e:
+        print(f"[손실한도] 잔고 조회 실패 — 이번엔 판정 생략: {str(e)[:120]}")
+        return
+    own = _own(pos)
+    pnl, n = _RA.day_pnl(own, today_ordered_codes("buy"), _prev_close_map())
+    hit = _RA.loss_limit_hit(pnl, lim)
+    try:
+        _RA.write_json("loss_check.json", {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "pnl": pnl,
+                                           "n": n, "limit": lim, "hit": hit, "mode": MODE})
+    except Exception:
+        pass
+    print(f"[손실한도] 프로그램 몫 오늘 손익 {pnl:+,}원 (종목 {n}개) / 한도 "
+          + (f"-{int(lim):,}원" if lim else "없음") + (" → 한도 도달" if hit else ""))
+    if hit:
+        day = _ACC.get("loss_action") == "day"
+        _RA.halt_engage("loss_limit", f"오늘 손익 {pnl:+,}원 ≤ 한도 -{int(lim):,}원 (종목 {n}개)",
+                        until=datetime.now().strftime("%Y%m%d") if day else None)
+
+
+def _went_live_today_after_open(now=None):
+    """[§96] 실주문 모드로 바뀐 때가 오늘 09:00 이후인가(모드 기록 changed_at 'YYYY-MM-DD HH:MM:SS')."""
+    try:
+        ch = str(_RA.mode_info().get("changed_at") or "")
+        now = now or datetime.now()
+        return ch[:10] == now.strftime("%Y-%m-%d") and ch[11:19] >= "09:00:00"
+    except Exception:
+        return False
 
 
 def cmd_daily(mode=None):
@@ -1758,7 +2248,7 @@ def cmd_daily(mode=None):
 
     if mode == "am":
         if hour >= 12:   # 09:03 트리거의 오후 지연복구 — 한낮 시장가 매수는 위험, 생략
-            msg = "⚠ [키움] 09:03 매수 트리거가 정오 이후 지연복구됨 — 당일 매수 생략(가격 이동 위험). 익절 지정가만 점검"
+            msg = f"⚠ [{TAG}] 09:03 매수 트리거가 정오 이후 지연복구됨 — 당일 매수 생략(가격 이동 위험). 익절 지정가만 점검"
             print(msg)
             try:
                 import notifier
@@ -1768,14 +2258,17 @@ def cmd_daily(mode=None):
             cmd_place_targets()
         else:
             print("[daily] 오전 모드 — 매수 후 익절 지정가")
+            if REAL:
+                _real_loss_check()  # [§96] 시가 갭 손실이 한도를 넘었으면 오늘 매수 전에 정지
             cmd_buy()
-            time.sleep(10)          # 시장가 매수 체결이 잔고에 반영될 시간
+            if not DRY:
+                time.sleep(10)      # 시장가 매수 체결이 잔고에 반영될 시간(드라이런은 주문이 없어 기다릴 필요 없음)
             cmd_place_targets()     # 보유종목 당일 익절 지정가 발주(어제 발주분은 마감 시 만료됨)
     else:
         print("[daily] 오후 모드 — 매도 후 매수")
         cmd_sell()
         if hour < 12:   # 15:21 트리거의 오전 지연복구(주말 넘김 등) — 매수는 09:03 트리거 몫
-            msg = "⚠ [키움] 15:21 매도 트리거가 오전에 지연복구됨 — 매도만 수행, 매수는 정규 09:03 경로에 위임"
+            msg = f"⚠ [{TAG}] 15:21 매도 트리거가 오전에 지연복구됨 — 매도만 수행, 매수는 정규 09:03 경로에 위임"
             print(msg)
             try:
                 import notifier
@@ -1786,7 +2279,14 @@ def cmd_daily(mode=None):
             # ※ 15:21 매도는 15:30 동시호가 체결이라 아래 매수 시점엔 슬롯·예수금이 아직
             #   회복되지 않음 — 오후 매수는 '이미 빈 슬롯'이 있을 때만 동작하는 보조 경로이고,
             #   만기청산으로 비워진 슬롯의 신규 진입은 다음날 09:03 매수가 담당(2026-07-10 명확화).
-            cmd_buy()
+            if REAL:
+                _real_loss_check()  # [§96] 하루 손익(15:20 기준)이 한도를 넘었으면 보조 매수·다음 매수 정지
+            if REAL and not DRY and _went_live_today_after_open():
+                # [§96] 장중에 실주문을 막 켠 날 — 빈 칸이 전부라 오후 보조 매수가 마감 동시호가에 칸을 한꺼번에 채운다.
+                # 백테스트(다음날 시가 진입)와 다르고 예상 밖이라, 첫 매수는 다음 거래일 09:00 정규 경로로 미룬다.
+                print("[daily] 오늘 장중에 실주문을 켬 — 첫 매수는 다음 거래일 09:00(시가) 부터, 오후 보조 매수 생략")
+            else:
+                cmd_buy()
             # 오후 매수분 익절 지정가는 다음날 아침 cmd_place_targets 가 재발주(당일주문 곧 만료라 생략)
     # [2026-07-21] 매매(매도·매수·익절)는 위에서 이미 완료 — 마지막 잔고 스냅샷은 대시보드
     # 표시용이라 여기서 실패해도 매매 결과엔 무영향. 크래시로 exit 1(무서운 '매매 크래시'
@@ -1807,7 +2307,7 @@ def cmd_daily(mode=None):
         except Exception as _e2:
             # [2026-08-09 문구 개선] 매매는 끝난 뒤의 '표시용 조회' 실패다. 종전 문구가
             # ⚠+"실패"로 시작해 매매 사고처럼 읽혔다 → 조치 불필요임을 앞에 명시.
-            msg = ("ℹ️ [키움] 매매는 정상 완료됐고, 잔고 화면 갱신만 실패했습니다"
+            msg = (f"ℹ️ [{TAG}] 매매는 정상 완료됐고, 잔고 화면 갱신만 실패했습니다"
                    "(조치 불필요 — 다음 실행 때 자동으로 맞춰집니다).\n"
                    f"  참고 원인: {type(_e2).__name__}: {str(_e2)[:100]}")
             print(msg)
@@ -1828,13 +2328,20 @@ if __name__ == "__main__":
     def _crash_hook(_tp, _val, _tb):
         try:
             import notifier
-            notifier.safe_send(f"🚨 [키움] {cmd} 크래시: {_tp.__name__}: {_val}"
+            notifier.safe_send(f"🚨 [{TAG}] {cmd} 크래시: {_tp.__name__}: {_val}"
                                " — 이 시도는 중단. "
                                f"{_retry_note()}")
         except Exception:
             pass
         sys.__excepthook__(_tp, _val, _tb)
     sys.excepthook = _crash_hook
+
+    if REAL:   # [§96] 본계좌 실행 머리말 — 로그만 봐도 어떤 모드로 돌았는지 보이게
+        print(f"[본계좌] 모드 {MODE} — "
+              + ("실제 주문" if not DRY else "드라이런(주문 안 냄 — 냈을 주문만 dryrun 기록)" if MODE == "dryrun" else "꺼짐"))
+        if MODE == "off":
+            print("[본계좌] 모드 '끔' — 아무것도 하지 않고 종료")
+            sys.exit(0)
 
     # status 도 락 안에서 — cmd_status 의 ensure(prune/heal)가 원장 '쓰기' 작업이라
     # 락 없이 daily 와 겹치면 load-modify-write 레이스(행 유실/부활) 가능(2026-07-10).
@@ -1855,7 +2362,7 @@ if __name__ == "__main__":
             if datetime.now().hour >= 15:
                 # [2026-07-17] 장외 재점화 가드 — 캐치업/수동 재실행이 15시 이후 AM 을
                 # 점화하면 손절매도까지 장외 주문이 됨. 15시 이후는 PM/익일 소관.
-                _m = "⚠ [키움] daily-am 이 15시 이후 점화됨 — 전체 생략(재점화 가드)"
+                _m = f"⚠ [{TAG}] daily-am 이 15시 이후 점화됨 — 전체 생략(재점화 가드)"
                 print(_m)
                 try:
                     import notifier
@@ -1877,6 +2384,7 @@ if __name__ == "__main__":
     # 체결 묶음 알림 — 이번 실행에서 쌓인 매수/매도를 1통으로 (없으면 전송 안 함)
     try:
         import notifier
-        notifier.flush_fills("[키움 안C]")
+        notifier.flush_fills(f"🧪 [{LABEL} · 드라이런 — 실제 주문 안 함] 실주문이었다면:" if DRY
+                             else f"💰 [{LABEL} · 실계좌 주문]" if REAL else f"[{LABEL}]")
     except Exception:
         pass

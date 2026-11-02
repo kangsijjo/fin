@@ -18,6 +18,10 @@ live_config.py — 모의매매 전략 설정(계좌별 전략·슬롯·강도·
       (기존 두 전략만 별칭: star_high_52w_20_filt→high_52w_filt, star_high_500d_20→high_500d_filt).
 청산 규칙 누적(exit_rules): 전략을 빼도 그 전략으로 산 보유분은 만기까지 남는다 → 그 보유분의 손절·익절이
       사라지지 않게 지금까지 설정된 적 있는 규칙을 이름별로 계속 보관한다(새 값으로만 덮어씀).
+본계좌(2026-11-02 §96): REAL_ACCOUNTS("kiwoom_real" = 키움 본계좌, 실제 돈)는 같은 파일의 별도 칸. 모의계좌 목록(ACCOUNTS)엔
+      넣지 않는다 — 가상매매·겹침 경고·탐색처럼 '모의계좌'만 보던 곳은 그대로 두고, 본계좌가 필요한 곳만 ALL_ACCOUNTS 를 쓴다.
+      아직 저장한 적 없으면 짝 모의계좌(REAL_MIRROR) 설정을 그대로 따른다('_mirror' 표시 — 저장하는 순간부터 따로).
+      본계좌만의 값: daily_loss_limit(원, 비우면 끔) · loss_action("halt" 내가 풀 때까지 / "day" 그날만) — 신규 매수만 막는다.
 """
 import copy
 import json
@@ -27,8 +31,13 @@ from datetime import datetime
 HERE = os.path.dirname(os.path.abspath(__file__))
 SLOTS_TOTAL = 10
 MAX_STRATEGIES = 5          # [2026-10-26] 4→5 (사용자 요청)
-ACCOUNTS = ("kiwoom", "kis")
-ACCOUNT_LABEL = {"kiwoom": "키움 안C", "kis": "KIS 안D"}
+ACCOUNTS = ("kiwoom", "kis")                      # 모의계좌(가상매매·겹침 경고·탐색이 보는 목록 — 본계좌 안 넣음)
+REAL_ACCOUNTS = ("kiwoom_real",)                   # [§96] 키움 본계좌(실계좌)
+ALL_ACCOUNTS = ACCOUNTS + REAL_ACCOUNTS            # 검증·저장·화면·모델 학습 대상
+ACCOUNT_LABEL = {"kiwoom": "키움 안C", "kis": "KIS 안D", "kiwoom_real": "키움 본계좌"}
+REAL_MIRROR = {"kiwoom_real": "kiwoom"}            # 본계좌 설정을 저장한 적 없으면 이 모의계좌 설정을 따른다
+LOSS_ACTIONS = {"halt": "내가 다시 켤 때까지 신규 매수 정지", "day": "그날만 신규 매수 정지(다음 거래일 자동 재개)"}
+LOSS_LIMIT_RANGE = (10_000, 10_000_000_000)       # 일일 손실 한도(원) 허용 범위 — 비우면 끔
 ALIAS = {"star_high_52w_20_filt": "high_52w_filt", "star_high_500d_20": "high_500d_filt"}   # engine → live
 SLOT_MODES = {"slots": "전략별 칸", "pool": "칸 없음(전체 10종목, 전략 안 순위 높은 순)"}
 STRENGTH_VERSIONS = {"v1": "공통(라이브 6전략 풀 학습, 예전 방식)", "v2": "전략별(그 전략 자신의 과거 매매로 학습, §62)"}
@@ -80,18 +89,39 @@ def default_config():
     return copy.deepcopy(DEFAULT)
 
 
+def _fill_real(cfg):
+    """[§96] 본계좌 칸이 없으면(아직 저장 안 함) 짝 모의계좌 설정을 복사해 채운다 — 손실 한도는 끔, '_mirror' 표시."""
+    acc = cfg.setdefault("accounts", {})
+    for r, src in REAL_MIRROR.items():
+        if not isinstance(acc.get(r), dict) and isinstance(acc.get(src), dict):
+            A = copy.deepcopy(acc[src])
+            A.update(daily_loss_limit=None, loss_action="halt", _mirror=True)
+            acc[r] = A
+    return cfg
+
+
 def validate(cfg, engine_names=None):
-    """→ 오류 문구 목록(비면 통과). engine_names 가 주어지면 전략 이름도 확인."""
+    """→ 오류 문구 목록(비면 통과). engine_names 가 주어지면 전략 이름도 확인.
+    본계좌 칸은 없어도 통과(load 가 짝 모의계좌로 채움) — 있으면 모의계좌와 같은 규칙 + 손실 한도 값."""
     errs = []
     acc = (cfg or {}).get("accounts")
     if not isinstance(acc, dict):
         return ["accounts 가 없습니다"]
-    for a in ACCOUNTS:
+    for a in ALL_ACCOUNTS:
         A = acc.get(a)
         lab = ACCOUNT_LABEL[a]
+        if a in REAL_ACCOUNTS and A is None:
+            continue
         if not isinstance(A, dict):
             errs.append(f"{lab}: 설정이 없습니다")
             continue
+        if a in REAL_ACCOUNTS:
+            dl = A.get("daily_loss_limit")
+            if dl is not None and (not isinstance(dl, (int, float)) or isinstance(dl, bool)
+                                   or not LOSS_LIMIT_RANGE[0] <= dl <= LOSS_LIMIT_RANGE[1]):
+                errs.append(f"{lab}: 일일 손실 한도는 {LOSS_LIMIT_RANGE[0]:,}~{LOSS_LIMIT_RANGE[1]:,}원 또는 비움")
+            if A.get("loss_action", "halt") not in LOSS_ACTIONS:
+                errs.append(f"{lab}: 손실 한도 도달 시 동작은 halt/day")
         ms = A.get("min_strength")
         if not isinstance(ms, (int, float)) or not 0 <= ms <= 10:
             errs.append(f"{lab}: 강도 기준은 0~10")
@@ -143,33 +173,38 @@ def load():
     """설정 dict. 파일 없음/깨짐/검증 실패면 기본값(+ '_fallback' 사유)."""
     p = config_path()
     if not os.path.exists(p):
-        return default_config()
+        return _fill_real(default_config())
     try:
         cfg = json.load(open(p, encoding="utf-8"))
     except Exception as e:
         d = default_config()
         d["_fallback"] = f"설정 파일을 읽지 못해 기본값 사용: {type(e).__name__}"
-        return d
+        return _fill_real(d)
     errs = validate(cfg)
     if errs:
         d = default_config()
         d["_fallback"] = "설정 검증 실패로 기본값 사용: " + "; ".join(errs[:3])
-        return d
+        return _fill_real(d)
     cfg.setdefault("exit_rules", {})
-    return cfg
+    return _fill_real(cfg)
 
 
 def account(acct, cfg=None):
     """트레이더·신호기용 계좌 뷰 — 라이브 이름 기준.
     → {slots, priority, exempt, min_strength, stop(비율), take(비율), holding, engine, rows}"""
     cfg = cfg or load()
+    if acct in REAL_ACCOUNTS and acct not in (cfg.get("accounts") or {}):
+        cfg = _fill_real(copy.deepcopy(cfg))          # 넘겨받은 설정은 건드리지 않는다
     A = cfg["accounts"][acct]
     rows = A["strategies"]
     out = {"min_strength": float(A["min_strength"]), "rows": rows,
            "strength_version": A.get("strength_version", "v2"),
            "slot_mode": A.get("slot_mode", "slots"),
            "slots": {}, "priority": [], "exempt": set(), "stop": {}, "take": {}, "holding": {}, "engine": {},
-           "min_strength_by": {}, "skip_limitup": set()}
+           "min_strength_by": {}, "skip_limitup": set(),
+           # [§96] 본계좌만의 값(모의계좌는 None/halt 고정) + 설정 상태(기본값 대체·아직 모의 설정을 따르는 중)
+           "daily_loss_limit": A.get("daily_loss_limit"), "loss_action": A.get("loss_action", "halt"),
+           "mirror": bool(A.get("_mirror")), "fallback": cfg.get("_fallback")}
     # 누적 규칙 먼저(옛 보유분), 그 위에 현재 규칙
     for ln, r in (cfg.get("exit_rules") or {}).items():
         if r.get("stop") is not None:
@@ -232,9 +267,21 @@ def needs_regen(now=None):
 def diff(old, new):
     """사람이 읽는 변경 요약 줄 목록."""
     out = []
-    for a in ACCOUNTS:
+    old, new = _fill_real(copy.deepcopy(old)), _fill_real(copy.deepcopy(new))
+    for a in ALL_ACCOUNTS:
         lab = ACCOUNT_LABEL[a]
-        o, n = old["accounts"][a], new["accounts"][a]
+        o, n = old["accounts"].get(a), new["accounts"].get(a)
+        if o is None or n is None:
+            continue
+        if a in REAL_ACCOUNTS:
+            if o.get("_mirror") and not n.get("_mirror"):
+                out.append(f"{lab}: 이제부터 본계좌 전용 설정으로 따로 저장(지금까지는 {ACCOUNT_LABEL[REAL_MIRROR[a]]} 설정을 따름)")
+            ol, nl = o.get("daily_loss_limit"), n.get("daily_loss_limit")
+            if ol != nl:
+                out.append(f"{lab} 일일 손실 한도 {'없음' if ol is None else format(int(ol), ',') + '원'}"
+                           f" → {'없음' if nl is None else format(int(nl), ',') + '원'}")
+            if o.get("loss_action", "halt") != n.get("loss_action", "halt"):
+                out.append(f"{lab} 손실 한도 도달 시: {LOSS_ACTIONS[n.get('loss_action', 'halt')]}")
         if o["min_strength"] != n["min_strength"]:
             out.append(f"{lab} 강도 기준 {o['min_strength']:g} → {n['min_strength']:g}")
         if o.get("slot_mode", "slots") != n.get("slot_mode", "slots"):
@@ -271,25 +318,44 @@ def _fmt(v):
     return "없음" if v is None else ("예" if v is True else "아니오" if v is False else f"{v:g}")
 
 
+def _acct_block(A, real=False):
+    """저장용 계좌 칸 — 정해진 키만(화면 표시용 값·'_' 시작 표시는 버린다)."""
+    out = {"min_strength": float(A["min_strength"]),
+           "strength_version": A.get("strength_version", "v2"),
+           "slot_mode": A.get("slot_mode", "slots"),
+           "strategies": [dict({k: s.get(k) for k in ("engine", "slots", "exempt", "stop", "take", "holding",
+                                                       "min_strength")},
+                               skip_limitup=bool(s.get("skip_limitup", False)))     # [§91]
+                          for s in A["strategies"]]}
+    if real:                                                                         # [§96]
+        dl = A.get("daily_loss_limit")
+        out["daily_loss_limit"] = int(dl) if dl is not None else None
+        out["loss_action"] = A.get("loss_action", "halt")
+    return out
+
+
 def save(new, note="", engine_names=None):
-    """검증 → 이전 설정 백업 → 원자 저장 → 이력 1줄. 반환 (저장된 설정, 변경 요약)."""
+    """검증 → 이전 설정 백업 → 원자 저장 → 이력 1줄. 반환 (저장된 설정, 변경 요약).
+    [§96] 본계좌 칸: new 에 (모의 따라가기 표시 없이) 있으면 그 값으로 저장, 없으면 저장돼 있던 값을 유지,
+    둘 다 없으면 저장하지 않는다(계속 짝 모의계좌 설정을 따른다)."""
     errs = validate(new, engine_names)
     if errs:
         raise ValueError("; ".join(errs))
     old = load()
     old.pop("_fallback", None)
+    accs = {a: _acct_block(new["accounts"][a]) for a in ACCOUNTS}
+    for a in REAL_ACCOUNTS:
+        n = (new.get("accounts") or {}).get(a)
+        o = (old.get("accounts") or {}).get(a)
+        if isinstance(n, dict) and not n.get("_mirror"):
+            accs[a] = _acct_block(n, real=True)
+        elif isinstance(o, dict) and not o.get("_mirror"):
+            accs[a] = _acct_block(o, real=True)
     cfg = {"version": 1, "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "note": note or "",
-           "accounts": {a: {"min_strength": float(new["accounts"][a]["min_strength"]),
-                            "strength_version": new["accounts"][a].get("strength_version", "v2"),
-                            "slot_mode": new["accounts"][a].get("slot_mode", "slots"),
-                            "strategies": [dict({k: s.get(k) for k in ("engine", "slots", "exempt", "stop", "take", "holding",
-                                                                        "min_strength")},
-                                                skip_limitup=bool(s.get("skip_limitup", False)))     # [§91]
-                                           for s in new["accounts"][a]["strategies"]]}
-                        for a in ACCOUNTS}}
+           "accounts": accs}
     rules = dict(old.get("exit_rules") or {})
-    for a in ACCOUNTS:                       # 지금까지 쓰인 규칙을 누적(옛 보유분 청산용)
-        for s in old["accounts"][a]["strategies"] + cfg["accounts"][a]["strategies"]:
+    for a in ALL_ACCOUNTS:                   # 지금까지 쓰인 규칙을 누적(옛 보유분 청산용) — 본계좌 포함
+        for s in ((old["accounts"].get(a) or {}).get("strategies") or []) + ((cfg["accounts"].get(a) or {}).get("strategies") or []):
             rules[live_name(s["engine"])] = {"stop": s.get("stop"), "take": s.get("take"), "holding": s.get("holding")}
     cfg["exit_rules"] = rules
     changes = diff(old, cfg)
