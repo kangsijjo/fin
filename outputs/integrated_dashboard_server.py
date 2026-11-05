@@ -2911,7 +2911,18 @@ def api_live_config():
                     "locked": locked, "lock_msg": why, "regen_after_save": LC.needs_regen(),
                     "regen_running": bool(p is not None and p.poll() is None),
                     "slots_total": LC.SLOTS_TOTAL, "max_strategies": LC.MAX_STRATEGIES, "history": hist,
-                    "loss_actions": LC.LOSS_ACTIONS, "loss_limit_range": list(LC.LOSS_LIMIT_RANGE)})   # [§96]
+                    "loss_actions": LC.LOSS_ACTIONS, "loss_limit_range": list(LC.LOSS_LIMIT_RANGE),   # [§96]
+                    **_ai_model_engines()})                                                            # [§96.7]
+
+
+def _ai_model_engines():
+    """[§96.7] 개선 AI 모델에 들어 있는 전략·학습 시각 — 본계좌가 'AI매매'를 고를 때 표시용."""
+    try:
+        import ai_model as AIM
+        m = AIM.meta_info() or {}
+        return {"ai_engines": list(m.get("engines") or []), "ai_trained": m.get("trained")}
+    except Exception:
+        return {"ai_engines": [], "ai_trained": None}
 
 
 def _lc_from_request(b):
@@ -3011,6 +3022,18 @@ def api_live_config_save():
                   stdout=open(BASE / "logs" / "run_strength_v2_train.log", "w", encoding="utf-8", errors="replace"),
                   stderr=_sp.STDOUT, creationflags=_NO_WIN)
         msg += f" · 강도 v2 모델 학습 시작({', '.join(v2_missing)} — 끝나기 전 신호는 v1 점수로 대체)"
+    try:      # [§96.7] 본계좌가 개선 AI 인데 AI 모델에 없는 전략 → AI 재학습(가상매매 AI 포트 저장과 같은 처리)
+        _ae = set(_ai_model_engines()["ai_engines"])
+        _R = _full["accounts"].get("kiwoom_real") or {}
+        ai_miss = sorted({s["engine"] for s in _R.get("strategies", [])} - _ae) if _R.get("strength_version") == "ai" else []
+    except Exception:
+        ai_miss = []
+    if ai_miss:            # 재학습 전 신호의 AI 점수가 비어도 09:00 매수 직전 재확인(verify_strength)이 다시 채점한다
+        (BASE / "logs").mkdir(exist_ok=True)
+        _sp.Popen([_VENV_PYTHON, str(BASE / "ai_model.py"), "--train"], cwd=str(BASE),
+                  stdout=open(BASE / "logs" / "run_ai_model_train.log", "w", encoding="utf-8", errors="replace"),
+                  stderr=_sp.STDOUT, creationflags=_NO_WIN)
+        msg += f" · 개선 AI 재학습 시작({', '.join(ai_miss)} 포함 — 끝나기 전 신호는 AI 점수 없음)"
     if regen:
         p = _LC_REGEN["proc"]
         if p is None or p.poll() is not None:
@@ -3069,7 +3092,10 @@ def get_kiwoom_real():
     out["config"] = {"daily_loss_limit": A.get("daily_loss_limit"), "loss_action": A.get("loss_action"),
                      "loss_action_label": LC.LOSS_ACTIONS.get(A.get("loss_action"), ""),
                      "mirror": A.get("mirror"), "fallback": A.get("fallback"),
-                     "strategies": A["priority"], "slot_mode": A["slot_mode"], "cap": A.get("cap") or {}}   # [§96.6]
+                     "strategies": A["priority"], "slot_mode": A["slot_mode"], "cap": A.get("cap") or {},   # [§96.6]
+                     "score": A.get("strength_version", "v2"),                                           # [§96.7]
+                     "score_label": LC.REAL_SCORE_VERSIONS.get(A.get("strength_version", "v2"), ""),
+                     "min_strength": A.get("min_strength")}
     out["dryrun"] = _real_dryrun_rows()
     try:
         led = pd.read_csv(REAL_DIR / "kiwoom_positions.csv", dtype=str) if (REAL_DIR / "kiwoom_positions.csv").exists() else None
@@ -5718,7 +5744,9 @@ function lcRender(){
         <td><select style="${inp};max-width:330px" onchange="lcSet('${a}',${i},'engine',this.value)">${opts(s.engine)}</select>
           ${e.note?`<div style="color:#fbbf24;font-size:11px;max-width:340px">⚠ ${_lcEsc(e.note)}</div>`:''}
           ${(A.strength_version||'v2')==='v2'?((L.v2_models||{})[s.engine]?`<div style="color:#64748b;font-size:11px">v2 모델: ${_lcEsc(L.v2_models[s.engine].trained)} · 학습 ${L.v2_models[s.engine].n}건 · 지표 ${L.v2_models[s.engine].n_ic}개</div>`
-            :'<div style="color:#fbbf24;font-size:11px">v2 모델 없음 — 저장하면 학습(1~3분), 그 전엔 v1 점수로 대체</div>'):''}</td>
+            :'<div style="color:#fbbf24;font-size:11px">v2 모델 없음 — 저장하면 학습(1~3분), 그 전엔 v1 점수로 대체</div>'):''}
+          ${A.strength_version==='ai'?((L.ai_engines||[]).includes(s.engine)?`<div style="color:#64748b;font-size:11px">개선 AI 모델 포함(학습 ${_lcEsc(L.ai_trained||'')})</div>`
+            :'<div style="color:#fbbf24;font-size:11px">개선 AI 모델에 없음 — 저장하면 AI 재학습(수 분), 그 전엔 점수 없음(면제가 아니면 안 삼)</div>'):''}</td>
         <td>${A.slot_mode==='pool'?'<span style="color:#64748b;font-size:11px" title="칸 없음 모드 — 전략별 칸 수는 쓰지 않음">공유</span>':`<input type="number" min="1" max="10" step="1" value="${s.slots}" style="${inp};width:52px" onchange="lcSet('${a}',${i},'slots',this.value)">`}</td>
         <td style="text-align:center"><input type="checkbox" ${s.exempt?'checked':''} onchange="lcSet('${a}',${i},'exempt',this.checked)" title="체크하면 강도 기준과 상관없이 삼(후보가 많으면 강도 높은 순)"></td>
         <td>${s.exempt?'<span style="color:#64748b;font-size:11px">면제</span>':`<input type="number" min="0" max="10" step="0.1" placeholder="기본 ${A.min_strength}" value="${s.min_strength==null?'':s.min_strength}" style="${inp};width:70px${s.min_strength!=null?';border-color:#38bdf8':''}" title="이 전략만의 강도 기준 — 비우면 계좌 기본값(${A.min_strength})" onchange="lcSet('${a}',${i},'min_strength',this.value)">`}</td>
@@ -5739,17 +5767,18 @@ function lcRender(){
     return `<div style="flex:1;min-width:560px;background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:10px 12px">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
         <b style="font-size:14px">${_lcEsc(L.config.accounts[a].label)}</b>
-        <label style="font-size:13px;color:#cbd5e1" title="전략별 칸을 비운 전략에 쓰는 기본값">기본 강도 기준 ≥
+        <label style="font-size:13px;color:#cbd5e1" title="전략별 칸을 비운 전략에 쓰는 기본값">기본 ${A.strength_version==='ai'?'AI':'강도'} 기준 ≥
           <input type="number" min="0" max="10" step="0.1" value="${A.min_strength}" style="${inp};width:62px" onchange="lcSetAcc('${a}','min_strength',this.value)"></label>
-        <select style="${inp};font-size:12px" title="v1: 라이브 6전략 공통 가중치(종전) / v2: 전략마다 자기 과거 매매로 학습(방향이 해마다 유지된 지표만·시장 지표 제외, §62). v2 권장 기준 5.5" onchange="lcSetAcc('${a}','strength_version',this.value)">
+        <select style="${inp};font-size:12px" title="v1: 라이브 6전략 공통 가중치(종전) / v2: 전략마다 자기 과거 매매로 학습(방향이 해마다 유지된 지표만·시장 지표 제외, §62). v2 권장 기준 5.5${a==='kiwoom_real'?' / 개선 AI(본계좌만): 강도매매 탭 AI 포트와 같은 점수(0~10, 5 = 그 전략 평균) — 11-02 부터 쓰여 실전 기록이 아직 짧음':''}" onchange="lcSetAcc('${a}','strength_version',this.value)">
           <option value="v1"${(A.strength_version||'v2')==='v1'?' selected':''}>강도 v1(공통·예전 방식)</option>
-          <option value="v2"${(A.strength_version||'v2')==='v2'?' selected':''}>강도 v2(전략별)</option></select>
+          <option value="v2"${(A.strength_version||'v2')==='v2'?' selected':''}>강도 v2(전략별)</option>
+          ${a==='kiwoom_real'?`<option value="ai"${A.strength_version==='ai'?' selected':''}>개선 AI(AI매매)</option>`:''}</select>
         <select style="${inp};font-size:12px" title="전략별 칸: 전략마다 칸 수를 나눠 줌(위 순서대로 채움) / 칸 없음: 고른 전략 중 조건을 넘은 신호를 전체 10종목까지, 같은 날 후보는 전략 안 순위(그 전략 과거 강도 중 상위 몇 %) 높은 순 — 백테스트(§74)에선 신호가 많은 전략이 칸을 먼저 차지해 대체로 불리했음" onchange="lcSetAcc('${a}','slot_mode',this.value)">
           <option value="slots"${(A.slot_mode||'slots')==='slots'?' selected':''}>전략별 칸</option>
           <option value="pool"${A.slot_mode==='pool'?' selected':''}>칸 없음(전체 10종목)</option></select>
         ${A.slot_mode==='pool'?`<span style="font-size:12px;color:#38bdf8">칸 없음 · 전체 ${L.slots_total}종목</span>`:`<span style="font-size:12px;color:${tot===L.slots_total?'#10b981':'#ef4444'}">슬롯 합 ${tot}/${L.slots_total}</span>`}</div>
       <table style="font-size:12px;margin-top:6px;width:100%"><thead><tr><th>순서</th><th>전략</th><th>슬롯</th>
-        <th title="강도 기준과 상관없이 삼">강도 면제</th><th title="전략마다 다른 강도 기준 — 비우면 위의 계좌 기본값">강도 기준</th><th title="${_lcEsc(stopSem)}">손절 %</th><th title="${_lcEsc(takeSem)}">익절 %</th><th title="신호일에 상한가로 마감(등락률 ≥ +29.5%)한 종목의 이 전략 신호는 사지 않음 — 전략마다 효과가 갈려(§91 검증 — 좋아짐: 52주 신고가·외국인 계열·MACD / 나빠짐: 500일 신고가·신용·스토캐스틱) 전략별로 고름. 토요일 탐색이 해마다 검증해 권장/유지를 알려 줌(§91)">상한가 제외</th>${a==='kiwoom_real'?'<th title="전략 총액 상한(원) — 비우면 주문가능금액을 남은 빈 칸으로 균등, 넣으면 (상한 − 이미 산 금액) ÷ 이 전략 남은 빈 칸">금액 상한(원)</th>':''}<th>보유</th><th></th></tr></thead>
+        <th title="기준과 상관없이 삼">${A.strength_version==='ai'?'AI':'강도'} 면제</th><th title="전략마다 다른 기준 — 비우면 위의 계좌 기본값">${A.strength_version==='ai'?'AI':'강도'} 기준</th><th title="${_lcEsc(stopSem)}">손절 %</th><th title="${_lcEsc(takeSem)}">익절 %</th><th title="신호일에 상한가로 마감(등락률 ≥ +29.5%)한 종목의 이 전략 신호는 사지 않음 — 전략마다 효과가 갈려(§91 검증 — 좋아짐: 52주 신고가·외국인 계열·MACD / 나빠짐: 500일 신고가·신용·스토캐스틱) 전략별로 고름. 토요일 탐색이 해마다 검증해 권장/유지를 알려 줌(§91)">상한가 제외</th>${a==='kiwoom_real'?'<th title="전략 총액 상한(원) — 비우면 주문가능금액을 남은 빈 칸으로 균등, 넣으면 (상한 − 이미 산 금액) ÷ 이 전략 남은 빈 칸">금액 상한(원)</th>':''}<th>보유</th><th></th></tr></thead>
         <tbody>${rows}</tbody></table>
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
         ${A.strategies.length<L.max_strategies?`<button class="runbtn" onclick="lcAdd('${a}')">+ 전략 추가</button>`:`<span style="font-size:11px;color:#64748b">전략은 최대 ${L.max_strategies}개</span>`}
@@ -5866,7 +5895,7 @@ function realRender(){
       <button class="runbtn" onclick="realLoad()" title="다시 불러오기">↺</button></div>
     <div style="margin-top:8px;font-size:12px">${conn}</div>
     <div style="margin-top:6px;font-size:12px;color:#cbd5e1">일일 손실 한도: <b>${lim}</b> · ${lc}</div>
-    <div style="margin-top:4px;font-size:12px;color:#cbd5e1">전략 총액 상한: <b>${capTxt}</b></div>
+    <div style="margin-top:4px;font-size:12px;color:#cbd5e1">매매 방식: <b>${C.score==='ai'?'🤖 AI매매':'💪 강도매매'}</b> (${_lcEsc(C.score_label||'')} · 기본 기준 ${C.min_strength??'-'}) · 전략 총액 상한: <b>${capTxt}</b></div>
     ${halt}${ks}${wMir}${wFb}${wRun}
     <details style="margin-top:8px"><summary style="cursor:pointer;font-size:12px;color:#94a3b8">모드 변경 기록 · 동작 방식</summary>
       <div style="font-size:12px;color:#cbd5e1;margin-top:4px;line-height:1.7">${hist||'<span style="color:#64748b">아직 없음</span>'}
@@ -5918,6 +5947,7 @@ async function realSetMode(mode){
     const lim=C.daily_loss_limit?('-'+fmt(C.daily_loss_limit)+'원'):'없음(설정 권장)';
     if(!confirm('[1/2] 🔴 키움 본계좌 실주문을 켭니다.\\n\\n다음 매매 시각(평일 09:00 매수 · 15:21 매도)부터 실제 돈으로 주문합니다.'
       +'\\n· 전략: '+(C.strategies||[]).join(', ')+(C.mirror?' (본계좌 설정 저장 전 — 안C 설정을 따름)':'')
+      +'\\n· 매매 방식: '+(C.score==='ai'?'AI매매':'강도매매')+' ('+(C.score_label||'')+', 기본 기준 '+(C.min_strength??'-')+')'
       +'\\n· 주문가능금액(100% 현금)을 빈 칸 수로 나눠 매수(현재가 +2% 지정가)'
       +(Object.keys(C.cap||{}).length?'\\n· 전략 총액 상한: '+Object.entries(C.cap).map(([k,v])=>k+' '+fmt(v)+'원').join(', ')+' (나머지 전략은 균등)':'')
       +'\\n· 일일 손실 한도: '+lim

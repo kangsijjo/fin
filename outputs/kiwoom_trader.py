@@ -272,7 +272,10 @@ def _pool_order(cands, strength):
         st = str(sig.get("strategy", ""))
         sc = strength.get((str(sig.get("code", "")).zfill(6), st))
         try:
-            p = _SM.rank_pct(_LCm.engine_name(st), st, sc, STRENGTH_VERSION)
+            if STRENGTH_VERSION == "ai":     # [§96.7] 개선 AI 점수는 이미 '그 전략 안 순위'(5 = 평균) — 그대로 ×10
+                p = None if sc is None else float(sc) * 10
+            else:
+                p = _SM.rank_pct(_LCm.engine_name(st), st, sc, STRENGTH_VERSION)
         except Exception:
             p = None if sc is None else float(sc) * 10
         return (p is None, -(p or 0.0))
@@ -282,14 +285,15 @@ def _pool_order(cands, strength):
 
 def _strength_gate(strat, sc):
     """주문 직전 강도 게이트 → (통과여부, 사유). 면제 전략은 강도와 무관하게 통과(kis_trader 와 동일 규약)."""
+    w = "AI 점수" if STRENGTH_VERSION == "ai" else "강도"     # [§96.7] 본계좌가 개선 AI 를 고른 경우 표기
     if strat in STRENGTH_EXEMPT:
-        return True, (f"강도 면제({sc:.2f})" if sc is not None else "강도 면제(무기록)")
+        return True, (f"{w} 면제({sc:.2f})" if sc is not None else f"{w} 면제(무기록)")
     if sc is None:
-        return False, "강도 확인 불가(재계산 실패) → 차단"
+        return False, f"{w} 확인 불가(재계산 실패) → 차단"
     th = _th(strat)
     if sc < th:
-        return False, f"강도 {sc:.2f} < {th:g}"
-    return True, f"강도 {sc:.2f} ≥ {th:g}"
+        return False, f"{w} {sc:.2f} < {th:g}"
+    return True, f"{w} {sc:.2f} ≥ {th:g}"
 
 
 # ------------------------------------------------------------
@@ -860,6 +864,9 @@ def _strength_map(sigs):
         if STRENGTH_VERSION == "v2" and "score_v2" in df.columns:
             _v2 = pd.to_numeric(df["score_v2"], errors="coerce")
             df["score_ic"] = _v2.where(_v2.notna(), df["score_ic"])
+        elif STRENGTH_VERSION == "ai":
+            # [§96.7] 본계좌 '개선 AI' — score_ai 만(척도가 달라 강도로 대신하지 않음). AI 모델에 없는 전략은 점수 없음 → 면제가 아니면 안 삼
+            df["score_ic"] = pd.to_numeric(df["score_ai"], errors="coerce") if "score_ai" in df.columns else float("nan")
         out = {}
         for _, r in df.iterrows():
             if pd.notna(r["score_ic"]):

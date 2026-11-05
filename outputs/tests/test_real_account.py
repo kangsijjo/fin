@@ -272,6 +272,44 @@ def test_live_config_strategy_cap(tmp_path, monkeypatch):
     assert LC.account("kiwoom")["cap"] == {}
 
 
+def test_real_ai_scoring_uses_score_ai_only(real_kt, monkeypatch):
+    """§96.7 본계좌 'AI매매' — 후보 점수·기준이 개선 AI 점수(score_ai)로. 강도 점수로 대신하지 않는다(척도가 다름)."""
+    kt, RA, tmp = real_kt
+    log = tmp / "db" / "signal_strength_log.csv"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([
+        {"signal_date": SIG_DATE, "account": "real_kiwoom", "strategy": "rsi_vol", "code": "111111",
+         "score_ic": 9.0, "score_v2": 9.0, "score_ai": 6.2},
+        {"signal_date": SIG_DATE, "account": "real_kiwoom", "strategy": "rsi_vol", "code": "222222",
+         "score_ic": 9.0, "score_v2": 9.0, "score_ai": None},                      # AI 모델에 없는 전략 등
+        {"signal_date": SIG_DATE, "account": "kiwoom_안C", "strategy": "rsi_vol", "code": "333333",
+         "score_ic": 9.0, "score_v2": 9.0, "score_ai": 9.0},                       # 모의 기록은 안 봄
+    ]).to_csv(log, index=False, encoding="utf-8-sig")
+    sigs = [{"signal_date": SIG_DATE, "code": c, "strategy": "rsi_vol"} for c in ("111111", "222222", "333333")]
+    monkeypatch.setattr(kt, "STRENGTH_VERSION", "ai")
+    assert kt._strength_map(sigs) == {("111111", "rsi_vol"): 6.2}
+    monkeypatch.setattr(kt, "STRENGTH_TH", {"rsi_vol": 5.5})
+    ok, why = kt._strength_gate("rsi_vol", 6.2)
+    assert ok and "AI 점수" in why
+    assert kt._strength_gate("rsi_vol", None)[0] is False, "AI 점수가 없으면(면제 아니면) 안 삼"
+    monkeypatch.setattr(kt, "STRENGTH_VERSION", "v2")
+    assert kt._strength_map(sigs)[("222222", "rsi_vol")] == 9.0, "강도 방식이면 종전 그대로"
+
+
+def test_live_config_ai_score_only_for_real(tmp_path, monkeypatch):
+    monkeypatch.setenv("LIVE_CONFIG_PATH", str(tmp_path / "lc.json"))
+    import live_config as LC
+    c = LC.load()
+    c["accounts"]["kiwoom_real"]["strength_version"] = "ai"
+    c["accounts"]["kiwoom_real"].pop("_mirror")
+    assert not LC.validate(c)
+    cfg, ch = LC.save(c)
+    assert LC.account("kiwoom_real")["strength_version"] == "ai" and any("개선 AI" in x for x in ch)
+    bad = LC.load()
+    bad["accounts"]["kiwoom"]["strength_version"] = "ai"
+    assert LC.validate(bad), "모의계좌는 v1/v2 만(가상매매 AI 포트와 비교 중)"
+
+
 def test_real_cash_basis_and_uncl_blocks_buy(real_kt, captured_notifications):
     kt, RA, tmp = real_kt
     kt.MODE, kt.DRY = "live", False

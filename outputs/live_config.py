@@ -39,6 +39,8 @@ REAL_MIRROR = {"kiwoom_real": "kiwoom"}            # 본계좌 설정을 저장�
 LOSS_ACTIONS = {"halt": "내가 다시 켤 때까지 신규 매수 정지", "day": "그날만 신규 매수 정지(다음 거래일 자동 재개)"}
 LOSS_LIMIT_RANGE = (10_000, 10_000_000_000)       # 일일 손실 한도(원) 허용 범위 — 비우면 끔
 CAP_RANGE = (100_000, 10_000_000_000)             # [§96.6] 본계좌 전략별 총액 상한(원) — 비우면 '주문가능금액 ÷ 남은 빈 칸'
+# [§96.7] 본계좌는 점수 방식에 '개선 AI'도 고를 수 있다(강도매매 탭 AI 포트와 같은 score_ai). 모의계좌는 v1/v2 그대로.
+REAL_SCORE_VERSIONS = {"v2": "강도 v2(전략별)", "v1": "강도 v1(공통)", "ai": "개선 AI(0~10, 5 = 그 전략 평균)"}
 ALIAS = {"star_high_52w_20_filt": "high_52w_filt", "star_high_500d_20": "high_500d_filt"}   # engine → live
 SLOT_MODES = {"slots": "전략별 칸", "pool": "칸 없음(전체 10종목, 전략 안 순위 높은 순)"}
 STRENGTH_VERSIONS = {"v1": "공통(라이브 6전략 풀 학습, 예전 방식)", "v2": "전략별(그 전략 자신의 과거 매매로 학습, §62)"}
@@ -126,8 +128,8 @@ def validate(cfg, engine_names=None):
         ms = A.get("min_strength")
         if not isinstance(ms, (int, float)) or not 0 <= ms <= 10:
             errs.append(f"{lab}: 강도 기준은 0~10")
-        if A.get("strength_version", "v2") not in STRENGTH_VERSIONS:
-            errs.append(f"{lab}: 강도 방식은 v1/v2")
+        if A.get("strength_version", "v2") not in (REAL_SCORE_VERSIONS if a in REAL_ACCOUNTS else STRENGTH_VERSIONS):
+            errs.append(f"{lab}: 강도 방식은 v1/v2" + ("/ai" if a in REAL_ACCOUNTS else ""))
         if A.get("slot_mode", "slots") not in SLOT_MODES:
             errs.append(f"{lab}: 칸 방식은 slots/pool")
         S = A.get("strategies")
@@ -291,12 +293,13 @@ def diff(old, new):
             if o.get("loss_action", "halt") != n.get("loss_action", "halt"):
                 out.append(f"{lab} 손실 한도 도달 시: {LOSS_ACTIONS[n.get('loss_action', 'halt')]}")
         if o["min_strength"] != n["min_strength"]:
-            out.append(f"{lab} 강도 기준 {o['min_strength']:g} → {n['min_strength']:g}")
+            out.append(f"{lab} {'AI' if n.get('strength_version') == 'ai' else '강도'} 기준 "
+                       f"{o['min_strength']:g} → {n['min_strength']:g}")
         if o.get("slot_mode", "slots") != n.get("slot_mode", "slots"):
             out.append(f"{lab} 칸 방식 {SLOT_MODES[o.get('slot_mode', 'slots')]} → {SLOT_MODES[n.get('slot_mode', 'slots')]}")
         if o.get("strength_version", "v2") != n.get("strength_version", "v2"):
             out.append(f"{lab} 강도 방식 {o.get('strength_version', 'v2')} → {n.get('strength_version', 'v2')}"
-                       f" ({STRENGTH_VERSIONS.get(n.get('strength_version', 'v2'), '')})")
+                       f" ({(REAL_SCORE_VERSIONS if a in REAL_ACCOUNTS else STRENGTH_VERSIONS).get(n.get('strength_version', 'v2'), '')})")
         om = {s["engine"]: s for s in o["strategies"]}
         nm = {s["engine"]: s for s in n["strategies"]}
         for e in nm:
