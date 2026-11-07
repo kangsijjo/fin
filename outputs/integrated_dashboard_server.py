@@ -1776,6 +1776,10 @@ def get_ai_model_info():
         from factor_scorer import FEATURE_META
     except Exception:
         FEATURE_META = {}
+    try:                                             # [§97] 가격·거래 피처 한글 이름
+        from ai_features import LABELS as _PF_LABELS
+    except Exception:
+        _PF_LABELS = {}
     imp = sorted(((k, v) for k, v in (m.get("importance") or {}).items() if not k.startswith("e_")), key=lambda kv: -kv[1])
     tot = sum(v for _, v in imp) or 1.0
     age = None
@@ -1786,7 +1790,9 @@ def get_ai_model_info():
     return {"trained": m.get("trained"), "age_days": age, "data_max": m.get("data_max"), "n_total": m.get("n_total"),
             "engines": m.get("engines") or [], "n": m.get("n") or {}, "validation": m.get("validation"),
             "since": getattr(AIM, "SINCE", None),
-            "importance": [{"feat": k, "label": (FEATURE_META.get(k) or (k,))[0], "share": round(v / tot * 100, 1)} for k, v in imp]}
+            "ensemble": m.get("ensemble"),
+            "importance": [{"feat": k, "label": (FEATURE_META.get(k) or (_PF_LABELS.get(k, k),))[0],
+                            "share": round(v / tot * 100, 1)} for k, v in imp]}
 
 
 def get_ai_status():

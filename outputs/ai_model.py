@@ -16,6 +16,13 @@ ai_model.py — 개선 AI(설명서 §84 연구 → §85 적용): '같은 전략
 쓰는 곳: strength_logger(score_ai 기록) → AI 가상매매 순위(SINCE 신호일부터) · 기간 백테스트 [강도 AI].
 모의계좌 매매에는 아직 안 씀(사용자 결정: 11월 가상매매로 v2 와 비교 후 12월 전 결정).
 
+[§97 2026-11-05] 검증된 방법 차용(샌드박스 워크포워드 2021~2026, 59전략 — 같은 날 상위 2개 효과 %p)
+  ⑦ 가격·거래 피처 20개 추가(ai_features — Gu·Kelly·Xiu 2020: 모멘텀·유동성·변동성·규모 / Qlib Alpha158 일부).
+  ⑧ 모델 2종 평균: 회귀(같은 달 순위, ②) + 분류(이익 확률 net_pct > 0). 각자 그 전략 과거 분위로 바꿔 평균 →
+     다시 그 전략 과거 분위로 0~10(5 = 보통 그대로). 피처만 넣으면 개선이 2021~22년에 몰려 최근 3년은 현행과 같았고,
+     둘을 평균하면 6년 모두 현행보다 좋았다(전체 1.10 → 1.42, 2024~26 1.26 → 1.55).
+  시험했지만 뺀 것: 순위학습(LTR pairwise) 1.01 · 표본 고유성 가중 0.95 · 분류만(메타라벨링) 1.12 · 수급 규모 정규화(효과 없음).
+
 저장: db/ai_model/model.json(XGBoost) · meta.json(피처·전략·분위·검증) · registry.csv(학습 기록) · wf/{Y}.*(워크포워드 캐시)
 사용: python ai_model.py --train [--no-validate]     /  python ai_model.py   (상태)
 """
@@ -34,13 +41,16 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
+import ai_features as AF  # noqa: E402  [§97] 가격·거래 피처(학습·라이브 같은 함수)
+
 MODEL_DIR = os.path.join(HERE, "db", "ai_model")
 SINCE = "20261102"          # AI 가상매매가 이 신호일부터 score_ai 로 순위·기준(그 전은 옛 ai_prob 기록 그대로)
-VERSION = 2                 # 2: 뉴스 감성 제외(라이브 결측) — 바뀌면 워크포워드 캐시도 새로 학습
+VERSION = 3                 # 2: 뉴스 감성 제외(라이브 결측) / 3: [§97] 가격 피처 + 회귀·분류 평균 — 바뀌면 워크포워드 캐시도 새로 학습
 PARAMS = dict(n_estimators=400, learning_rate=0.03, max_depth=3, subsample=0.7, colsample_bytree=0.7,
               min_child_weight=50, reg_lambda=10.0, tree_method="hist", random_state=42)
-SEEDS = (42, 43, 44, 45, 46)  # 무작위 표본추출(subsample) 운을 줄이려고 씨앗 5개 모델 평균 — 씨앗 하나면 상위 2개 효과가
-                              # 0.8~1.1%p 로 흔들렸다(같은 표본, 행 순서만 달라도). 평균하면 안정.
+SEEDS = (42, 43, 44)        # 무작위 표본추출(subsample) 운을 줄이려고 씨앗 여러 개 모델 평균 — 씨앗 하나면 상위 2개 효과가
+                            # 0.8~1.1%p 로 흔들렸다. [§97] 회귀·분류 각 3개(=모델 6개, 예전 회귀 5개보다 학습 1.2배) —
+                            # 검증은 각 2개로 했으니 이보다 더 평균된 상태.
 MIN_ENGINE_N = 300          # 학습 매매가 이보다 적은 전략은 빼고 학습(그 전략 점수 = None → v2/v1 로 대체)
 MIN_TOTAL_N = 2000          # 전체가 이보다 적으면 그 해(워크포워드)는 채점 안 함
 MAX_ENGINE_N = 20000        # [§86] 전략당 학습 표본 상한(무작위 고정 추출) — 백테스트한 전략 전부(59개·230만 건)를 배워도
@@ -64,8 +74,9 @@ EXCLUDE = ("news_sent_7d",)
 
 
 def feature_list():
+    """강도 v2 피처(뉴스 감성 제외) + [§97] 가격·거래 피처 20개."""
     from strength_model import _feats
-    return [f for f in _feats()[0] if f not in EXCLUDE]
+    return [f for f in _feats()[0] if f not in EXCLUDE] + list(AF.PRICE_FEATS)
 
 
 # ── 학습표 ───────────────────────────────────────────────────────────────────
@@ -76,8 +87,25 @@ def available_engines():
     return sorted(os.path.basename(p)[:-len("_train.pkl")] for p in glob.glob(os.path.join(d, "*_train.pkl")))
 
 
-def load_tables(engines=None, extra=None):
-    """전략별 학습표 → 하나로(engine 열). extra = {엔진: DataFrame} (백테스트가 지금 만든 표, 파일보다 우선)."""
+def _load_daily():
+    from strategies.daily_loader import load_macro_daily
+    return load_macro_daily()
+
+
+def load_tables(engines=None, extra=None, daily=None, pan=None, price=True):
+    """전략별 학습표 → 하나로(engine 열). extra = {엔진: DataFrame} (백테스트가 지금 만든 표, 파일보다 우선).
+    [§97] price=True 면 가격 피처 20개를 (code, 신호일)로 붙인다 — pan = 전체 일봉으로 미리 계산한 ai_features.panel,
+    daily = 잘리지 않은 전체 일봉(둘 다 없으면 여기서 읽음 — 250거래일 창이라 잘린 일봉을 주면 앞쪽 해 값이 비거나 달라진다).
+    실패하면 예외(가격 피처 없이 학습하면 라이브와 어긋남)."""
+    T = _load_tables(engines, extra)
+    if price and len(T):
+        if pan is None and daily is None:
+            daily = _load_daily()
+        AF.attach(T, daily, pan=pan)
+    return T
+
+
+def _load_tables(engines=None, extra=None):
     import strength_model as SM
     parts, extra = [], dict(extra or {})
     for e in sorted(set(engines or available_engines()) | set(extra)):
@@ -106,12 +134,12 @@ def load_tables(engines=None, extra=None):
 
 
 def _design(D, feats, engines):
+    """[§97] float32 — XGBoost 가 안에서 어차피 float32 로 바꾸므로 예측은 같고, 메모리만 절반(가격 피처로 열이 늘어서)."""
     X = pd.DataFrame({f: pd.to_numeric(D[f], errors="coerce") if f in D.columns else np.nan for f in feats},
-                     index=D.index).astype(float)
+                     index=D.index).astype(np.float32)
     eng = D["engine"].to_numpy() if "engine" in D.columns else np.array([None] * len(D))
-    for e in engines:
-        X[f"e_{e}"] = (eng == e).astype(float)
-    return X
+    dm = pd.DataFrame({f"e_{e}": (eng == e).astype(np.float32) for e in engines}, index=D.index)
+    return pd.concat([X, dm], axis=1)
 
 
 def _weights(D):
@@ -133,21 +161,43 @@ def _cap(T):
 
 
 class Ensemble:
-    """씨앗만 다른 XGBRegressor 여러 개의 평균."""
+    """씨앗만 다른 XGBRegressor 여러 개의 평균 + [§97] XGBClassifier(이익 확률) 여러 개의 평균(없으면 회귀만 — 옛 모델)."""
 
-    def __init__(self, models):
+    def __init__(self, models, cls=None):
         self.models = list(models)
+        self.cls = list(cls or [])
 
     def predict(self, X):
+        """회귀(같은 달 순위) 예측 평균."""
         return np.mean([m.predict(X) for m in self.models], axis=0)
+
+    def predict_win(self, X):
+        """분류(net_pct > 0) 확률 평균 — 분류 모델이 없으면 None."""
+        if not self.cls:
+            return None
+        return np.mean([m.predict_proba(X)[:, 1] for m in self.cls], axis=0)
 
     @property
     def feature_importances_(self):
-        return np.mean([m.feature_importances_ for m in self.models], axis=0)
+        return np.mean([m.feature_importances_ for m in self.models + self.cls], axis=0)
+
+
+def _qs(v):
+    """예측값 → 분위표(QN 점)."""
+    return np.quantile(v, np.linspace(0, 1, QN)).round(6).tolist()
+
+
+def _avgq(raw, win, ref, ref_c):
+    """[§97] 회귀·분류 예측을 각자 그 전략 과거 분위(0~1)로 바꿔 평균."""
+    u = np.linspace(0, 1, len(ref))
+    uc = np.linspace(0, 1, len(ref_c))
+    return (np.interp(np.asarray(raw, float), np.asarray(ref, float), u)
+            + np.interp(np.asarray(win, float), np.asarray(ref_c, float), uc)) / 2
 
 
 def fit(T, feats=None):
-    """학습표 → (Ensemble, meta) 또는 (None, 이유). meta: feats·engines·n·ref(전략별 예측 분위)·importance."""
+    """학습표 → (Ensemble, meta) 또는 (None, 이유). meta: feats·engines·n·ref(전략별 회귀 예측 분위)·
+    [§97] ref_c(분류 확률 분위)·ref_a(두 분위 평균의 분위 → 최종 0~10)·importance."""
     import xgboost as xgb
     feats = feats or feature_list()
     if T is None or len(T) == 0:
@@ -160,22 +210,34 @@ def fit(T, feats=None):
     Tt = _cap(T)
     Xt = _design(Tt, feats, engines)
     y, w = Tt["y_rank"].to_numpy(float), _weights(Tt)
-    ms = []
+    yc = (Tt["net_pct"].to_numpy(float) > 0).astype(int)
+    ms, cs = [], []
     for sd in SEEDS:
         r = xgb.XGBRegressor(**dict(PARAMS, random_state=sd))
         r.fit(Xt, y, sample_weight=w)
         ms.append(r)
-    m = Ensemble(ms)
-    X = _design(T, feats, engines)
-    pred = m.predict(X)
-    ref = {}
-    for e in engines:
-        v = pred[(T["engine"] == e).to_numpy()]
-        ref[e] = np.quantile(v, np.linspace(0, 1, QN)).round(6).tolist()
+    if 0 < yc.sum() < len(yc):                  # 이익·손실이 다 있어야 분류를 배운다(실데이터는 늘 그렇다)
+        for sd in SEEDS:
+            c = xgb.XGBClassifier(**dict(PARAMS, random_state=sd))
+            c.fit(Xt, yc, sample_weight=w)
+            cs.append(c)
+    m = Ensemble(ms, cs)
+    eng = T["engine"].to_numpy()
+    ref, ref_c, ref_a = {}, {}, {}
+    for e in engines:                           # 전략마다 따로 예측(전체 230만 건 설계행렬을 한 번에 만들지 않게 — 메모리)
+        Xe = _design(T[eng == e], feats, engines)
+        pe, we = m.predict(Xe), m.predict_win(Xe)
+        ref[e] = _qs(pe)
+        if we is not None:
+            ref_c[e] = _qs(we)
+            ref_a[e] = _qs(_avgq(pe, we, ref[e], ref_c[e]))
     imp = {c: round(float(v), 4) for c, v in zip(Xt.columns, m.feature_importances_)}
     meta = {"version": VERSION, "feats": feats, "engines": engines, "n": {e: int(cnt[e]) for e in engines},
             "n_total": int(len(T)), "ref": ref, "importance": imp, "params": PARAMS, "seeds": list(SEEDS),
-            "data_max": str(T["entry_date"].max())}
+            "data_max": str(T["entry_date"].max()), "price_version": AF.VERSION,
+            "ensemble": "회귀+분류" if cs else "회귀"}
+    if cs:
+        meta["ref_c"], meta["ref_a"] = ref_c, ref_a
     return m, meta
 
 
@@ -186,7 +248,8 @@ def to_score(raw, ref):
 
 
 def score_frame(D, model, meta, engine=None):
-    """D(피처 표, engine 열 또는 engine 인자) → 0~10 점수 배열. 모델에 없는 전략 = NaN."""
+    """D(피처 표, engine 열 또는 engine 인자) → 0~10 점수 배열. 모델에 없는 전략 = NaN.
+    [§97] 분류 모델·분위표(ref_c·ref_a)가 있으면 두 모델 평균, 없으면(옛 모델) 회귀만 — 척도는 둘 다 0~10·5 = 보통."""
     D = D.copy()
     if engine is not None:
         D["engine"] = engine
@@ -195,28 +258,35 @@ def score_frame(D, model, meta, engine=None):
         return out
     X = _design(D, meta["feats"], meta["engines"])
     raw = model.predict(X)
+    ra, rc = meta.get("ref_a") or {}, meta.get("ref_c") or {}
+    win = model.predict_win(X) if ra else None
     eng = D["engine"].to_numpy()
     for e in set(eng):
         if e in meta["ref"]:
             mk = eng == e
-            out[mk] = to_score(raw[mk], meta["ref"][e])
+            if win is not None and e in ra and e in rc:
+                out[mk] = to_score(_avgq(raw[mk], win[mk], meta["ref"][e], rc[e]), ra[e])
+            else:
+                out[mk] = to_score(raw[mk], meta["ref"][e])
     return out
 
 
 # ── 저장·불러오기 ─────────────────────────────────────────────────────────────
 
-def _part(model_name, i):
-    return model_name.replace(".json", f".s{i}.json")
+def _part(model_name, i, kind="s"):
+    return model_name.replace(".json", f".{kind}{i}.json")
 
 
 def _save(model, meta, model_name="model.json", meta_name="meta.json"):
-    """씨앗 모델들(model.s0.json …) → 메타(meta.json, 맨 마지막 — 메타가 있으면 모델이 다 써진 것)."""
+    """씨앗 모델들(회귀 model.s0.json … · [§97] 분류 model.c0.json …) → 메타(meta.json, 맨 마지막 — 메타가 있으면 모델이 다 써진 것)."""
     os.makedirs(model_dir(), exist_ok=True)
-    meta = dict(meta, parts=[_part(model_name, i) for i in range(len(model.models))])
-    for i, m in enumerate(model.models):
-        tmp = _p(_part(model_name, i).replace(".json", ".tmp.json"))
-        m.save_model(tmp)
-        os.replace(tmp, _p(_part(model_name, i)))
+    meta = dict(meta, parts=[_part(model_name, i) for i in range(len(model.models))],
+                parts_cls=[_part(model_name, i, "c") for i in range(len(model.cls))])
+    for kind, ms in (("s", model.models), ("c", model.cls)):
+        for i, m in enumerate(ms):
+            tmp = _p(_part(model_name, i, kind).replace(".json", ".tmp.json"))
+            m.save_model(tmp)
+            os.replace(tmp, _p(_part(model_name, i, kind)))
     tmpm = _p(meta_name + ".tmp")
     with open(tmpm, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False)
@@ -229,14 +299,18 @@ def _load(model_name="model.json", meta_name="meta.json"):
     if not os.path.exists(tp):
         return None, None
     meta = json.load(open(tp, encoding="utf-8"))
-    ms = []
+    ms, cs = [], []
     for nm in meta.get("parts") or []:
         m = xgb.XGBRegressor()
         m.load_model(_p(nm))
         ms.append(m)
+    for nm in meta.get("parts_cls") or []:           # [§97] 옛 모델(메타에 없음)은 회귀만
+        c = xgb.XGBClassifier()
+        c.load_model(_p(nm))
+        cs.append(c)
     if not ms:
         return None, None
-    return Ensemble(ms), meta
+    return Ensemble(ms, cs), meta
 
 
 _CACHE = {}
@@ -285,7 +359,7 @@ def score(engine, feats):
 
 def _signature(T):
     s = T.groupby("engine").agg(n=("net_pct", "size"), mx=("exit_date", "max")).reset_index()
-    txt = "|".join(f"{r.engine}:{r.n}:{r.mx}" for r in s.itertuples()) + f"|v{VERSION}|{json.dumps(PARAMS, sort_keys=True)}|{SEEDS}|{MAX_ENGINE_N}|{','.join(feature_list())}"
+    txt = "|".join(f"{r.engine}:{r.n}:{r.mx}" for r in s.itertuples()) + f"|v{VERSION}|{json.dumps(PARAMS, sort_keys=True)}|{SEEDS}|{MAX_ENGINE_N}|{','.join(feature_list())}|pf{AF.VERSION}"
     return hashlib.sha1(txt.encode("utf-8")).hexdigest()[:16]
 
 
@@ -313,7 +387,11 @@ def wf_model(T, Y, sig=None, log=None):
 
 
 def walk_forward(T, X, years, engine, log=print):
-    """기간 백테스트용: X(그 전략 기간 안 매매 피처)의 해 Y 행은 Y 이전 매매로만 학습한 풀링 모델로 채점 → (점수, 해별 정보)."""
+    """기간 백테스트용: X(그 전략 기간 안 매매 피처)의 해 Y 행은 Y 이전 매매로만 학습한 풀링 모델로 채점 → (점수, 해별 정보).
+    [§97] X 에 가격 피처가 있어야 한다(ai_features.attach) — 없으면 조용히 결측으로 채점하지 않고 멈춘다."""
+    miss = [f for f in AF.PRICE_FEATS if f not in X.columns]
+    if miss and len(X):
+        raise ValueError(f"X 에 가격 피처 없음({len(miss)}개) — ai_features.attach(X, 일봉) 먼저")
     out = np.full(len(X), np.nan)
     info = {}
     yrs = np.asarray(years)
@@ -459,14 +537,13 @@ def configured_engines():
     return sorted(out)
 
 
-def build_missing(engines, log=print):
-    """설정 전략 중 학습표가 없는 것만 만든다(엔진 백테스트 + 피처, 전략당 1~3분)."""
+def build_missing(engines, log=print, daily=None):
+    """설정 전략 중 학습표가 없는 것만 만든다(엔진 백테스트 + 피처, 전략당 1~3분). daily = 이미 읽은 전체 일봉(없으면 읽음)."""
     import strength_model as SM
     miss = [e for e in engines if not os.path.exists(SM.train_path(e))]
     if not miss:
         return []
-    from strategies.daily_loader import load_macro_daily
-    df = load_macro_daily()
+    df = daily if daily is not None else _load_daily()
     df["date"] = df["date"].astype(str)
     df["code"] = df["code"].astype(str).str.zfill(6)
     done = []
@@ -530,8 +607,16 @@ def learn(names, log=print):
 
 
 def _train(do_validate=True, log=print, extra_engines=None):
-    built = build_missing(sorted(set(configured_engines()) | set(extra_engines or [])), log=log)
-    T = load_tables()
+    try:                                        # [§97] 학습표 만들기·가격 피처가 같은 일봉을 한 번만 읽는다
+        daily = _load_daily()
+    except Exception as e:
+        return {"ok": False, "why": f"일봉 읽기 실패: {type(e).__name__}: {str(e)[:120]}"}
+    built = build_missing(sorted(set(configured_engines()) | set(extra_engines or [])), log=log, daily=daily)
+    try:
+        T = load_tables(daily=daily)
+    except Exception as e:                      # 가격 피처 없이 학습하면 라이브(피처 있음)와 어긋난다 → 학습 안 함(지금 모델 유지)
+        return {"ok": False, "why": f"학습표·가격 피처 준비 실패: {type(e).__name__}: {str(e)[:120]}"}
+    del daily
     m, meta = fit(T)
     if m is None:
         return {"ok": False, "why": meta}

@@ -626,6 +626,17 @@ def run_job(job, start, end, names, luck, strength=None, stop=None, take=None, e
                 state["warnings"].append({"level": "warn", "strategy": n,
                                           "msg": f"강도 v2 학습 표본을 만들지 못함({type(e).__name__}) — 이 전략 강도 줄 없음"})
         gc.collect()
+    pf_pan = None
+    if strength and strength_version == "ai":
+        # [§97] 개선 AI 가격 피처 — 자르기 전 전체 일봉으로 한 번만 계산(학습표 T_all 과 기간 매매 X 가 같은 값을 쓴다)
+        state["current"] = "개선 AI 가격 피처 계산"
+        _write(job, state)
+        try:
+            import ai_features as AF
+            pf_pan = AF.panel(df)
+        except Exception as e:
+            state["warnings"].append({"level": "error", "strategy": "",
+                                      "msg": f"개선 AI 가격 피처 계산 실패 — {type(e).__name__}: {str(e)[:120]}"})
     df = df[(df["date"] >= cal[max(0, i0 - need - 5)]) &
             (df["date"] <= cal[min(len(cal) - 1, i1 + 45)])].reset_index(drop=True)
     m = df[df["date"].isin(win)].groupby("date")["change_pct"].mean().reindex(win).fillna(0)
@@ -696,8 +707,12 @@ def run_job(job, start, end, names, luck, strength=None, stop=None, take=None, e
                 import ai_model as AIM
                 state["current"] = "개선 AI 해마다 학습(처음엔 수 분 — 같은 표본이면 저장분 사용)"
                 _write(job, state)
-                X = SB.trade_features(df, allt, log=print)
-                T_all = AIM.load_tables(extra={n: t for n, t in train_tables.items() if t is not None and len(t)})
+                if pf_pan is None:
+                    raise RuntimeError("가격 피처 없음(위 경고 참고)")
+                import ai_features as AF
+                X = AF.attach(SB.trade_features(df, allt, log=print), pan=pf_pan)
+                T_all = AIM.load_tables(extra={n: t for n, t in train_tables.items() if t is not None and len(t)},
+                                        pan=pf_pan)
                 scores, info, pos = np.full(len(allt), np.nan), {}, 0
                 for n in kept:
                     k = len(kept[n])
@@ -707,6 +722,7 @@ def run_job(job, start, end, names, luck, strength=None, stop=None, take=None, e
                     info[n] = inf
                     pos += k
                 del T_all
+                pf_pan = None                   # 메모리 반환
             else:
                 scores, info = SB.score_trades(df, allt, log=print)
         except Exception as e:

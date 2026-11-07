@@ -305,7 +305,7 @@ def targets():
 
 # ── 전략 1개 ─────────────────────────────────────────────────────────────────
 
-def sweep_engine(engine, df, smap, T_all, cur_rows, log=print, fine=False, lu_keys=None):
+def sweep_engine(engine, df, smap, T_all, cur_rows, log=print, fine=False, lu_keys=None, pf_pan=None):
     import strategy_engine as E
     import strength_backtest as SB
     import strength_model as SM
@@ -325,8 +325,9 @@ def sweep_engine(engine, df, smap, T_all, cur_rows, log=print, fine=False, lu_ke
             sc["v2"], _ = SM.walk_forward(pd.read_pickle(p), X.reset_index(drop=True), yrs)
     except Exception as e:
         log(f"  [{engine}] v2 점수 실패: {e}")
-    try:
-        sc["ai"], _ = AIM.walk_forward(T_all, X.reset_index(drop=True), yrs, engine)
+    try:                     # [§97] 개선 AI 는 가격 피처도 붙여 채점(run 에서 전체 일봉으로 한 번 계산한 것)
+        import ai_features as AF
+        sc["ai"], _ = AIM.walk_forward(T_all, AF.attach(X.reset_index(drop=True), df, pan=pf_pan), yrs, engine)
     except Exception as e:
         log(f"  [{engine}] AI 점수 실패: {e}")
     panel = build_panel(df, {str(t.code) for t in trs})
@@ -412,9 +413,11 @@ def run(names=None, log=print, fine=False):
     names = [n for n in names if n in smap]
     df = load_macro_daily()
     df["date"] = df["date"].astype(str)
-    df = df[df["date"] >= f"{FROM_YEAR - 3}0101"].reset_index(drop=True)   # 워밍업(최대 ~560거래일) 여유만 남겨 메모리 절약
     df["code"] = df["code"].astype(str).str.zfill(6)
-    T_all = AIM.load_tables()
+    import ai_features as AF
+    pf_pan = AF.panel(df)                          # [§97] 가격 피처 — 자르기 전 전체 일봉으로 한 번(학습표·전략별 매매가 같이 씀)
+    T_all = AIM.load_tables(pan=pf_pan)
+    df = df[df["date"] >= f"{FROM_YEAR - 3}0101"].reset_index(drop=True)   # 워밍업(최대 ~560거래일) 여유만 남겨 메모리 절약
     import signal_filters as SFL
     lu_keys = SFL.limitup_entry_keys(df)          # [§91] 상한가 마감 신호일 → 진입 열쇠(전략마다 다시 만들지 않게 한 번만)
     old = {}
@@ -425,7 +428,7 @@ def run(names=None, log=print, fine=False):
     eng = dict(old)
     for n in names:
         try:
-            eng[n] = sweep_engine(n, df, smap, T_all, cur.get(n, []), log=log, fine=fine, lu_keys=lu_keys)
+            eng[n] = sweep_engine(n, df, smap, T_all, cur.get(n, []), log=log, fine=fine, lu_keys=lu_keys, pf_pan=pf_pan)
             import gc
             gc.collect()
             eng[n]["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")

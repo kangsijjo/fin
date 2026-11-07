@@ -185,6 +185,15 @@ def _build_rows(account, df, last_date, signals, *, verbose=True):
                   f"score_ic 없이 원천값만 기록")
         scorer = None
 
+    # [§97] 개선 AI 용 가격·거래 피처 20개(학습과 같은 ai_features 함수, 신호일 기준) — 실패하면 그 피처만 결측으로 채점
+    pf_map = {}
+    try:
+        import ai_features as _AF
+        pf_map = _AF.at_date(df, {str(s.get("code", "")).zfill(6) for s in signals}, date_str)
+    except Exception as e:
+        if verbose:
+            print(f"[strength_logger][warn] 가격 피처 계산 실패(개선 AI 는 그 피처 결측으로 채점): {e}")
+
     rows = []
     for sig in signals:
         code = str(sig.get("code", "")).zfill(6)
@@ -223,7 +232,7 @@ def _build_rows(account, df, last_date, signals, *, verbose=True):
                 try:
                     import live_config as _LC
                     import ai_model as _AIM
-                    score_ai = _AIM.score(_LC.engine_name(strat), feats)
+                    score_ai = _AIM.score(_LC.engine_name(strat), {**feats, **pf_map.get(code, {})})
                 except Exception:
                     score_ai = None
                 # forward AI 누적: 신호시점 모델 확률(없으면 None) — 나중에 실현수익과 조인
