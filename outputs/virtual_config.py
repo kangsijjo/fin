@@ -342,7 +342,8 @@ def state(today=None):
 
 def strategy_usage(today=None):
     """[§79] 전략(엔진 이름)이 지금 어디에 쓰이는지 → {엔진: [{place, label, kind, slots, live}]}.
-    place: kiwoom|kis(모의계좌, 실제 주문) / ai|strength(가상매매, 주문 없음). 가상은 지금 적용 중 설정(예약분이 있으면 예약분 우선)."""
+    place: kiwoom|kis(모의계좌, 실제 주문) / kiwoom_real([§98] 본계좌, 꺼짐이면 없음) / ai|strength(가상매매, 주문 없음).
+    가상은 지금 적용 중 설정(예약분이 있으면 예약분 우선)."""
     import live_config as LC
     out = {}
     cfg = LC.load()
@@ -353,14 +354,30 @@ def strategy_usage(today=None):
             out.setdefault(s["engine"], []).append({"place": a, "label": lab, "kind": "mock",
                                                     "slots": "공유" if pool else int(s["slots"]),
                                                     "live": LC.live_name(s["engine"])})
+    # [§98] 키움 본계좌 — 꺼짐(off)이면 안 씀. 따로 저장 안 했으면 키움 모의 설정을 그대로 따른다(mirror)
+    try:
+        import real_account as RA
+        mode = RA.get_mode()
+    except Exception:
+        mode = "dryrun"
+    R = cfg["accounts"].get("kiwoom_real")
+    if R and mode != "off":
+        pool = R.get("slot_mode") == "pool"
+        lab = "본계좌" + ("" if mode == "live" else "(드라이런)")
+        for s in R["strategies"]:
+            out.setdefault(s["engine"], []).append({"place": "kiwoom_real", "label": lab, "kind": "real",
+                                                    "slots": "공유" if pool else int(s["slots"]),
+                                                    "live": LC.live_name(s["engine"]), "mirror": bool(R.get("_mirror")),
+                                                    "mode": mode})
     active, pending = state(today)
     e = pending or active
     if e and not e.get("legacy"):
         for p in PORTFOLIOS:
             P = e["portfolios"][p]
             pool = P.get("slot_mode") == "pool"
+            lab = LABEL[p] + (f"({P.get('strength_version') or 'v2'})" if p == "strength" else "")   # [§98] 강도 방식 표시
             for s in P["strategies"]:
-                out.setdefault(s["engine"], []).append({"place": p, "label": LABEL[p], "kind": "virtual",
+                out.setdefault(s["engine"], []).append({"place": p, "label": lab, "kind": "virtual",
                                                         "slots": "공유" if pool else int(s["slots"]),
                                                         "live": LC.live_name(s["engine"]),
                                                         "pending": e is pending})

@@ -3431,6 +3431,136 @@ def _sweep_advice(sw, engine, place, fam):
             "updated": E_.get("updated")}
 
 
+_PERF_PLACES = (("kiwoom", "키움 모의"), ("kis", "KIS 모의"), ("kiwoom_real", "본계좌"),
+                ("ai", "AI 가상"), ("strength", "강도 가상"))
+
+
+def _perf_cell():
+    return {"n": 0, "wins": 0, "sum_pct": 0.0, "pnl": 0, "open_n": 0, "open_sum": 0.0, "open_k": 0}
+
+
+def _perf_out(c):
+    n, k = c["n"], c["open_k"]
+    return {"n": n, "win_pct": round(c["wins"] / n * 100, 1) if n else None,
+            "avg_pct": round(c["sum_pct"] / n, 2) if n else None, "pnl": int(c["pnl"]),
+            "open_n": c["open_n"], "open_avg_pct": round(c["open_sum"] / k, 2) if k else None}
+
+
+def get_strategy_perf_all(date_from="", date_to=""):
+    """[§98] 전략 × 매매처 성과 — 진입일이 [date_from, date_to] 인 매매만(빈칸 = 전체).
+    모의·본계좌: 주문 로그 FIFO 왕복 매매, 수익률·손익은 매매비용(수수료·거래세) 뺀 값(_net_pnl — 가상매매와 같은 기준).
+    보유: 지금 잔고(비용 뺀 평가 %), 본계좌는 프로그램이 산 종목만. 가상: ai_paper_result.json(비용 0.33% 뺀 값).
+    전략 이름은 엔진 이름으로 맞춘다(라이브 별칭 → 엔진)."""
+    import live_config as LC
+    lo = str(date_from or "").replace("-", "")[:8]
+    hi = str(date_to or "").replace("-", "")[:8]
+    inr = lambda d: bool(d) and (not lo or str(d)[:8] >= lo) and (not hi or str(d)[:8] <= hi)   # noqa: E731
+    cells, notes = {}, {}
+
+    def cell(eng, pl):
+        e = LC.engine_name(str(eng or "").strip()) or "기타"
+        return cells.setdefault(e, {}).setdefault(pl, _perf_cell())
+
+    def from_account(pl, data, bot_only=False):
+        for t in data.get("trades") or []:
+            if t.get("open") or not inr(t.get("buy_date")):
+                continue
+            r = _net_pnl(t.get("qty"), t.get("buy_price"), t.get("sell_price"), on=t.get("sell_date"))
+            if r is None:
+                continue
+            c = cell(t.get("strategy"), pl)
+            c["n"] += 1
+            c["wins"] += 1 if r["net"] > 0 else 0
+            c["sum_pct"] += r["pct"]
+            c["pnl"] += r["net"]
+        for p in data.get("positions") or []:
+            if bot_only and not p.get("bot"):
+                continue
+            if (lo or hi) and not inr(p.get("entry_date")):
+                continue
+            c = cell(p.get("strategy"), pl)
+            c["open_n"] += 1
+            if p.get("pnl_pct") is not None:
+                c["open_sum"] += float(p["pnl_pct"]); c["open_k"] += 1
+
+    for pl, fn in (("kiwoom", lambda: get_kiwoom_mock()), ("kis", lambda: get_kis_mock()),
+                   ("kiwoom_real", lambda: get_kiwoom_mock(base_dir=REAL_DIR, acct="kiwoom_real",
+                                                           sidx_prefix="real_kiwoom"))):
+        try:
+            from_account(pl, fn(), bot_only=(pl == "kiwoom_real"))
+        except Exception as e:
+            notes[pl] = f"읽기 실패: {type(e).__name__}"
+    try:                                         # 본계좌 드라이런 — 실현 성과 없음, '냈을 매수' 건수만
+        import real_account as RA
+        mode = RA.get_mode()
+        notes.setdefault("kiwoom_real", {"live": "실주문", "dryrun": "드라이런 — 실주문 성과 없음(냈을 매수 건수는 칸 아래)",
+                                         "off": "꺼짐"}.get(mode, mode))
+        for f in sorted(REAL_DIR.glob("dryrun_*.csv")):
+            d = f.stem.replace("dryrun_", "")
+            if not inr(d):
+                continue
+            try:
+                df = pd.read_csv(f, dtype=str, encoding="utf-8-sig").fillna("")
+            except Exception:
+                continue
+            for s in df[df["side"] == "buy"]["strategy"]:
+                c = cell(s, "kiwoom_real")
+                c["dry"] = c.get("dry", 0) + 1
+    except Exception:
+        pass
+    ap = get_ai_paper()
+    for pl in ("ai", "strength"):
+        P = ((ap or {}).get("portfolios") or {}).get(pl) or {}
+        for t in P.get("trades") or []:
+            if not inr(t.get("entry_date")):
+                continue
+            try:
+                v = float(t.get("net_pct"))
+            except (TypeError, ValueError):
+                continue
+            c = cell(t.get("strategy"), pl)
+            c["n"] += 1
+            c["wins"] += 1 if v > 0 else 0
+            c["sum_pct"] += v
+            c["pnl"] += int(float(t.get("pnl") or 0))
+        for p in P.get("positions") or []:
+            if (lo or hi) and not inr(p.get("entry_date")):
+                continue
+            c = cell(p.get("strategy"), pl)
+            c["open_n"] += 1
+            if p.get("pnl_pct") is not None:
+                c["open_sum"] += float(p["pnl_pct"]); c["open_k"] += 1
+    if ap:
+        notes.setdefault("ai", f"가상(1천만원·{ap.get('start', '')}~, 갱신 {ap.get('updated', '')})")
+        notes.setdefault("strength", notes["ai"])
+    try:
+        import virtual_config as VC
+        usage = VC.strategy_usage()
+    except Exception:
+        usage = {}
+    rows = []
+    for e in sorted(set(cells) | set(usage)):
+        cs = {pl: dict(_perf_out(c), **({"dry": c["dry"]} if c.get("dry") else {})) for pl, c in cells.get(e, {}).items()}
+        tot = _perf_cell()
+        for c in cells.get(e, {}).values():
+            for k in ("n", "wins", "sum_pct", "pnl", "open_n", "open_sum", "open_k"):
+                tot[k] += c[k]
+        rows.append({"engine": e, "cells": cs, "total": _perf_out(tot),
+                     "uses": [{"place": u["place"], "label": u["label"], "slots": u.get("slots")} for u in usage.get(e, [])]})
+    rows.sort(key=lambda r: (-(r["total"]["n"] + r["total"]["open_n"]), r["engine"]))
+    return {"places": [{"key": k, "label": lab, "note": notes.get(k, "")} for k, lab in _PERF_PLACES],
+            "rows": rows, "from": lo, "to": hi}
+
+
+@app.route("/api/strategy_perf_all")
+def api_strategy_perf_all():
+    """[§98] 읽기 전용 — 천억이 탭 '전략별 성과(모든 매매)'."""
+    try:
+        return jsonify({"ok": True, **get_strategy_perf_all(request.args.get("from", ""), request.args.get("to", ""))})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": f"{type(e).__name__}: {str(e)[:200]}"})
+
+
 @app.route("/api/strategy_reco")
 def api_strategy_reco():
     """[§86] 읽기 전용 — places(JSON: {kiwoom|kis|ai|strength: [지금 고른 엔진…]}) 마다 안 고른 좋은 전략 추천."""
@@ -3443,6 +3573,11 @@ def api_strategy_reco():
         ev = _reco_eval()
         names = {e["engine"] for e in _lc_engine_list()}
         sw, fams = _sweep_data(), _place_family()
+        try:                                     # [§98] 지금 고른 전략도 '다른 곳에서 쓰는지' 표시
+            import virtual_config as VC
+            _usage = VC.strategy_usage()
+        except Exception:
+            _usage = {}
         out = {}
         for pl, sel in places.items():
             if pl not in ("kiwoom", "kis", "ai", "strength"):
@@ -3456,7 +3591,10 @@ def api_strategy_reco():
                 a_ = ev[0].get(e)
                 se.append({"engine": e, "score": round(a_["score"] * 100) if a_ else None,
                            "cagr": round(a_["cagr"], 1) if a_ and a_["cagr"] is not None else None,
-                           "advice": _sweep_advice(sw, e, pl, fams.get(pl, "v2"))})
+                           "advice": _sweep_advice(sw, e, pl, fams.get(pl, "v2")),
+                           "used_elsewhere": [{"place": u["place"], "label": u["label"], "slots": u.get("slots"),
+                                               "pending": bool(u.get("pending"))}
+                                              for u in _usage.get(e, []) if u["place"] != pl]})
             out[pl] = {"recos": rec, "selected": se, "family": fams.get(pl, "v2")}
         return jsonify({"ok": True, "places": out, "info": ev[1], "min_score": round(SR.MIN_SCORE * 100),
                         "sweep": ({"generated": sw.get("generated"), "from_year": sw.get("from_year"), "rule": sw.get("rule"),
@@ -3788,6 +3926,19 @@ pre.logbox{background:#0b0f19;border:1px solid #1f2937;border-radius:8px;padding
 
 <!-- ===== 천억이 ===== -->
 <div id="tab-cheonok" class="tab-content">
+  <div class="section">
+    <h2>📊 전략별 성과 — 모든 매매 <span style="color:#8b949e;font-size:11px;font-weight:400">— 키움·KIS 모의 · 본계좌 · AI·강도 가상매매를 한 표로(진입일 기준). 칸 머리글 한 번 클릭 = 정렬(그 칸 평균 수익률)</span></h2>
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:12px;margin-bottom:6px">
+      진입일 <input type="date" id="chp-from" style="background:#0d1117;color:#e5e7eb;border:1px solid #30363d;border-radius:4px;padding:2px 4px">
+      ~ <input type="date" id="chp-to" style="background:#0d1117;color:#e5e7eb;border:1px solid #30363d;border-radius:4px;padding:2px 4px">
+      <button class="runbtn" style="padding:0 8px" onclick="chPerfLoad()">조회</button>
+      <button class="runbtn" style="padding:0 8px" onclick="document.getElementById('chp-from').value='';document.getElementById('chp-to').value='';chPerfLoad()">전체</button>
+      <span id="chp-info" style="color:#64748b"></span>
+    </div>
+    <div style="overflow-x:auto"><table style="font-size:12px"><thead id="chp-head"></thead>
+      <tbody id="ch-perf"><tr><td style="color:#8b949e;text-align:center">불러오는 중…</td></tr></tbody></table></div>
+    <div style="font-size:11px;color:#64748b;margin-top:4px">칸 = 완료 건수 · 승률 · 평균 수익률(매매비용 뺀 값) / 손익(원) / 보유 수(평균 평가 %). 모의·본계좌는 실제 체결가 기준(FIFO), 가상은 1천만원 가상 계좌라 손익(원) 크기는 계좌끼리 비교하지 마세요 — 비교는 수익률로. 📍 = 지금 그 전략을 쓰는 곳.</div>
+  </div>
   <div class="section">
     <h2>&#xB204;&#xC801; &#xC131;&#xACFC; (trades_history_v3.csv)</h2>
     <div class="stats-row">
@@ -4381,8 +4532,38 @@ function fillOverview(ch, ai, cand){
   ).join(''):'<tr><td colspan="6" style="color:#9ca3af;text-align:center">&#xC624;&#xB298; &#xC2E0;&#xADDC; &#xD6C4;&#xBCF4; &#xC5C6;&#xC74C;</td></tr>');
 }
 
+// [§98] 전략 × 매매처 성과표
+async function chPerfLoad(){
+  const q=id=>(document.getElementById(id)||{}).value||'';
+  let d; try{ d=await fetch(`/api/strategy_perf_all?from=${encodeURIComponent(q('chp-from'))}&to=${encodeURIComponent(q('chp-to'))}`).then(r=>r.json()); }
+  catch(e){ setHtml('ch-perf','<tr><td style="color:#f87171">불러오기 실패</td></tr>'); return; }
+  if(!d||!d.ok){ setHtml('ch-perf',`<tr><td style="color:#f87171">${(d&&d.msg)||'오류'}</td></tr>`); return; }
+  const E=v=>String(v==null?'':v).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const sg=v=>v==null?'-':((v>=0?'+':'')+Number(v).toFixed(2)+'%');
+  const col=v=>v==null?'#9ca3af':(v>=0?'#10b981':'#f87171');
+  const PL=d.places||[];
+  setHtml('chp-head',`<tr><th class="sortable">전략</th><th class="sortable">쓰는 곳</th>${PL.map(p=>`<th class="r sortable" title="${E(p.note)}">${E(p.label)}${p.note?'<div style="font-size:10px;font-weight:400;color:#64748b;white-space:normal;max-width:150px">'+E(p.note)+'</div>':''}</th>`).join('')}<th class="r sortable" title="모든 매매처 합(손익 원은 계좌 크기가 달라 합치지 않음)">합계</th></tr>`);
+  const cellHtml=(c,showPnl)=>{
+    if(!c) return '<td class="r" data-v="" style="color:#374151">-</td>';
+    const top=c.n?`<b style="color:${col(c.avg_pct)}">${sg(c.avg_pct)}</b> <span style="color:#cbd5e1">${c.n}건 · 승 ${c.win_pct}%</span>`:'<span style="color:#64748b">완료 0</span>';
+    const pnl=showPnl&&c.n?`<div style="color:${col(c.pnl)}">${c.pnl>=0?'+':''}${fmt(c.pnl)}원</div>`:'';
+    const op=c.open_n?`<div style="color:#93c5fd">보유 ${c.open_n}${c.open_avg_pct!=null?' ('+sg(c.open_avg_pct)+')':''}</div>`:'';
+    const dry=c.dry?`<div style="color:#fbbf24">드라이런 매수 ${c.dry}건</div>`:'';
+    return `<td class="r" data-v="${c.n&&c.avg_pct!=null?c.avg_pct:''}" style="white-space:nowrap">${top}${pnl}${op}${dry}</td>`;
+  };
+  const rows=d.rows||[];
+  setHtml('ch-perf',rows.length?rows.map(r=>{
+    const uses=(r.uses||[]).map(u=>E(u.label)+(u.slots!=null&&u.slots!==''?' '+E(u.slots)+(typeof u.slots==='number'?'칸':''):'')).join(' · ');
+    return `<tr><td style="font-weight:600">${E(r.engine)}</td>
+      <td style="font-size:11px;color:#fcd34d" data-v="${E(uses)}">${uses?'📍 '+uses:'<span style="color:#64748b">지금 안 씀</span>'}</td>
+      ${PL.map(p=>cellHtml((r.cells||{})[p.key],true)).join('')}${cellHtml(r.total,false)}</tr>`;}).join('')
+    :`<tr><td colspan="${PL.length+3}" style="color:#9ca3af;text-align:center">이 기간 매매 없음</td></tr>`);
+  setTxt('chp-info', `${rows.length}전략 · ${d.from||d.to?(d.from||'처음')+' ~ '+(d.to||'오늘'):'전체 기간'}`);
+  _tblReapply(['ch-perf']);
+}
 function fillCheonok(ch){
   if(!ch)return;
+  chPerfLoad();
   setTxt('ch-trades', fmt(ch.trade_count));
   setTxt('ch-wr', safe(ch.win_rate)+' %');
   setTxt('ch-avg', pct(ch.avg_return));
@@ -5587,7 +5768,7 @@ const SORTABLE_TBODIES = [
   'sfull-rows',                     // [§95] 백테스트: 전체 전략 과거 백테스트
   'dl-files',                       // 데이터+로그: 파일 목록
 ];
-const DYN_SORT_TBODIES = ['ap-trades-ai','ap-trades-strength','pbt-res-rows'];   // [§95] 나중에 그려지는 표(정렬만)
+const DYN_SORT_TBODIES = ['ap-trades-ai','ap-trades-strength','pbt-res-rows','ch-perf'];   // [§95] 나중에 그려지는 표(정렬만) · [§98] 천억이 전략별 성과
 const _tblSort = {};      // tbodyId -> {idx, asc}
 const _tblFilter = {};    // tbodyId -> 소문자 검색어
 let _tblSorting = false;
@@ -6078,6 +6259,12 @@ function vcRender(){
 let _ovT=null; const _ovHtml={lc:'',vc:''};
 // ══ 2026-10-30 §86 전략 추천 — 지금까지 돌린 백테스트 종합(기간 백테스트 기록 전부 + 주간 전체) · 편집 중인 값 기준 ══
 let _recoT=null; const _recoHtml={};
+// [§98] 이 전략이 다른 곳(키움·KIS 모의·본계좌·AI·강도 가상)에서도 쓰이면 어디인지 배지로 — 같은 전략을 겹쳐 시험하지 않게
+function _useBadge(uses){
+  if(!uses||!uses.length) return '';
+  const t=uses.map(u=>`${_lcEsc(u.label)}${u.slots!=null&&u.slots!==''?' '+_lcEsc(String(u.slots))+(typeof u.slots==='number'?'칸':''):''}${u.pending?'(예약)':''}`).join(' · ');
+  return ` <span title="이미 쓰는 곳(저장된 설정 기준) — AI·강도 가상매매에 같은 전략을 두는 건 점수 방식만 다르게 비교하는 것" style="font-size:10px;font-weight:400;color:#fcd34d;background:rgba(252,211,77,.1);border:1px solid rgba(252,211,77,.35);border-radius:4px;padding:0 4px;white-space:nowrap">📍 ${t}</span>`;
+}
 function recoRefresh(){ clearTimeout(_recoT); _recoT=setTimeout(_recoRun,400); }
 async function _recoRun(){
   const places={};
@@ -6098,17 +6285,16 @@ async function _recoRun(){
         const preO=(A&&A.status==='권장')?{sv:fam,th:A.best.th,stop:A.best.stop,take:A.best.take,lu:A.best.lu}
                   :(A&&A.status==='유지')?{}:(r.best?{sv:r.best.sv,th:r.best.th,stop:r.best.stop,take:r.best.take,lu:!!r.best.lu}:{});
         const pre=JSON.stringify(preO).replace(/"/g,'&quot;');
-        const warn=[...(r.overlap||[]).map(o=>`⚠ ${_lcEsc(o.engine)} 와 같은 날 같은 종목 ${o.same}%`),
-                    ...(r.used_elsewhere||[]).map(u=>`ℹ ${_lcEsc(u.label)}에서 사용 중`)];
+        const warn=(r.overlap||[]).map(o=>`⚠ ${_lcEsc(o.engine)} 와 같은 날 같은 종목 ${o.same}%`);
         const aiTxt=(pl==='ai'||pl==='strength')&&r.ai?` · AI 고르기 효과 ${sg(r.ai.ai)}%p(v2 ${sg(r.ai.v2)})`:'';
         const aiMiss=pl==='ai'&&!r.in_ai_model?' · <span style="color:#fbbf24">AI 모델에 없음(추가해 저장하면 학습)</span>':'';
-        return `<tr><td style="font-weight:600">${_lcEsc(r.engine)}</td>
+        return `<tr><td style="font-weight:600">${_lcEsc(r.engine)}${_useBadge(r.used_elsewhere)}</td>
           <td class="r" style="font-weight:700;color:${r.score>=80?'#10b981':'#93c5fd'}">${r.score}</td>
           <td style="font-size:11px;color:#cbd5e1">CAGR ${sg(r.cagr)}% · MDD ${r.mdd==null?'-':r.mdd+'%'} · 해 플러스 ${r.pos}% · 근거 ${r.n}건${aiTxt}${aiMiss}
             ${(A&&A.status)?_advHtml(A,fam):(r.best?`<div style="color:#38bdf8">권장(내 백테스트 실험): ${_lcEsc(r.best.text)} (점수 ${r.best.score}, CAGR ${sg(r.best.cagr)}%, ${r.best.n}회)</div>`:'')}
             ${warn.length?`<div style="color:#fcd34d">${warn.join(' · ')}</div>`:''}</td>
           <td><button class="runbtn" style="padding:0 8px" title="편집 중인 초안에 넣기(권장 설정 포함) — 저장은 위 '변경 확인 후 저장'(두 번 확인)" onclick="${isLc?'lcAddReco':'vcAddReco'}('${pl}','${_lcEsc(r.engine)}',this.dataset.pre)" data-pre="${pre}">+ 추가</button></td></tr>`;}).join('');
-      const selTxt=(P.selected||[]).map(x=>`${_lcEsc(x.engine)} ${x.score==null?'-':x.score}${x.score!=null&&(x.score<50||(x.cagr!=null&&x.cagr<0))?'<span style="color:#f87171">(약함)</span>':''}`).join(' · ');
+      const selTxt=(P.selected||[]).map(x=>`${_lcEsc(x.engine)} ${x.score==null?'-':x.score}${x.score!=null&&(x.score<50||(x.cagr!=null&&x.cagr<0))?'<span style="color:#f87171">(약함)</span>':''}${_useBadge(x.used_elsewhere)}`).join(' · ');
       const selAdv=(P.selected||[]).filter(x=>x.advice&&x.advice.status).map(x=>{
         const A=x.advice, pre=JSON.stringify({sv:fam,th:A.best.th,stop:A.best.stop,take:A.best.take,lu:A.best.lu}).replace(/"/g,'&quot;');
         const same=A.current&&A.current.th==A.best.th&&A.current.stop==A.best.stop&&A.current.take==A.best.take

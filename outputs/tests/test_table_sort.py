@@ -33,7 +33,8 @@ def test_new_tables_are_sortable():
     h = _html()
     m = re.search(r"const SORTABLE_TBODIES = \[(.*?)\];", h, re.S)
     assert m and "'sfull-rows'" in m.group(1), "전체 전략 과거 백테스트 표"
-    assert "const DYN_SORT_TBODIES = ['ap-trades-ai','ap-trades-strength','pbt-res-rows'];" in h
+    assert "const DYN_SORT_TBODIES = ['ap-trades-ai','ap-trades-strength','pbt-res-rows','ch-perf'];" in h, \
+        "[§98] 천억이 전략별 성과 표도"
     assert '<tbody id="ap-trades-${k}">' in h and "_tblReapply(['ap-trades-ai','ap-trades-strength']);" in h, \
         "강도매매 완료 매매내역(AI·강도) — 5분마다 다시 그려도 정렬 유지"
     assert '<tbody id="pbt-res-rows">' in h and "_tblReapply(['pbt-res-rows']);" in h, "기간 백테스트 결과 표"

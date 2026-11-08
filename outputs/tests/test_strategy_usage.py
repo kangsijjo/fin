@@ -8,6 +8,8 @@ import virtual_config as VC
 
 
 def test_usage_lists_every_place_and_live_map_follows_config(tmp_path, monkeypatch):
+    import real_account as RA
+    monkeypatch.setattr(RA, "get_mode", lambda: "off")          # [§98] 본계좌 꺼짐이면 사용처에 없음(아래 따로 시험)
     monkeypatch.setenv("LIVE_CONFIG_PATH", str(tmp_path / "lc.json"))
     monkeypatch.setenv("VIRTUAL_CONFIG_PATH", str(tmp_path / "vc.json"))
     cfg = LC.default_config()

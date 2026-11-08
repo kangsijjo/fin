@@ -299,7 +299,8 @@ def recommend(place, selected, engines=None, now=None, top=TOP_N, ev=None):
             "pos": round(a["pos"] * 100), "n": a["n"], "weight": round(a["w"], 1),
             "best": ({"text": variant_text(bv), **json.loads(bv), "score": round(a["best"]["score"] * 100),
                       "cagr": round(a["best"]["cagr"], 1), "n": a["best"]["n"]} if bv else None),
-            "overlap": ov, "used_elsewhere": [{"place": u["place"], "label": u["label"]} for u in used],
+            "overlap": ov, "used_elsewhere": [{"place": u["place"], "label": u["label"], "slots": u.get("slots"),
+                                               "pending": bool(u.get("pending"))} for u in used],
             "ai": ai_val.get(e), "in_ai_model": e in ai_eng})
     cand.sort(key=lambda c: (bool(c["overlap"]), -c["score"]))   # 겹침 없는 전략 먼저, 그 안에서 점수 순
     return cand[:top], dict(info, n_eval=len(ev), min_score=round(MIN_SCORE * 100))
