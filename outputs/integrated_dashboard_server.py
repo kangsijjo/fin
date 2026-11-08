@@ -5956,10 +5956,11 @@ function lcRender(){
         <b style="font-size:14px">${_lcEsc(L.config.accounts[a].label)}</b>
         <label style="font-size:13px;color:#cbd5e1" title="전략별 칸을 비운 전략에 쓰는 기본값">기본 ${A.strength_version==='ai'?'AI':'강도'} 기준 ≥
           <input type="number" min="0" max="10" step="0.1" value="${A.min_strength}" style="${inp};width:62px" onchange="lcSetAcc('${a}','min_strength',this.value)"></label>
-        <select style="${inp};font-size:12px" title="v1: 라이브 6전략 공통 가중치(종전) / v2: 전략마다 자기 과거 매매로 학습(방향이 해마다 유지된 지표만·시장 지표 제외, §62). v2 권장 기준 5.5${a==='kiwoom_real'?' / 개선 AI(본계좌만): 강도매매 탭 AI 포트와 같은 점수(0~10, 5 = 그 전략 평균) — 11-02 부터 쓰여 실전 기록이 아직 짧음':''}" onchange="lcSetAcc('${a}','strength_version',this.value)">
-          <option value="v1"${(A.strength_version||'v2')==='v1'?' selected':''}>강도 v1(공통·예전 방식)</option>
-          <option value="v2"${(A.strength_version||'v2')==='v2'?' selected':''}>강도 v2(전략별)</option>
-          ${a==='kiwoom_real'?`<option value="ai"${A.strength_version==='ai'?' selected':''}>개선 AI(AI매매)</option>`:''}</select>
+        ${a==='kiwoom_real'?'<span style="font-size:13px;font-weight:700;color:#fcd34d" title="[§96.7] 본계좌가 후보를 고르고 거르는 점수 — 전략·칸·손절·익절·금액 상한·손실 한도는 이 칸 그대로">매매 방식</span>':''}
+        <select style="${inp};font-size:12px${a==='kiwoom_real'?';border-color:#fcd34d;font-weight:600':''}" title="v1: 라이브 6전략 공통 가중치(종전) / v2: 전략마다 자기 과거 매매로 학습(방향이 해마다 유지된 지표만·시장 지표 제외, §62). v2 권장 기준 5.5${a==='kiwoom_real'?' / 개선 AI(본계좌만): 강도매매 탭 AI 포트와 같은 점수(0~10, 5 = 그 전략 평균) — 11-02 부터 쓰여 실전 기록이 아직 짧음':''}" onchange="lcSetAcc('${a}','strength_version',this.value)">
+          <option value="v1"${(A.strength_version||'v2')==='v1'?' selected':''}>${a==='kiwoom_real'?'💪 강도매매 — v1(공통·예전 방식)':'강도 v1(공통·예전 방식)'}</option>
+          <option value="v2"${(A.strength_version||'v2')==='v2'?' selected':''}>${a==='kiwoom_real'?'💪 강도매매 — v2(전략별)':'강도 v2(전략별)'}</option>
+          ${a==='kiwoom_real'?`<option value="ai"${A.strength_version==='ai'?' selected':''}>🤖 AI매매(개선 AI)</option>`:''}</select>
         <select style="${inp};font-size:12px" title="전략별 칸: 전략마다 칸 수를 나눠 줌(위 순서대로 채움) / 칸 없음: 고른 전략 중 조건을 넘은 신호를 전체 10종목까지, 같은 날 후보는 전략 안 순위(그 전략 과거 강도 중 상위 몇 %) 높은 순 — 백테스트(§74)에선 신호가 많은 전략이 칸을 먼저 차지해 대체로 불리했음" onchange="lcSetAcc('${a}','slot_mode',this.value)">
           <option value="slots"${(A.slot_mode||'slots')==='slots'?' selected':''}>전략별 칸</option>
           <option value="pool"${A.slot_mode==='pool'?' selected':''}>칸 없음(전체 10종목)</option></select>
