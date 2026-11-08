@@ -5933,7 +5933,7 @@ function lcRender(){
     const rows=A.strategies.map((s,i)=>{ const e=_lcEng(s.engine);
       const sv=_R?(s.score||A.strength_version||'v2'):(A.strength_version||'v2');      // [§96.9] 그 전략 점수 방식
       const dTh=(_R&&sv==='ai')?(A.min_ai??5):A.min_strength;                         // 비운 기준 칸이 쓰는 기본값
-      const SVL={v1:'💪 강도 v1',v2:'💪 강도 v2',ai:'🤖 AI'};
+      const MTL={v2:'💪 강도매매(v2)',v1:'💪 강도매매(v1)',ai:'🤖 AI매매'};
       return `<tr>
         <td style="white-space:nowrap">${i+1}
           <button class="runbtn" style="padding:0 6px" title="위로(먼저 슬롯을 채움)" onclick="lcMove('${a}',${i},-1)">▲</button>
@@ -5946,10 +5946,9 @@ function lcRender(){
             :'<div style="color:#fbbf24;font-size:11px">개선 AI 모델에 없음 — 저장하면 AI 재학습(수 분), 그 전엔 점수 없음(면제가 아니면 안 삼)</div>'):''}</td>
         <td>${A.slot_mode==='pool'?'<span style="color:#64748b;font-size:11px" title="칸 없음 모드 — 전략별 칸 수는 쓰지 않음">공유</span>':`<input type="number" min="1" max="10" step="1" value="${s.slots}" style="${inp};width:52px" onchange="lcSet('${a}',${i},'slots',this.value)">`}</td>
         <td style="text-align:center"><input type="checkbox" ${s.exempt?'checked':''} onchange="lcSet('${a}',${i},'exempt',this.checked)" title="체크하면 강도 기준과 상관없이 삼(후보가 많으면 강도 높은 순)"></td>
-        <td>${s.exempt?'<span style="color:#64748b;font-size:11px">면제</span>':`<input type="number" min="0" max="10" step="0.1" placeholder="기본 ${dTh}" value="${s.min_strength==null?'':s.min_strength}" style="${inp};width:70px${s.min_strength!=null?';border-color:#38bdf8':''}" title="이 전략만의 ${sv==='ai'?'AI':'강도'} 기준 — 비우면 계좌 기본값(${dTh})" onchange="lcSet('${a}',${i},'min_strength',this.value)">`}</td>
-        ${_R?`<td><select style="${inp};font-size:11px${s.score?';border-color:#fcd34d':''}" title="[§96.9] 이 전략만의 점수 방식 — 비우면 위 '기본 매매 방식'. 바꾸면 기준 칸도 그 척도로(강도 5.7 ≠ AI 5)" onchange="lcSet('${a}',${i},'score',this.value)">
-            <option value=""${!s.score?' selected':''}>기본(${SVL[A.strength_version||'v2']})</option>
-            ${['v2','v1','ai'].map(k=>`<option value="${k}"${s.score===k?' selected':''}>${SVL[k]}</option>`).join('')}</select></td>`:''}
+        ${_R?`<td><select style="${inp};font-size:12px;font-weight:600;border-color:#fcd34d" title="[§96.9] 이 전략의 매매 방식 — 강도매매: 강도 점수로 거르고 고름 / AI매매: 개선 AI 점수(5 = 그 전략 평균)로. 바꾸면 오른쪽 점수 칸이 비워짐(척도가 달라서 — 새 방식 기준으로 다시 넣기)" onchange="lcSet('${a}',${i},'score',this.value)">
+            ${['v2','v1','ai'].map(k=>`<option value="${k}"${sv===k?' selected':''}>${MTL[k]}</option>`).join('')}</select></td>`:''}
+        <td>${s.exempt?'<span style="color:#64748b;font-size:11px">면제</span>':`<input type="number" min="0" max="10" step="0.1" placeholder="${_R?'비우면 ':'기본 '}${dTh}" value="${s.min_strength==null?'':s.min_strength}" style="${inp};width:70px${s.min_strength!=null?';border-color:#38bdf8':''}" title="이 전략 ${sv==='ai'?'AI':'강도'} 점수 기준(이 점수 이상만 삼) — 비우면 ${dTh}" onchange="lcSet('${a}',${i},'min_strength',this.value)">`}</td>
         <td><input type="number" step="1" min="-50" max="-1" placeholder="없음" value="${s.stop==null?'':s.stop}" style="${inp};width:64px" onchange="lcSet('${a}',${i},'stop',this.value)"></td>
         <td><input type="number" step="1" min="1" max="300" placeholder="없음" value="${s.take==null?'':s.take}" style="${inp};width:64px" onchange="lcSet('${a}',${i},'take',this.value)"></td>
         <td style="text-align:center"><input type="checkbox" ${s.skip_limitup?'checked':''} onchange="lcSet('${a}',${i},'skip_limitup',this.checked)" title="체크하면 신호일 상한가 마감 종목의 이 전략 신호는 사지 않음"></td>
@@ -5967,12 +5966,10 @@ function lcRender(){
     return `<div style="flex:1;min-width:560px;background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:10px 12px">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
         <b style="font-size:14px">${_lcEsc(L.config.accounts[a].label)}</b>
-        <label style="font-size:13px;color:#cbd5e1" title="전략별 칸을 비운 ${a==='kiwoom_real'?'강도매매 ':''}전략에 쓰는 기본값">기본 강도 기준 ≥
-          <input type="number" min="0" max="10" step="0.1" value="${A.min_strength}" style="${inp};width:62px" onchange="lcSetAcc('${a}','min_strength',this.value)"></label>
-        ${a==='kiwoom_real'?`<label style="font-size:13px;color:#cbd5e1" title="[§96.9] 기준 칸을 비운 AI매매 전략에 쓰는 기본값 — AI 점수는 5 = 그 전략 평균(강도 5.7 과 걸러지는 비율이 다름)">기본 AI 기준 ≥
-          <input type="number" min="0" max="10" step="0.1" value="${A.min_ai??5}" style="${inp};width:62px" onchange="lcSetAcc('${a}','min_ai',this.value)"></label>
-          <span style="font-size:13px;font-weight:700;color:#fcd34d" title="[§96.7·96.9] 전략 줄의 '점수 방식'을 비운 전략이 쓰는 방식 — 전략마다 따로 고르려면 아래 표 '점수 방식' 칸">기본 매매 방식</span>`:''}
-        <select style="${inp};font-size:12px${a==='kiwoom_real'?';border-color:#fcd34d;font-weight:600':''}" title="v1: 라이브 6전략 공통 가중치(종전) / v2: 전략마다 자기 과거 매매로 학습(방향이 해마다 유지된 지표만·시장 지표 제외, §62). v2 권장 기준 5.5${a==='kiwoom_real'?' / 개선 AI(본계좌만): 강도매매 탭 AI 포트와 같은 점수(0~10, 5 = 그 전략 평균) — 11-02 부터 쓰여 실전 기록이 아직 짧음':''}" onchange="lcSetAcc('${a}','strength_version',this.value)">
+        ${a==='kiwoom_real'?`<span style="font-size:12px;color:#fcd34d">매매 방식·점수는 전략마다 아래 표에서 고릅니다(점수 칸을 비우면 강도 ${A.min_strength} / AI ${A.min_ai??5})</span>`
+        :`<label style="font-size:13px;color:#cbd5e1" title="전략별 칸을 비운 전략에 쓰는 기본값">기본 강도 기준 ≥
+          <input type="number" min="0" max="10" step="0.1" value="${A.min_strength}" style="${inp};width:62px" onchange="lcSetAcc('${a}','min_strength',this.value)"></label>`}
+        <select style="${inp};font-size:12px${a==='kiwoom_real'?';display:none':''}" title="v1: 라이브 6전략 공통 가중치(종전) / v2: 전략마다 자기 과거 매매로 학습(방향이 해마다 유지된 지표만·시장 지표 제외, §62). v2 권장 기준 5.5${a==='kiwoom_real'?' / 개선 AI(본계좌만): 강도매매 탭 AI 포트와 같은 점수(0~10, 5 = 그 전략 평균) — 11-02 부터 쓰여 실전 기록이 아직 짧음':''}" onchange="lcSetAcc('${a}','strength_version',this.value)">
           <option value="v1"${(A.strength_version||'v2')==='v1'?' selected':''}>${a==='kiwoom_real'?'💪 강도매매 — v1(공통·예전 방식)':'강도 v1(공통·예전 방식)'}</option>
           <option value="v2"${(A.strength_version||'v2')==='v2'?' selected':''}>${a==='kiwoom_real'?'💪 강도매매 — v2(전략별)':'강도 v2(전략별)'}</option>
           ${a==='kiwoom_real'?`<option value="ai"${A.strength_version==='ai'?' selected':''}>🤖 AI매매(개선 AI)</option>`:''}</select>
@@ -5981,7 +5978,7 @@ function lcRender(){
           <option value="pool"${A.slot_mode==='pool'?' selected':''}>칸 없음(전체 10종목)</option></select>
         ${A.slot_mode==='pool'?`<span style="font-size:12px;color:#38bdf8">칸 없음 · 전체 ${L.slots_total}종목</span>`:`<span style="font-size:12px;color:${tot===L.slots_total?'#10b981':'#ef4444'}">슬롯 합 ${tot}/${L.slots_total}</span>`}</div>
       <table style="font-size:12px;margin-top:6px;width:100%"><thead><tr><th>순서</th><th>전략</th><th>슬롯</th>
-        <th title="기준과 상관없이 삼">${a==='kiwoom_real'?'':'강도 '}면제</th><th title="전략마다 다른 기준 — 비우면 위의 계좌 기본값(본계좌는 그 전략 점수 방식의 기본값)">${a==='kiwoom_real'?'':'강도 '}기준</th>${a==='kiwoom_real'?'<th title="[§96.9] 전략마다 강도매매(v2·v1) / AI매매 — 비우면 기본 매매 방식">점수 방식</th>':''}<th title="${_lcEsc(stopSem)}">손절 %</th><th title="${_lcEsc(takeSem)}">익절 %</th><th title="신호일에 상한가로 마감(등락률 ≥ +29.5%)한 종목의 이 전략 신호는 사지 않음 — 전략마다 효과가 갈려(§91 검증 — 좋아짐: 52주 신고가·외국인 계열·MACD / 나빠짐: 500일 신고가·신용·스토캐스틱) 전략별로 고름. 토요일 탐색이 해마다 검증해 권장/유지를 알려 줌(§91)">상한가 제외</th>${a==='kiwoom_real'?'<th title="전략 총액 상한(원) — 비우면 주문가능금액을 남은 빈 칸으로 균등, 넣으면 (상한 − 이미 산 금액) ÷ 이 전략 남은 빈 칸">금액 상한(원)</th>':''}<th>보유</th><th></th></tr></thead>
+        <th title="기준과 상관없이 삼">${a==='kiwoom_real'?'':'강도 '}면제</th>${a==='kiwoom_real'?'<th title="[§96.9] 전략마다 강도매매 / AI매매">매매 방식</th><th title="그 매매 방식 점수가 이 값 이상인 신호만 삼 — 강도 5.7 과 AI 5 는 걸러지는 비율이 다름(AI 는 5 = 그 전략 평균)">점수(이상)</th>':'<th title="전략마다 다른 기준 — 비우면 위의 계좌 기본값">강도 기준</th>'}<th title="${_lcEsc(stopSem)}">손절 %</th><th title="${_lcEsc(takeSem)}">익절 %</th><th title="신호일에 상한가로 마감(등락률 ≥ +29.5%)한 종목의 이 전략 신호는 사지 않음 — 전략마다 효과가 갈려(§91 검증 — 좋아짐: 52주 신고가·외국인 계열·MACD / 나빠짐: 500일 신고가·신용·스토캐스틱) 전략별로 고름. 토요일 탐색이 해마다 검증해 권장/유지를 알려 줌(§91)">상한가 제외</th>${a==='kiwoom_real'?'<th title="전략 총액 상한(원) — 비우면 주문가능금액을 남은 빈 칸으로 균등, 넣으면 (상한 − 이미 산 금액) ÷ 이 전략 남은 빈 칸">금액 상한(원)</th>':''}<th>보유</th><th></th></tr></thead>
         <tbody>${rows}</tbody></table>
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
         ${A.strategies.length<L.max_strategies?`<button class="runbtn" onclick="lcAdd('${a}')">+ 전략 추가</button>`:`<span style="font-size:11px;color:#64748b">전략은 최대 ${L.max_strategies}개</span>`}
@@ -6023,7 +6020,7 @@ function lcSet(a,i,k,v){
   else if(k==='exempt'){ s.exempt=!!v; if(s.exempt) s.min_strength=null; }   // 면제면 전략별 기준은 의미 없음
   else if(k==='stop'||k==='take'||k==='min_strength'||k==='cap') s[k]=(v===''||v==null)?null:Number(v);   // [§96.6] cap = 본계좌 전략 총액 상한
   else if(k==='skip_limitup') s.skip_limitup=!!v;                              // [§91] 상한가 마감 신호 제외
-  else if(k==='score') s.score=v||null;                                        // [§96.9] 본계좌 전략별 점수 방식
+  else if(k==='score'){ s.score=v||null; s.min_strength=null; }               // [§96.9] 본계좌 전략별 매매 방식 — 척도가 달라 점수 칸은 비움(다시 넣기)
   else if(k==='engine'){ s.engine=v; const e=_lcEng(v); s.holding=e.holding; }
   lcRender();
 }
