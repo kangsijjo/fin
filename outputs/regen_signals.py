@@ -27,7 +27,8 @@ def main():
     try:
         import live_config as LC
         cfg = LC.load()
-        if any(cfg["accounts"][a].get("strength_version") == "v2" for a in LC.ALL_ACCOUNTS):   # [§96] 본계좌 포함
+        if any(LC.score_of(cfg["accounts"][a], s) == "v2" for a in LC.ALL_ACCOUNTS           # [§96] 본계좌 포함
+               if cfg["accounts"].get(a) for s in cfg["accounts"][a]["strategies"]):       # [§96.9] 전략별 방식
             subprocess.run([py, "-u", "strength_model.py", "--train", "--missing-only"], cwd=HERE, env=env)
     except Exception as e:
         print(f"[regen] 강도 v2 학습 건너뜀: {e}")

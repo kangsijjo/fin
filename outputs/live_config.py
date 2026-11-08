@@ -103,6 +103,22 @@ def _fill_real(cfg):
     return cfg
 
 
+AI_MIN_DEFAULT = 5.0      # [§96.9] 본계좌 'AI 기본 기준'을 저장 안 했을 때(5 = 그 전략 평균)
+
+
+def score_of(A, s):
+    """[§96.9] 그 전략 줄의 점수 방식 — 줄에 정했으면 그것(본계좌만), 아니면 계좌 기본(strength_version)."""
+    return (s or {}).get("score") or (A or {}).get("strength_version", "v2")
+
+
+def min_ai_of(A):
+    """[§96.9] 본계좌 AI 기본 기준 — 저장값, 없으면 계좌 기본이 AI 일 땐 그 기준(예전 저장 형식), 아니면 5.0."""
+    v = (A or {}).get("min_ai")
+    if v is not None:
+        return float(v)
+    return float(A["min_strength"]) if (A or {}).get("strength_version") == "ai" else AI_MIN_DEFAULT
+
+
 def validate(cfg, engine_names=None):
     """→ 오류 문구 목록(비면 통과). engine_names 가 주어지면 전략 이름도 확인.
     본계좌 칸은 없어도 통과(load 가 짝 모의계좌로 채움) — 있으면 모의계좌와 같은 규칙 + 손실 한도 값."""
@@ -125,6 +141,9 @@ def validate(cfg, engine_names=None):
                 errs.append(f"{lab}: 일일 손실 한도는 {LOSS_LIMIT_RANGE[0]:,}~{LOSS_LIMIT_RANGE[1]:,}원 또는 비움")
             if A.get("loss_action", "halt") not in LOSS_ACTIONS:
                 errs.append(f"{lab}: 손실 한도 도달 시 동작은 halt/day")
+            mi = A.get("min_ai")                    # [§96.9] AI 기본 기준
+            if mi is not None and (not isinstance(mi, (int, float)) or isinstance(mi, bool) or not 0 <= mi <= 10):
+                errs.append(f"{lab}: AI 기본 기준은 0~10 또는 비움")
         ms = A.get("min_strength")
         if not isinstance(ms, (int, float)) or not 0 <= ms <= 10:
             errs.append(f"{lab}: 강도 기준은 0~10")
@@ -167,6 +186,9 @@ def validate(cfg, engine_names=None):
                 errs.append(f"{lab}: {e} 전략별 강도 기준은 0~10 또는 비움")
             if "skip_limitup" in s and not isinstance(s.get("skip_limitup"), bool):
                 errs.append(f"{lab}: {e} 상한가 마감 신호 제외 값 오류")
+            sc = s.get("score")                     # [§96.9] 전략별 점수 방식(본계좌만, 비우면 계좌 기본)
+            if sc is not None and (a not in REAL_ACCOUNTS or sc not in REAL_SCORE_VERSIONS):
+                errs.append(f"{lab}: {e} 점수 방식은 본계좌에서만 v1/v2/ai 또는 비움")
             cp = s.get("cap")                       # [§96.6] 본계좌 전략 총액 상한(원, 비우면 없음)
             if cp is not None and (a not in REAL_ACCOUNTS or not isinstance(cp, (int, float)) or isinstance(cp, bool)
                                    or not CAP_RANGE[0] <= cp <= CAP_RANGE[1]):
@@ -212,7 +234,9 @@ def account(acct, cfg=None):
            # [§96] 본계좌만의 값(모의계좌는 None/halt 고정) + 설정 상태(기본값 대체·아직 모의 설정을 따르는 중)
            "daily_loss_limit": A.get("daily_loss_limit"), "loss_action": A.get("loss_action", "halt"),
            "mirror": bool(A.get("_mirror")), "fallback": cfg.get("_fallback"),
-           "cap": {}}                                  # [§96.6] 본계좌 전략별 총액 상한(원) — 비운 전략은 없음
+           "cap": {},                                  # [§96.6] 본계좌 전략별 총액 상한(원) — 비운 전략은 없음
+           # [§96.9] 전략별 점수 방식(라이브 이름 → v1|v2|ai, 모의계좌는 모두 계좌 방식) · 본계좌 AI 기본 기준
+           "score_by": {}, "min_ai": min_ai_of(A) if acct in REAL_ACCOUNTS else None}
     # 누적 규칙 먼저(옛 보유분), 그 위에 현재 규칙
     for ln, r in (cfg.get("exit_rules") or {}).items():
         if r.get("stop") is not None:
@@ -227,8 +251,12 @@ def account(acct, cfg=None):
         out["priority"].append(ln)
         out["engine"][ln] = s["engine"]
         out["holding"][ln] = int(s["holding"])
+        ver = score_of(A, s) if acct in REAL_ACCOUNTS else out["strength_version"]
+        out["score_by"][ln] = ver
         sm = s.get("min_strength")
-        out["min_strength_by"][ln] = float(sm) if sm is not None else out["min_strength"]   # [§71] 전략별 강도 기준
+        # [§71] 전략별 기준(비우면 기본) — [§96.9] 본계좌는 그 전략 방식에 맞는 기본(AI 기본 / 강도 기본)
+        dflt = out["min_ai"] if (acct in REAL_ACCOUNTS and ver == "ai") else out["min_strength"]
+        out["min_strength_by"][ln] = float(sm) if sm is not None else dflt
         if s.get("exempt"):
             out["exempt"].add(ln)
         if s.get("skip_limitup"):                       # [§91] 상한가 마감 신호 제외
@@ -292,8 +320,10 @@ def diff(old, new):
                            f" → {'없음' if nl is None else format(int(nl), ',') + '원'}")
             if o.get("loss_action", "halt") != n.get("loss_action", "halt"):
                 out.append(f"{lab} 손실 한도 도달 시: {LOSS_ACTIONS[n.get('loss_action', 'halt')]}")
+            if min_ai_of(o) != min_ai_of(n):         # [§96.9]
+                out.append(f"{lab} AI 기본 기준 {min_ai_of(o):g} → {min_ai_of(n):g}")
         if o["min_strength"] != n["min_strength"]:
-            out.append(f"{lab} {'AI' if n.get('strength_version') == 'ai' else '강도'} 기준 "
+            out.append(f"{lab} {'강도 기본' if a in REAL_ACCOUNTS else '강도'} 기준 "
                        f"{o['min_strength']:g} → {n['min_strength']:g}")
         if o.get("slot_mode", "slots") != n.get("slot_mode", "slots"):
             out.append(f"{lab} 칸 방식 {SLOT_MODES[o.get('slot_mode', 'slots')]} → {SLOT_MODES[n.get('slot_mode', 'slots')]}")
@@ -310,7 +340,8 @@ def diff(old, new):
                            f"{', 손절 ' + format(s['stop'], 'g') + '%' if s['stop'] is not None else ''}"
                            f"{', 익절 +' + format(s['take'], 'g') + '%' if s['take'] is not None else ''}"
                            f"{', 상한가 마감 신호 제외' if s.get('skip_limitup') else ''}"
-                           f"{', 금액 상한 ' + format(int(s['cap']), ',') + '원' if s.get('cap') is not None else ''})")
+                           f"{', 금액 상한 ' + format(int(s['cap']), ',') + '원' if s.get('cap') is not None else ''}"
+                           f"{', 점수 ' + REAL_SCORE_VERSIONS[s['score']] if s.get('score') else ''})")
         for e in om:
             if e not in nm:
                 out.append(f"{lab} − {e} (보유분은 만기까지 그대로)")
@@ -322,6 +353,9 @@ def diff(old, new):
                       f"{_fmt(_v(om[e], k), k)}→{_fmt(_v(nm[e], k), k)}"
                       for k in ("slots", "exempt", "stop", "take", "min_strength", "skip_limitup", "cap")
                       if _v(om[e], k) != _v(nm[e], k)]
+                if (om[e].get("score") or None) != (nm[e].get("score") or None):           # [§96.9]
+                    _sl = lambda s: REAL_SCORE_VERSIONS[s["score"]] if s.get("score") else "계좌 기본"   # noqa: E731
+                    ch.append(f"점수 방식 {_sl(om[e])}→{_sl(nm[e])}")
                 if ch:
                     out.append(f"{lab} {e}: " + ", ".join(ch))
     return out
@@ -346,8 +380,10 @@ def _acct_block(A, real=False):
         dl = A.get("daily_loss_limit")
         out["daily_loss_limit"] = int(dl) if dl is not None else None
         out["loss_action"] = A.get("loss_action", "halt")
+        out["min_ai"] = min_ai_of(A)                                                 # [§96.9] AI 기본 기준
         for row, s in zip(out["strategies"], A["strategies"]):                       # [§96.6] 전략 총액 상한
             row["cap"] = int(s["cap"]) if s.get("cap") is not None else None
+            row["score"] = s.get("score") or None                                    # [§96.9] 전략별 점수 방식
     return out
 
 

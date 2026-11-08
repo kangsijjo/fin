@@ -258,6 +258,14 @@ def _th(strat):
     return STRENGTH_TH.get(strat, MIN_STRENGTH_SCORE)
 
 
+# [§96.9] 전략별 점수 방식(라이브 이름 → v1|v2|ai) — 본계좌는 전략마다 고를 수 있고, 모의계좌는 모두 계좌 방식(STRENGTH_VERSION)
+SCORE_BY = dict(_ACC.get("score_by") or {})
+
+
+def _ver(strat):
+    return SCORE_BY.get(str(strat), STRENGTH_VERSION)
+
+
 # [2026-10-26 §75] 칸 방식 — "slots"(전략별 칸) | "pool"(칸 없음: 조건 넘은 신호를 전체 MAX_CONCURRENT 까지,
 # 같은 날 후보는 전략 안 순위(그 전략 과거 강도 중 상위 몇 %) 높은 순). 대시보드 '모의매매 전략 설정'에서 고름.
 SLOT_MODE = _ACC.get("slot_mode", "slots")
@@ -272,10 +280,10 @@ def _pool_order(cands, strength):
         st = str(sig.get("strategy", ""))
         sc = strength.get((str(sig.get("code", "")).zfill(6), st))
         try:
-            if STRENGTH_VERSION == "ai":     # [§96.7] 개선 AI 점수는 이미 '그 전략 안 순위'(5 = 평균) — 그대로 ×10
+            if _ver(st) == "ai":             # [§96.7] 개선 AI 점수는 이미 '그 전략 안 순위'(5 = 평균) — 그대로 ×10
                 p = None if sc is None else float(sc) * 10
-            else:
-                p = _SM.rank_pct(_LCm.engine_name(st), st, sc, STRENGTH_VERSION)
+            else:                            # 강도는 그 전략 과거 강도 중 백분위 → 방식이 섞여도 같은 '전략 안 순위' 척도
+                p = _SM.rank_pct(_LCm.engine_name(st), st, sc, _ver(st))
         except Exception:
             p = None if sc is None else float(sc) * 10
         return (p is None, -(p or 0.0))
@@ -285,7 +293,7 @@ def _pool_order(cands, strength):
 
 def _strength_gate(strat, sc):
     """주문 직전 강도 게이트 → (통과여부, 사유). 면제 전략은 강도와 무관하게 통과(kis_trader 와 동일 규약)."""
-    w = "AI 점수" if STRENGTH_VERSION == "ai" else "강도"     # [§96.7] 본계좌가 개선 AI 를 고른 경우 표기
+    w = "AI 점수" if _ver(strat) == "ai" else "강도"     # [§96.7·96.9] 그 전략이 개선 AI 면 표기
     if strat in STRENGTH_EXEMPT:
         return True, (f"{w} 면제({sc:.2f})" if sc is not None else f"{w} 면제(무기록)")
     if sc is None:
@@ -860,13 +868,14 @@ def _strength_map(sigs):
             df = df[(_acc == STRENGTH_ACCOUNT) if REAL else _acc.str.startswith("kiwoom")]
         df["code"] = df["code"].astype(str).str.zfill(6)
         df["score_ic"] = pd.to_numeric(df["score_ic"], errors="coerce")
-        # [2026-10-22] 강도 방식(설정): v2 면 전략별 점수(score_v2)를 쓰고, v2 모델이 없는 전략만 v1 로 대체
-        if STRENGTH_VERSION == "v2" and "score_v2" in df.columns:
+        # 강도 방식(설정) — [§96.9] 전략마다 따로(본계좌). v2: 전략별 점수(score_v2), v2 모델이 없는 전략만 v1 로 대체
+        #   ai: [§96.7] score_ai 만(척도가 달라 강도로 대신하지 않음). AI 모델에 없는 전략은 점수 없음 → 면제가 아니면 안 삼
+        ver = df["strategy"].astype(str).map(_ver) if "strategy" in df.columns else pd.Series(STRENGTH_VERSION, index=df.index)
+        if "score_v2" in df.columns:
             _v2 = pd.to_numeric(df["score_v2"], errors="coerce")
-            df["score_ic"] = _v2.where(_v2.notna(), df["score_ic"])
-        elif STRENGTH_VERSION == "ai":
-            # [§96.7] 본계좌 '개선 AI' — score_ai 만(척도가 달라 강도로 대신하지 않음). AI 모델에 없는 전략은 점수 없음 → 면제가 아니면 안 삼
-            df["score_ic"] = pd.to_numeric(df["score_ai"], errors="coerce") if "score_ai" in df.columns else float("nan")
+            df["score_ic"] = df["score_ic"].where(~((ver == "v2") & _v2.notna()), _v2)
+        _ai = pd.to_numeric(df["score_ai"], errors="coerce") if "score_ai" in df.columns else float("nan")
+        df["score_ic"] = df["score_ic"].where(ver != "ai", _ai)
         out = {}
         for _, r in df.iterrows():
             if pd.notna(r["score_ic"]):

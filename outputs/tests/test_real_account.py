@@ -550,3 +550,68 @@ def test_ops_files_wired():
         assert f"StockAI\\{n}" in ps
     wd = open(os.path.join(OUTPUTS, "watchdog.py"), encoding="utf-8").read()
     assert "real_kiwoom_{TODAY_STR}.log" in wd and "def _real_active" in wd
+
+
+def test_real_score_per_strategy_mixes_ai_and_strength(real_kt, monkeypatch):
+    """§96.9 본계좌 전략별 점수 방식 — 같은 날 A 전략은 AI 점수, B 전략은 강도 v2 로 거르고, 기준·문구도 전략마다."""
+    kt, RA, tmp = real_kt
+    log = tmp / "db" / "signal_strength_log.csv"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([
+        {"signal_date": SIG_DATE, "account": "real_kiwoom", "strategy": "rsi_vol", "code": "111111",
+         "score_ic": 9.0, "score_v2": 8.0, "score_ai": 6.2},
+        {"signal_date": SIG_DATE, "account": "real_kiwoom", "strategy": "gc_for3d", "code": "222222",
+         "score_ic": 4.0, "score_v2": 7.5, "score_ai": 1.0},
+        {"signal_date": SIG_DATE, "account": "real_kiwoom", "strategy": "macd_zx", "code": "333333",
+         "score_ic": 4.0, "score_v2": None, "score_ai": 9.0},          # v2 모델 없음 → v1 대체(종전 규칙)
+    ]).to_csv(log, index=False, encoding="utf-8-sig")
+    sigs = [{"signal_date": SIG_DATE, "code": c, "strategy": s}
+            for c, s in (("111111", "rsi_vol"), ("222222", "gc_for3d"), ("333333", "macd_zx"))]
+    monkeypatch.setattr(kt, "STRENGTH_VERSION", "v2")
+    monkeypatch.setattr(kt, "SCORE_BY", {"rsi_vol": "ai", "gc_for3d": "v2"})
+    m = kt._strength_map(sigs)
+    assert m == {("111111", "rsi_vol"): 6.2, ("222222", "gc_for3d"): 7.5, ("333333", "macd_zx"): 4.0}
+    monkeypatch.setattr(kt, "STRENGTH_TH", {"rsi_vol": 5.0, "gc_for3d": 5.7})
+    assert "AI 점수" in kt._strength_gate("rsi_vol", 6.2)[1] and "강도" in kt._strength_gate("gc_for3d", 7.5)[1]
+    import strength_model as SM
+    monkeypatch.setattr(SM, "rank_pct", lambda e, st, sc, ver: 80.0)
+    order = kt._pool_order(sigs, m)                      # AI 6.2 → 62, 강도 → 백분위 80 (같은 '전략 안 순위' 척도)
+    assert [s["strategy"] for s in order][0] in ("gc_for3d", "macd_zx") and order[-1]["strategy"] == "rsi_vol"
+
+
+def test_live_config_per_strategy_score_and_two_defaults(tmp_path, monkeypatch):
+    monkeypatch.setenv("LIVE_CONFIG_PATH", str(tmp_path / "lc.json"))
+    import live_config as LC
+    c = LC.load()
+    R = c["accounts"]["kiwoom_real"]
+    R.pop("_mirror")
+    R["min_strength"], R["min_ai"] = 5.7, 5.2
+    R["strategies"][0]["score"] = "ai"
+    R["strategies"][0]["min_strength"] = None
+    R["strategies"][1]["score"] = None
+    R["strategies"][1]["min_strength"] = None
+    assert not LC.validate(c)
+    cfg, ch = LC.save(c)
+    A = LC.account("kiwoom_real")
+    l0, l1 = (LC.live_name(s["engine"]) for s in R["strategies"][:2])
+    assert A["score_by"][l0] == "ai" and A["score_by"][l1] == "v2", "비운 전략은 계좌 기본(v2)"
+    assert A["min_strength_by"][l0] == 5.2, "AI 전략 기준 칸을 비우면 AI 기본 기준"
+    assert A["min_strength_by"][l1] == 5.7, "강도 전략은 강도 기본 기준"
+    c2 = LC.load()
+    c2["accounts"]["kiwoom_real"]["strategies"][1].update(score="v1", min_strength=6.3)
+    LC.save(c2)
+    A = LC.account("kiwoom_real")
+    assert A["score_by"][l1] == "v1" and A["min_strength_by"][l1] == 6.3
+    assert any("AI 기본 기준" in x for x in ch) and any("점수 방식 계좌 기본→개선 AI" in x for x in ch), ch
+    assert LC.load()["accounts"]["kiwoom_real"]["strategies"][0]["score"] == "ai", "저장·다시 읽기"
+    assert set(LC.account("kiwoom")["score_by"].values()) == {LC.account("kiwoom")["strength_version"]}
+    bad = LC.load()
+    bad["accounts"]["kiwoom"]["strategies"][0]["score"] = "ai"
+    assert LC.validate(bad), "전략별 점수 방식은 본계좌만"
+    bad = LC.load()
+    bad["accounts"]["kiwoom_real"]["strategies"][0]["score"] = "v9"
+    assert LC.validate(bad)
+    old = LC.load()
+    old["accounts"]["kiwoom_real"].pop("min_ai")
+    old["accounts"]["kiwoom_real"]["strength_version"] = "ai"
+    assert LC.min_ai_of(old["accounts"]["kiwoom_real"]) == 5.7, "예전 형식(계좌 전체 AI)은 그 기준을 AI 기본으로"

@@ -2889,7 +2889,8 @@ def _lc_view(cfg):
                                "strategies": [dict(x, live=LC.live_name(x["engine"])) for x in A["strategies"]]}
         if a in LC.REAL_ACCOUNTS:
             view["accounts"][a].update(daily_loss_limit=A.get("daily_loss_limit"),
-                                       loss_action=A.get("loss_action", "halt"), mirror=bool(A.get("_mirror")))
+                                       loss_action=A.get("loss_action", "halt"), mirror=bool(A.get("_mirror")),
+                                       min_ai=LC.min_ai_of(A))                       # [§96.9] AI 기본 기준
     return view
 
 
@@ -2956,6 +2957,7 @@ def _lc_from_request(b):
             if a in LC.REAL_ACCOUNTS:               # [§96.6] 본계좌 전략 총액 상한(원) — 비우면 없음
                 c = num(x.get("cap"))
                 rows[-1]["cap"] = None if c is None else int(c)
+                rows[-1]["score"] = str(x.get("score") or "") or None    # [§96.9] 전략별 점수 방식(비우면 계좌 기본)
         new["accounts"][a] = {"min_strength": float(A.get("min_strength", 5.7)),
                               "slot_mode": str(A.get("slot_mode") or "slots"),
                               "strength_version": str(A.get("strength_version") or "v2"), "strategies": rows}
@@ -2963,6 +2965,8 @@ def _lc_from_request(b):
             dl = A.get("daily_loss_limit")
             new["accounts"][a]["daily_loss_limit"] = None if dl in (None, "") else int(float(dl))
             new["accounts"][a]["loss_action"] = str(A.get("loss_action") or "halt")
+            mi = A.get("min_ai")                    # [§96.9] AI 기본 기준(비우면 5.0)
+            new["accounts"][a]["min_ai"] = None if mi in (None, "") else float(mi)
     return new
 
 
@@ -3017,9 +3021,9 @@ def api_live_config_save():
     try:
         import strength_model as SM
         _full = LC.load()                           # [§96] 본계좌(저장 안 했으면 짝 모의계좌 값)까지
-        v2_missing = sorted({s["engine"] for a in LC.ALL_ACCOUNTS
-                             if (_full["accounts"].get(a) or {}).get("strength_version") == "v2"
-                             for s in _full["accounts"][a]["strategies"] if not SM.load_model(s["engine"])})
+        v2_missing = sorted({s["engine"] for a in LC.ALL_ACCOUNTS if _full["accounts"].get(a)      # [§96.9] 전략별 방식
+                             for s in _full["accounts"][a]["strategies"]
+                             if LC.score_of(_full["accounts"][a], s) == "v2" and not SM.load_model(s["engine"])})
     except Exception:
         v2_missing = []
     if v2_missing and not regen:
@@ -3031,7 +3035,7 @@ def api_live_config_save():
     try:      # [§96.7] 본계좌가 개선 AI 인데 AI 모델에 없는 전략 → AI 재학습(가상매매 AI 포트 저장과 같은 처리)
         _ae = set(_ai_model_engines()["ai_engines"])
         _R = _full["accounts"].get("kiwoom_real") or {}
-        ai_miss = sorted({s["engine"] for s in _R.get("strategies", [])} - _ae) if _R.get("strength_version") == "ai" else []
+        ai_miss = sorted({s["engine"] for s in _R.get("strategies", []) if LC.score_of(_R, s) == "ai"} - _ae)   # [§96.9]
     except Exception:
         ai_miss = []
     if ai_miss:            # 재학습 전 신호의 AI 점수가 비어도 09:00 매수 직전 재확인(verify_strength)이 다시 채점한다
@@ -3101,7 +3105,9 @@ def get_kiwoom_real():
                      "strategies": A["priority"], "slot_mode": A["slot_mode"], "cap": A.get("cap") or {},   # [§96.6]
                      "score": A.get("strength_version", "v2"),                                           # [§96.7]
                      "score_label": LC.REAL_SCORE_VERSIONS.get(A.get("strength_version", "v2"), ""),
-                     "min_strength": A.get("min_strength")}
+                     "min_strength": A.get("min_strength"), "min_ai": A.get("min_ai"),                  # [§96.9]
+                     "score_by": A.get("score_by") or {},
+                     "min_by": A.get("min_strength_by") or {}}
     out["dryrun"] = _real_dryrun_rows()
     try:
         led = pd.read_csv(REAL_DIR / "kiwoom_positions.csv", dtype=str) if (REAL_DIR / "kiwoom_positions.csv").exists() else None
@@ -5923,20 +5929,27 @@ function lcRender(){
   const opts=sel=>_lcSorted().map(e=>`<option value="${_lcEsc(e.engine)}"${e.engine===sel?' selected':''}>${_lcEsc(e.engine)} — ${_lcEsc(e.title)}</option>`).join('');
   const card=a=>{
     const A=D[a], tot=A.strategies.reduce((t,s)=>t+(Number(s.slots)||0),0);
+    const _R=a==='kiwoom_real';
     const rows=A.strategies.map((s,i)=>{ const e=_lcEng(s.engine);
+      const sv=_R?(s.score||A.strength_version||'v2'):(A.strength_version||'v2');      // [§96.9] 그 전략 점수 방식
+      const dTh=(_R&&sv==='ai')?(A.min_ai??5):A.min_strength;                         // 비운 기준 칸이 쓰는 기본값
+      const SVL={v1:'💪 강도 v1',v2:'💪 강도 v2',ai:'🤖 AI'};
       return `<tr>
         <td style="white-space:nowrap">${i+1}
           <button class="runbtn" style="padding:0 6px" title="위로(먼저 슬롯을 채움)" onclick="lcMove('${a}',${i},-1)">▲</button>
           <button class="runbtn" style="padding:0 6px" title="아래로" onclick="lcMove('${a}',${i},1)">▼</button></td>
         <td><select style="${inp};max-width:330px" onchange="lcSet('${a}',${i},'engine',this.value)">${opts(s.engine)}</select>
           ${e.note?`<div style="color:#fbbf24;font-size:11px;max-width:340px">⚠ ${_lcEsc(e.note)}</div>`:''}
-          ${(A.strength_version||'v2')==='v2'?((L.v2_models||{})[s.engine]?`<div style="color:#64748b;font-size:11px">v2 모델: ${_lcEsc(L.v2_models[s.engine].trained)} · 학습 ${L.v2_models[s.engine].n}건 · 지표 ${L.v2_models[s.engine].n_ic}개</div>`
+          ${sv==='v2'?((L.v2_models||{})[s.engine]?`<div style="color:#64748b;font-size:11px">v2 모델: ${_lcEsc(L.v2_models[s.engine].trained)} · 학습 ${L.v2_models[s.engine].n}건 · 지표 ${L.v2_models[s.engine].n_ic}개</div>`
             :'<div style="color:#fbbf24;font-size:11px">v2 모델 없음 — 저장하면 학습(1~3분), 그 전엔 v1 점수로 대체</div>'):''}
-          ${A.strength_version==='ai'?((L.ai_engines||[]).includes(s.engine)?`<div style="color:#64748b;font-size:11px">개선 AI 모델 포함(학습 ${_lcEsc(L.ai_trained||'')})</div>`
+          ${sv==='ai'?((L.ai_engines||[]).includes(s.engine)?`<div style="color:#64748b;font-size:11px">개선 AI 모델 포함(학습 ${_lcEsc(L.ai_trained||'')})</div>`
             :'<div style="color:#fbbf24;font-size:11px">개선 AI 모델에 없음 — 저장하면 AI 재학습(수 분), 그 전엔 점수 없음(면제가 아니면 안 삼)</div>'):''}</td>
         <td>${A.slot_mode==='pool'?'<span style="color:#64748b;font-size:11px" title="칸 없음 모드 — 전략별 칸 수는 쓰지 않음">공유</span>':`<input type="number" min="1" max="10" step="1" value="${s.slots}" style="${inp};width:52px" onchange="lcSet('${a}',${i},'slots',this.value)">`}</td>
         <td style="text-align:center"><input type="checkbox" ${s.exempt?'checked':''} onchange="lcSet('${a}',${i},'exempt',this.checked)" title="체크하면 강도 기준과 상관없이 삼(후보가 많으면 강도 높은 순)"></td>
-        <td>${s.exempt?'<span style="color:#64748b;font-size:11px">면제</span>':`<input type="number" min="0" max="10" step="0.1" placeholder="기본 ${A.min_strength}" value="${s.min_strength==null?'':s.min_strength}" style="${inp};width:70px${s.min_strength!=null?';border-color:#38bdf8':''}" title="이 전략만의 강도 기준 — 비우면 계좌 기본값(${A.min_strength})" onchange="lcSet('${a}',${i},'min_strength',this.value)">`}</td>
+        <td>${s.exempt?'<span style="color:#64748b;font-size:11px">면제</span>':`<input type="number" min="0" max="10" step="0.1" placeholder="기본 ${dTh}" value="${s.min_strength==null?'':s.min_strength}" style="${inp};width:70px${s.min_strength!=null?';border-color:#38bdf8':''}" title="이 전략만의 ${sv==='ai'?'AI':'강도'} 기준 — 비우면 계좌 기본값(${dTh})" onchange="lcSet('${a}',${i},'min_strength',this.value)">`}</td>
+        ${_R?`<td><select style="${inp};font-size:11px${s.score?';border-color:#fcd34d':''}" title="[§96.9] 이 전략만의 점수 방식 — 비우면 위 '기본 매매 방식'. 바꾸면 기준 칸도 그 척도로(강도 5.7 ≠ AI 5)" onchange="lcSet('${a}',${i},'score',this.value)">
+            <option value=""${!s.score?' selected':''}>기본(${SVL[A.strength_version||'v2']})</option>
+            ${['v2','v1','ai'].map(k=>`<option value="${k}"${s.score===k?' selected':''}>${SVL[k]}</option>`).join('')}</select></td>`:''}
         <td><input type="number" step="1" min="-50" max="-1" placeholder="없음" value="${s.stop==null?'':s.stop}" style="${inp};width:64px" onchange="lcSet('${a}',${i},'stop',this.value)"></td>
         <td><input type="number" step="1" min="1" max="300" placeholder="없음" value="${s.take==null?'':s.take}" style="${inp};width:64px" onchange="lcSet('${a}',${i},'take',this.value)"></td>
         <td style="text-align:center"><input type="checkbox" ${s.skip_limitup?'checked':''} onchange="lcSet('${a}',${i},'skip_limitup',this.checked)" title="체크하면 신호일 상한가 마감 종목의 이 전략 신호는 사지 않음"></td>
@@ -5954,9 +5967,11 @@ function lcRender(){
     return `<div style="flex:1;min-width:560px;background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:10px 12px">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
         <b style="font-size:14px">${_lcEsc(L.config.accounts[a].label)}</b>
-        <label style="font-size:13px;color:#cbd5e1" title="전략별 칸을 비운 전략에 쓰는 기본값">기본 ${A.strength_version==='ai'?'AI':'강도'} 기준 ≥
+        <label style="font-size:13px;color:#cbd5e1" title="전략별 칸을 비운 ${a==='kiwoom_real'?'강도매매 ':''}전략에 쓰는 기본값">기본 강도 기준 ≥
           <input type="number" min="0" max="10" step="0.1" value="${A.min_strength}" style="${inp};width:62px" onchange="lcSetAcc('${a}','min_strength',this.value)"></label>
-        ${a==='kiwoom_real'?'<span style="font-size:13px;font-weight:700;color:#fcd34d" title="[§96.7] 본계좌가 후보를 고르고 거르는 점수 — 전략·칸·손절·익절·금액 상한·손실 한도는 이 칸 그대로">매매 방식</span>':''}
+        ${a==='kiwoom_real'?`<label style="font-size:13px;color:#cbd5e1" title="[§96.9] 기준 칸을 비운 AI매매 전략에 쓰는 기본값 — AI 점수는 5 = 그 전략 평균(강도 5.7 과 걸러지는 비율이 다름)">기본 AI 기준 ≥
+          <input type="number" min="0" max="10" step="0.1" value="${A.min_ai??5}" style="${inp};width:62px" onchange="lcSetAcc('${a}','min_ai',this.value)"></label>
+          <span style="font-size:13px;font-weight:700;color:#fcd34d" title="[§96.7·96.9] 전략 줄의 '점수 방식'을 비운 전략이 쓰는 방식 — 전략마다 따로 고르려면 아래 표 '점수 방식' 칸">기본 매매 방식</span>`:''}
         <select style="${inp};font-size:12px${a==='kiwoom_real'?';border-color:#fcd34d;font-weight:600':''}" title="v1: 라이브 6전략 공통 가중치(종전) / v2: 전략마다 자기 과거 매매로 학습(방향이 해마다 유지된 지표만·시장 지표 제외, §62). v2 권장 기준 5.5${a==='kiwoom_real'?' / 개선 AI(본계좌만): 강도매매 탭 AI 포트와 같은 점수(0~10, 5 = 그 전략 평균) — 11-02 부터 쓰여 실전 기록이 아직 짧음':''}" onchange="lcSetAcc('${a}','strength_version',this.value)">
           <option value="v1"${(A.strength_version||'v2')==='v1'?' selected':''}>${a==='kiwoom_real'?'💪 강도매매 — v1(공통·예전 방식)':'강도 v1(공통·예전 방식)'}</option>
           <option value="v2"${(A.strength_version||'v2')==='v2'?' selected':''}>${a==='kiwoom_real'?'💪 강도매매 — v2(전략별)':'강도 v2(전략별)'}</option>
@@ -5966,7 +5981,7 @@ function lcRender(){
           <option value="pool"${A.slot_mode==='pool'?' selected':''}>칸 없음(전체 10종목)</option></select>
         ${A.slot_mode==='pool'?`<span style="font-size:12px;color:#38bdf8">칸 없음 · 전체 ${L.slots_total}종목</span>`:`<span style="font-size:12px;color:${tot===L.slots_total?'#10b981':'#ef4444'}">슬롯 합 ${tot}/${L.slots_total}</span>`}</div>
       <table style="font-size:12px;margin-top:6px;width:100%"><thead><tr><th>순서</th><th>전략</th><th>슬롯</th>
-        <th title="기준과 상관없이 삼">${A.strength_version==='ai'?'AI':'강도'} 면제</th><th title="전략마다 다른 기준 — 비우면 위의 계좌 기본값">${A.strength_version==='ai'?'AI':'강도'} 기준</th><th title="${_lcEsc(stopSem)}">손절 %</th><th title="${_lcEsc(takeSem)}">익절 %</th><th title="신호일에 상한가로 마감(등락률 ≥ +29.5%)한 종목의 이 전략 신호는 사지 않음 — 전략마다 효과가 갈려(§91 검증 — 좋아짐: 52주 신고가·외국인 계열·MACD / 나빠짐: 500일 신고가·신용·스토캐스틱) 전략별로 고름. 토요일 탐색이 해마다 검증해 권장/유지를 알려 줌(§91)">상한가 제외</th>${a==='kiwoom_real'?'<th title="전략 총액 상한(원) — 비우면 주문가능금액을 남은 빈 칸으로 균등, 넣으면 (상한 − 이미 산 금액) ÷ 이 전략 남은 빈 칸">금액 상한(원)</th>':''}<th>보유</th><th></th></tr></thead>
+        <th title="기준과 상관없이 삼">${a==='kiwoom_real'?'':'강도 '}면제</th><th title="전략마다 다른 기준 — 비우면 위의 계좌 기본값(본계좌는 그 전략 점수 방식의 기본값)">${a==='kiwoom_real'?'':'강도 '}기준</th>${a==='kiwoom_real'?'<th title="[§96.9] 전략마다 강도매매(v2·v1) / AI매매 — 비우면 기본 매매 방식">점수 방식</th>':''}<th title="${_lcEsc(stopSem)}">손절 %</th><th title="${_lcEsc(takeSem)}">익절 %</th><th title="신호일에 상한가로 마감(등락률 ≥ +29.5%)한 종목의 이 전략 신호는 사지 않음 — 전략마다 효과가 갈려(§91 검증 — 좋아짐: 52주 신고가·외국인 계열·MACD / 나빠짐: 500일 신고가·신용·스토캐스틱) 전략별로 고름. 토요일 탐색이 해마다 검증해 권장/유지를 알려 줌(§91)">상한가 제외</th>${a==='kiwoom_real'?'<th title="전략 총액 상한(원) — 비우면 주문가능금액을 남은 빈 칸으로 균등, 넣으면 (상한 − 이미 산 금액) ÷ 이 전략 남은 빈 칸">금액 상한(원)</th>':''}<th>보유</th><th></th></tr></thead>
         <tbody>${rows}</tbody></table>
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
         ${A.strategies.length<L.max_strategies?`<button class="runbtn" onclick="lcAdd('${a}')">+ 전략 추가</button>`:`<span style="font-size:11px;color:#64748b">전략은 최대 ${L.max_strategies}개</span>`}
@@ -6008,10 +6023,11 @@ function lcSet(a,i,k,v){
   else if(k==='exempt'){ s.exempt=!!v; if(s.exempt) s.min_strength=null; }   // 면제면 전략별 기준은 의미 없음
   else if(k==='stop'||k==='take'||k==='min_strength'||k==='cap') s[k]=(v===''||v==null)?null:Number(v);   // [§96.6] cap = 본계좌 전략 총액 상한
   else if(k==='skip_limitup') s.skip_limitup=!!v;                              // [§91] 상한가 마감 신호 제외
+  else if(k==='score') s.score=v||null;                                        // [§96.9] 본계좌 전략별 점수 방식
   else if(k==='engine'){ s.engine=v; const e=_lcEng(v); s.holding=e.holding; }
   lcRender();
 }
-function lcSetAcc(a,k,v){ _lcDraft[a][k]=(k==='min_strength')?Number(v):(k==='daily_loss_limit'?((v===''||v==null)?null:Number(v)):v); lcRender(); }
+function lcSetAcc(a,k,v){ _lcDraft[a][k]=(k==='min_strength')?Number(v):((k==='daily_loss_limit'||k==='min_ai')?((v===''||v==null)?null:Number(v)):v); lcRender(); }
 function lcMove(a,i,d){ const S=_lcDraft[a].strategies, j=i+d; if(j<0||j>=S.length) return; [S[i],S[j]]=[S[j],S[i]]; lcRender(); }
 function lcDel(a,i){ const S=_lcDraft[a].strategies; if(S.length<=1){ alert('전략은 최소 1개'); return; } S.splice(i,1); lcRender(); }
 function lcAdd(a){
@@ -6083,7 +6099,7 @@ function realRender(){
       <button class="runbtn" onclick="realLoad()" title="다시 불러오기">↺</button></div>
     <div style="margin-top:8px;font-size:12px">${conn}</div>
     <div style="margin-top:6px;font-size:12px;color:#cbd5e1">일일 손실 한도: <b>${lim}</b> · ${lc}</div>
-    <div style="margin-top:4px;font-size:12px;color:#cbd5e1">매매 방식: <b>${C.score==='ai'?'🤖 AI매매':'💪 강도매매'}</b> (${_lcEsc(C.score_label||'')} · 기본 기준 ${C.min_strength??'-'}) · 전략 총액 상한: <b>${capTxt}</b></div>
+    <div style="margin-top:4px;font-size:12px;color:#cbd5e1">매매 방식(전략별): <b>${_realScoreTxt(C)}</b> · 전략 총액 상한: <b>${capTxt}</b></div>
     ${halt}${ks}${wMir}${wFb}${wRun}
     <details style="margin-top:8px"><summary style="cursor:pointer;font-size:12px;color:#94a3b8">모드 변경 기록 · 동작 방식</summary>
       <div style="font-size:12px;color:#cbd5e1;margin-top:4px;line-height:1.7">${hist||'<span style="color:#64748b">아직 없음</span>'}
@@ -6135,7 +6151,7 @@ async function realSetMode(mode){
     const lim=C.daily_loss_limit?('-'+fmt(C.daily_loss_limit)+'원'):'없음(설정 권장)';
     if(!confirm('[1/2] 🔴 키움 본계좌 실주문을 켭니다.\\n\\n다음 매매 시각(평일 09:00 매수 · 15:21 매도)부터 실제 돈으로 주문합니다.'
       +'\\n· 전략: '+(C.strategies||[]).join(', ')+(C.mirror?' (본계좌 설정 저장 전 — 안C 설정을 따름)':'')
-      +'\\n· 매매 방식: '+(C.score==='ai'?'AI매매':'강도매매')+' ('+(C.score_label||'')+', 기본 기준 '+(C.min_strength??'-')+')'
+      +'\\n· 매매 방식(전략별): '+_realScoreTxt(C)
       +'\\n· 주문가능금액(100% 현금)을 빈 칸 수로 나눠 매수(현재가 +2% 지정가)'
       +(Object.keys(C.cap||{}).length?'\\n· 전략 총액 상한: '+Object.entries(C.cap).map(([k,v])=>k+' '+fmt(v)+'원').join(', ')+' (나머지 전략은 균등)':'')
       +'\\n· 일일 손실 한도: '+lim
@@ -6259,6 +6275,12 @@ function vcRender(){
 // ══ 2026-10-23 전략 겹침 경고(§72) — 모의계좌·가상매매 편집 중인 값으로 바로 점검(서버 표: db/strategy_overlap.json) ══
 let _ovT=null; const _ovHtml={lc:'',vc:''};
 // ══ 2026-10-30 §86 전략 추천 — 지금까지 돌린 백테스트 종합(기간 백테스트 기록 전부 + 주간 전체) · 편집 중인 값 기준 ══
+// [§96.9] 본계좌 전략별 점수 방식·기준 한 줄 — 예: gc_for3d 🤖AI ≥5 · macd_zx 💪강도 v2 ≥5.7
+function _realScoreTxt(C){
+  const L={v1:'💪강도 v1',v2:'💪강도 v2',ai:'🤖AI'}, by=C.score_by||{}, th=C.min_by||{};
+  const ks=(C.strategies||Object.keys(by));
+  return ks.length?ks.map(k=>`${k} ${L[by[k]||C.score]||by[k]||C.score} ≥${th[k]??'-'}`).join(' · '):((L[C.score]||C.score||'-'));
+}
 let _recoT=null; const _recoHtml={};
 // [§98] 이 전략이 다른 곳(키움·KIS 모의·본계좌·AI·강도 가상)에서도 쓰이면 어디인지 배지로 — 같은 전략을 겹쳐 시험하지 않게
 function _useBadge(uses){
